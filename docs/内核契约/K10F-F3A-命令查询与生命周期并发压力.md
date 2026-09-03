@@ -25,7 +25,7 @@ Transaction 的 Document activity 仅用于 `begin` 准入，不代表整个事�
 
 - 同步门到达/放行、future 观察及活动计数观察均有 5 秒期限；使用条件变量或有界 yield，不依赖随机 sleep 建立交错。
 - 同步门的 RAII 释放对象在 future 之后声明，主线程断言/异常退出时先释放 handler，再析构 future；避免测试自身把线程永久留在门上。
-- 基础设施 CTest 统一增加 120 秒外层超时。这是潜在生产死锁的最后防护，不替代测试辅助等待的期限，也不是证明所有生产阻塞操作已有超时。
+- F3A 引入基础设施 CTest 的 120 秒外层超时；后续 F3B 因多轮持久化压力扩大为 300 秒，同步点仍为 5 秒。这是潜在生产死锁的最后防护，不替代测试辅助等待的期限，也不是证明所有生产阻塞操作已有超时。
 - Closing 探针只是测试专用 `ISnapshotStore` 装饰器，继续委托真实文件存储；未在生产类中增加注入开关。
 - 每轮证据保留于 `build/vs2022/tests/stress-contract-runs/<唯一目录>/`，包括 `state.db` 和快照文件。拒绝复用已存在的目录，不递归清理输入路径；失败时 Catch2 输出轮次和证据路径。
 
@@ -55,6 +55,6 @@ cmake -DLCNC_SOURCE_ROOT=J:/Code/LaserCNCv3.0 -P cmake/VerifyKernelBoundaries.cm
 
 ## 剩余边界
 
-F3B 仍需真实 Task/Workflow 运行中取消与完成竞态、close vs Task、模块失败重复回滚。本节点只证明上述明确交错，不宣称 AppKernel 配置/bootstrap/shutdown 可以由任意多个 Host 线程无约束并发调用，也不宣称覆盖所有调度顺序。
+F3A 交付时尚未完成的 Task/Workflow 运行中取消与完成竞态、close vs Task、模块失败重复回滚，现已由 [F3B](K10F-F3B-取消竞态与生命周期压力.md) 补齐，见 [完整 F3 验收](K10F-F3-并发与生命周期验收.md)。本节点只证明上述明确交错，不宣称 AppKernel 配置/bootstrap/shutdown 可以由任意多个 Host 线程无约束并发调用，也不宣称覆盖所有调度顺序。
 
 F4 性能/内存、F5 ASan 和最终门禁仍未完成。测试中的少量对象是并发一致性载荷，不是性能基线；软件测试不代表物理设备或机器安全准入。

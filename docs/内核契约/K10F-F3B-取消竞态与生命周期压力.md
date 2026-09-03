@@ -2,7 +2,7 @@
 
 ## 范围
 
-承接 F3A，只完善内核可靠性，不增加上层模块或生产公共 API。新增压力测试复用现有 Catch2/CTest、ModuleRegistrar、ExecutionGateway、真实 BS 线程池、SQLite 和文件快照。运行记录与汇总门禁尚在收集中，本文件不提前宣称完整 F3 或 Kernel Frozen。
+承接 F3A，只完善内核可靠性，不增加上层模块或生产公共 API。新增压力测试复用现有 Catch2/CTest、ModuleRegistrar、ExecutionGateway、真实 BS 线程池、SQLite 和文件快照。F3B 已通过汇总门禁，完整结论见 [F3 验收](K10F-F3-并发与生命周期验收.md)；Kernel 尚未 Frozen。
 
 ## 实测发现与修复
 
@@ -37,14 +37,15 @@ Module 的健康对照配置测试专用 Inline executor，仅证明组合可重
 
 逐轮数据仍保留在 `build/vs2022/tests/stress-contract-runs/`，不递归清理传入路径。测试专用 gate、handler 和快照装饰器不进入生产目标。
 
-## 本地检查点证据
+## 本地检查点与最终汇总证据
 
 - 最终 Debug 全集 250/250 通过，443.37 秒；包含新增八个 F3B 用例、既有 F3A、故障注入与独立进程恢复。
 - Debug/Release 自有代码均已在 `/W4 /WX /permissive-` 下构建通过。
 - 纯生产 Release 构建通过；31 个工程，测试/contract/Catch2 工程 0，CTest 文件 0。架构扫描通过 69 个公共头文件、133 个生产源文件。
 - 七个 Task/Workflow 专项在开发过程中均已通过；模块健康对照修正后独立运行通过。开发期综合日志中的旧健康对照失败不计为最终通过证据，以最终 Debug 全集为准。
-- Release 全集仍在运行；最终版本完整 F3 重复矩阵与汇总结论待补齐。本次只提交本地修复检查点，不推送远端认证节点。
+- Release 全集 250/250 通过，432.64 秒。
+- 当前代码完整 F3 矩阵的 12 个用例各重复 3 次，36 次执行全部通过（768.56 秒）；其中 F3B 的七个运行时用例累计 420 个独立持久化轮次，模块用例累计 180 次失败组合及 180 次健康对照。修复检查点 `d7e56cb` 与最终 F3 验收一起作为远端重要节点交付。
 
-日志：`build/k10f-f3b-debug-tests.log`、`release-tests.log`、`debug-build.log`、`release-build.log`、`production-build.log`（后三种及 Release 日志文件名均带相同 `k10f-f3b-` 前缀）；开发期专项为 `k10f-f3b-task-focused.log`、`k10f-f3b-focused.log`、`k10f-f3b-module-focused.log`。数据文件和本机日志不进入 Git。
+日志均位于 `build/`：全集为 `k10f-f3b-debug-tests.log`、`k10f-f3b-release-tests.log`，构建为 `k10f-f3b-debug-build.log`、`k10f-f3b-release-build.log`、`k10f-f3b-production-build.log`；开发期专项为 `k10f-f3b-task-focused.log`、`k10f-f3b-focused.log`、`k10f-f3b-module-focused.log`，最终完整重复为 `k10f-f3-repeat3.log`。数据文件和本机日志不进入 Git。
 
 F4 性能/内存及 F5 ASan/最终审计仍在后续，不能把本轮小对象压力当作 Benchmark 或物理设备准入。
