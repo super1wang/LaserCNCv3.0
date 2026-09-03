@@ -354,7 +354,8 @@ struct RuntimeFixture final {
         REQUIRE(kernel.executionServices().configure(validator, log).hasValue());
         const std::array grants {
             validId<CapabilityId>("document.read"),
-            validId<CapabilityId>("document.write")};
+            validId<CapabilityId>("document.write"),
+            validId<CapabilityId>("kernel.history.edit")};
         REQUIRE(kernel.capabilities().replace(session, grants).hasValue());
     }
 

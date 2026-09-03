@@ -158,6 +158,48 @@ foundation::Result<void> ApplicationTransaction::attachIdempotency(
     }
 }
 
+foundation::Result<void> ApplicationTransaction::attachHistoryMutation(
+    HistoryMutation mutation)
+{
+    auto active = ensureActive();
+    if(!active) {
+        return active;
+    }
+    if(historyMutation_.kind != HistoryMutationKind::None) {
+        return fail(foundation::makeError(
+            "History.MutationAlreadyAttached",
+            foundation::ErrorCategory::Conflict,
+            "A transaction already has a history mutation"));
+    }
+    const bool recordShape = mutation.kind == HistoryMutationKind::Record
+        && mutation.command.has_value() && mutation.commandVersion.has_value()
+        && !mutation.targetTransactionId.has_value() && !mutation.expectedCursor.has_value();
+    const bool barrierShape = mutation.kind == HistoryMutationKind::Barrier
+        && !mutation.command.has_value() && !mutation.commandVersion.has_value()
+        && !mutation.targetTransactionId.has_value() && !mutation.expectedCursor.has_value();
+    const bool cursorShape =
+        (mutation.kind == HistoryMutationKind::Undo
+         || mutation.kind == HistoryMutationKind::Redo)
+        && !mutation.command.has_value() && !mutation.commandVersion.has_value()
+        && mutation.targetTransactionId.has_value() && mutation.expectedCursor.has_value();
+    if(!recordShape && !barrierShape && !cursorShape) {
+        return fail(foundation::makeError(
+            "History.InvalidMutation",
+            foundation::ErrorCategory::Validation,
+            "The transaction history mutation has an invalid shape"));
+    }
+    try {
+        historyMutation_ = std::move(mutation);
+        return foundation::Result<void>::success();
+    } catch(const std::exception& exception) {
+        return fail(unexpectedFailure(
+            transactionId_, "attachHistoryMutation", exception.what()));
+    } catch(...) {
+        return fail(unexpectedFailure(
+            transactionId_, "attachHistoryMutation", "Unknown failure"));
+    }
+}
+
 foundation::Result<void> ApplicationTransaction::fail(foundation::Error error)
 {
     failure_ = error;

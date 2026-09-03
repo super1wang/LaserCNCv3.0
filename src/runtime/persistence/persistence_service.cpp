@@ -82,6 +82,46 @@ const char* changeKindName(runtime::ObjectChangeKind kind) noexcept
     return "unknown";
 }
 
+const char* historyKindName(runtime::HistoryMutationKind kind) noexcept
+{
+    switch(kind) {
+    case runtime::HistoryMutationKind::None: return "none";
+    case runtime::HistoryMutationKind::Record: return "record";
+    case runtime::HistoryMutationKind::Barrier: return "barrier";
+    case runtime::HistoryMutationKind::Undo: return "undo";
+    case runtime::HistoryMutationKind::Redo: return "redo";
+    }
+    return "unknown";
+}
+
+foundation::Value historyValue(const runtime::HistoryMutation& history)
+{
+    foundation::Value commandVersion;
+    if(history.commandVersion.has_value()) {
+        commandVersion = foundation::Value {foundation::Value::Object {
+            {"major", foundation::Value {
+                static_cast<std::int64_t>(history.commandVersion->major)}},
+            {"minor", foundation::Value {
+                static_cast<std::int64_t>(history.commandVersion->minor)}},
+            {"patch", foundation::Value {
+                static_cast<std::int64_t>(history.commandVersion->patch)}},
+        }};
+    }
+    return foundation::Value {foundation::Value::Object {
+        {"command", history.command.has_value()
+            ? foundation::Value {std::string(history.command->value())}
+            : foundation::Value {}},
+        {"commandVersion", std::move(commandVersion)},
+        {"expectedCursor", history.expectedCursor.has_value()
+            ? foundation::Value {std::to_string(*history.expectedCursor)}
+            : foundation::Value {}},
+        {"kind", foundation::Value {historyKindName(history.kind)}},
+        {"targetTransactionId", history.targetTransactionId.has_value()
+            ? foundation::Value {std::string(history.targetTransactionId->value())}
+            : foundation::Value {}},
+    }};
+}
+
 foundation::Value commitValue(const runtime::TransactionCommit& commit)
 {
     foundation::Value::Array changes;
@@ -119,11 +159,12 @@ foundation::Value commitValue(const runtime::TransactionCommit& commit)
         {"documentId", foundation::Value {std::string(commit.documentId.value())}},
         {"events", foundation::Value {std::move(events)}},
         {"format", foundation::Value {"lasercnc.state-journal"}},
+        {"history", historyValue(commit.history)},
         {"projectId", foundation::Value {std::string(commit.projectId.value())}},
         {"revisionsAfter", revisionsValue(commit.revisionsAfter)},
         {"revisionsBefore", revisionsValue(commit.revisionsBefore)},
         {"transactionId", foundation::Value {std::string(commit.transactionId.value())}},
-        {"version", foundation::Value {std::int64_t {1}}},
+        {"version", foundation::Value {std::int64_t {2}}},
     }};
 }
 
@@ -311,8 +352,12 @@ foundation::Result<void> validateRecord(
         : version->second.getIf<std::int64_t>();
     const auto before = root->find("revisionsBefore");
     const auto after = root->find("revisionsAfter");
+    const auto history = root->find("history");
     if(!matchesText("format", "lasercnc.state-journal")
-       || versionNumber == nullptr || *versionNumber != 1
+       || versionNumber == nullptr || (*versionNumber != 1 && *versionNumber != 2)
+       || (*versionNumber == 2
+           && (history == root->end()
+               || history->second.kind() != foundation::Value::Kind::Object))
        || !matchesText("transactionId", record.transactionId.value())
        || !matchesText("projectId", record.projectId.value())
        || !matchesText("documentId", record.documentId.value())

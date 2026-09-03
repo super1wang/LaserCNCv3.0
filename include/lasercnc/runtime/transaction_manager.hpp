@@ -20,12 +20,15 @@ class PersistenceService;
 
 namespace lasercnc::runtime {
 
+class HistoryRuntime;
+
 class TransactionManager final {
 public:
     explicit TransactionManager(
         state::DocumentStore& documents,
         persistence::PersistenceService* persistence = nullptr,
-        DocumentRuntime* documentRuntime = nullptr) noexcept;
+        DocumentRuntime* documentRuntime = nullptr,
+        HistoryRuntime* historyRuntime = nullptr) noexcept;
 
     TransactionManager(const TransactionManager&) = delete;
     TransactionManager& operator=(const TransactionManager&) = delete;
@@ -49,6 +52,7 @@ private:
     state::DocumentStore& documents_;
     persistence::PersistenceService* persistence_;
     DocumentRuntime* documentRuntime_;
+    HistoryRuntime* historyRuntime_;
     std::mutex commitMutex_;
     mutable std::mutex activeMutex_;
     std::map<kernel::TransactionId, kernel::DocumentId> activeTransactions_;

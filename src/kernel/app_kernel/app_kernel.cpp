@@ -36,7 +36,8 @@ private:
 AppKernel::AppKernel()
     : modules_(services_),
       documentRuntime_(documents_, persistence_),
-      transactions_(documents_, &persistence_, &documentRuntime_),
+      history_(documents_),
+      transactions_(documents_, &persistence_, &documentRuntime_, &history_),
       workflowRegistry_(commandRegistry_, queryRegistry_),
       scriptRegistry_(commandRegistry_, queryRegistry_, workflowRegistry_),
       effects_(effectGuards_, resources_, documents_, persistence_),
@@ -262,6 +263,18 @@ foundation::Result<void> AppKernel::bootstrap()
                 std::make_shared<const foundation::Error>(
                     std::move(restored).error())));
         }
+        auto historyRestored = history_.restore(recovered.value().historyCommits);
+        if(!historyRestored) {
+            state_ = AppKernelState::Failed;
+            return foundation::Result<void>::failure(foundation::makeError(
+                "History.KernelRecoveryFailed",
+                foundation::ErrorCategory::Infrastructure,
+                "The application kernel could not install recovered history state",
+                foundation::Value {},
+                foundation::Severity::Error,
+                std::make_shared<const foundation::Error>(
+                    std::move(historyRestored).error())));
+        }
         auto adopted = documentRuntime_.adoptRecovered(restoredImages);
         if(!adopted) {
             state_ = AppKernelState::Failed;
@@ -321,6 +334,23 @@ foundation::Result<void> AppKernel::bootstrap()
     if(!result) {
         state_ = AppKernelState::Failed;
         return result;
+    }
+
+    if(executionServices_.configured()) {
+        auto historyCommands = history_.registerCommands(commandRegistry_);
+        if(!historyCommands) {
+            auto stopped = modules_.shutdown(*this);
+            state_ = AppKernelState::Failed;
+            return foundation::Result<void>::failure(foundation::makeError(
+                "History.CommandRegistrationFailed",
+                foundation::ErrorCategory::Conflict,
+                "The built-in history commands could not be registered",
+                foundation::Value {},
+                foundation::Severity::Error,
+                std::make_shared<const foundation::Error>(
+                    stopped.hasValue() ? std::move(historyCommands).error()
+                                       : std::move(stopped).error())));
+        }
     }
 
     if((commandRegistry_.size() != 0U || queryRegistry_.size() != 0U
@@ -564,6 +594,16 @@ runtime::DocumentRuntime& AppKernel::documentRuntime() noexcept
 const runtime::DocumentRuntime& AppKernel::documentRuntime() const noexcept
 {
     return documentRuntime_;
+}
+
+runtime::HistoryRuntime& AppKernel::history() noexcept
+{
+    return history_;
+}
+
+const runtime::HistoryRuntime& AppKernel::history() const noexcept
+{
+    return history_;
 }
 
 runtime::ExecutionServices& AppKernel::executionServices() noexcept

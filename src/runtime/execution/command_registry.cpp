@@ -94,13 +94,6 @@ foundation::Result<void> CommandRegistry::registerHandler(
             "Document-write commands require document scope",
             key));
     }
-    if(descriptor.undoable) {
-        return foundation::Result<void>::failure(commandError(
-            "Command.UndoUnsupported",
-            foundation::ErrorCategory::Validation,
-            "Undoable commands require the Phase 8 journal contract",
-            key));
-    }
     if(hasExternalMetadata(descriptor)) {
         return foundation::Result<void>::failure(commandError(
             "Command.ExternalMetadataUnsupported",

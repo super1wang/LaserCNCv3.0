@@ -3,6 +3,7 @@
 #include <lasercnc/foundation/error.hpp>
 #include <lasercnc/persistence/persistence_service.hpp>
 #include <lasercnc/runtime/document_runtime.hpp>
+#include <lasercnc/runtime/history_runtime.hpp>
 
 #include <array>
 #include <exception>
@@ -42,10 +43,12 @@ constexpr std::array allRevisionScopes {
 TransactionManager::TransactionManager(
     state::DocumentStore& documents,
     persistence::PersistenceService* persistence,
-    DocumentRuntime* documentRuntime) noexcept
+    DocumentRuntime* documentRuntime,
+    HistoryRuntime* historyRuntime) noexcept
     : documents_(documents),
       persistence_(persistence),
-      documentRuntime_(documentRuntime)
+      documentRuntime_(documentRuntime),
+      historyRuntime_(historyRuntime)
 {
 }
 
@@ -235,7 +238,18 @@ foundation::Result<TransactionCommit> TransactionManager::commit(
             currentRevisions,
             nextRevisions.value(),
             std::move(changes),
-            std::move(committedEvents)});
+            std::move(committedEvents),
+            transaction.historyMutation_});
+    }
+
+    std::optional<HistoryRuntime::DocumentHistory> preparedHistory;
+    if(historyRuntime_ != nullptr) {
+        auto prepared = historyRuntime_->prepareCommit(*receipt);
+        if(!prepared) {
+            return foundation::Result<TransactionCommit>::failure(
+                std::move(prepared).error());
+        }
+        preparedHistory.emplace(std::move(prepared).value());
     }
 
     if(persistence_ != nullptr && persistence_->configured()) {
@@ -263,6 +277,9 @@ foundation::Result<TransactionCommit> TransactionManager::commit(
         documentIterator->second.objects.swap(transaction.stagedObjects_);
         documentIterator->second.revisions = receipt->revisionsAfter;
         projectIterator->second = receipt->revisionsAfter.at(state::RevisionScope::Project);
+    }
+    if(preparedHistory.has_value()) {
+        historyRuntime_->install(std::move(*preparedHistory));
     }
     return foundation::Result<TransactionCommit>::success(std::move(*receipt));
 }

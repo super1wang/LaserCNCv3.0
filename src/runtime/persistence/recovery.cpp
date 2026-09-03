@@ -288,9 +288,150 @@ foundation::Result<std::optional<state::ObjectRecord>> optionalObjectFromValue(
         std::move(object).value());
 }
 
+foundation::Result<runtime::HistoryMutation> historyFromValue(
+    const foundation::Value& value)
+{
+    const auto* object = value.getIf<foundation::Value::Object>();
+    if(object == nullptr) {
+        return foundation::Result<runtime::HistoryMutation>::failure(recoveryError(
+            "Persistence.JournalHistoryInvalid",
+            foundation::ErrorCategory::Infrastructure,
+            "A journal history mutation must be an object"));
+    }
+    auto kind = stringField(*object, "kind");
+    const auto* commandValue = field(*object, "command");
+    const auto* versionValue = field(*object, "commandVersion");
+    const auto* targetValue = field(*object, "targetTransactionId");
+    const auto* cursorValue = field(*object, "expectedCursor");
+    if(object->size() != 5U || !kind || commandValue == nullptr || versionValue == nullptr
+       || targetValue == nullptr || cursorValue == nullptr) {
+        return foundation::Result<runtime::HistoryMutation>::failure(recoveryError(
+            "Persistence.JournalHistoryInvalid",
+            foundation::ErrorCategory::Infrastructure,
+            "A journal history mutation is incomplete"));
+    }
+
+    runtime::HistoryMutation mutation;
+    if(kind.value() == "none") {
+        mutation.kind = runtime::HistoryMutationKind::None;
+    } else if(kind.value() == "record") {
+        mutation.kind = runtime::HistoryMutationKind::Record;
+    } else if(kind.value() == "barrier") {
+        mutation.kind = runtime::HistoryMutationKind::Barrier;
+    } else if(kind.value() == "undo") {
+        mutation.kind = runtime::HistoryMutationKind::Undo;
+    } else if(kind.value() == "redo") {
+        mutation.kind = runtime::HistoryMutationKind::Redo;
+    } else {
+        return foundation::Result<runtime::HistoryMutation>::failure(recoveryError(
+            "Persistence.JournalHistoryInvalid",
+            foundation::ErrorCategory::Infrastructure,
+            "A journal history mutation contains an unknown kind"));
+    }
+
+    if(commandValue->kind() != foundation::Value::Kind::Null) {
+        const auto* text = commandValue->getIf<std::string>();
+        if(text == nullptr) {
+            return foundation::Result<runtime::HistoryMutation>::failure(recoveryError(
+                "Persistence.JournalHistoryInvalid",
+                foundation::ErrorCategory::Infrastructure,
+                "A journal history command identity is invalid"));
+        }
+        auto command = idText<kernel::CommandName>(*text, "history.command");
+        if(!command) {
+            return foundation::Result<runtime::HistoryMutation>::failure(
+                std::move(command).error());
+        }
+        mutation.command = std::move(command).value();
+    }
+    if(versionValue->kind() != foundation::Value::Kind::Null) {
+        const auto* version = versionValue->getIf<foundation::Value::Object>();
+        if(version == nullptr || version->size() != 3U) {
+            return foundation::Result<runtime::HistoryMutation>::failure(recoveryError(
+                "Persistence.JournalHistoryInvalid",
+                foundation::ErrorCategory::Infrastructure,
+                "A journal history command version is invalid"));
+        }
+        std::array<std::uint32_t, 3U> parts {};
+        constexpr std::array names {"major", "minor", "patch"};
+        for(std::size_t index = 0U; index < names.size(); ++index) {
+            const auto* partValue = field(*version, names[index]);
+            const auto* part = partValue == nullptr
+                ? nullptr
+                : partValue->getIf<std::int64_t>();
+            if(part == nullptr || *part < 0
+               || static_cast<std::uint64_t>(*part)
+                    > std::numeric_limits<std::uint32_t>::max()) {
+                return foundation::Result<runtime::HistoryMutation>::failure(recoveryError(
+                    "Persistence.JournalHistoryInvalid",
+                    foundation::ErrorCategory::Infrastructure,
+                    "A journal history command version part is invalid"));
+            }
+            parts[index] = static_cast<std::uint32_t>(*part);
+        }
+        mutation.commandVersion = foundation::Version {parts[0], parts[1], parts[2]};
+    }
+    if(targetValue->kind() != foundation::Value::Kind::Null) {
+        const auto* text = targetValue->getIf<std::string>();
+        if(text == nullptr) {
+            return foundation::Result<runtime::HistoryMutation>::failure(recoveryError(
+                "Persistence.JournalHistoryInvalid",
+                foundation::ErrorCategory::Infrastructure,
+                "A journal history target identity is invalid"));
+        }
+        auto target = idText<kernel::TransactionId>(*text, "history.targetTransactionId");
+        if(!target) {
+            return foundation::Result<runtime::HistoryMutation>::failure(
+                std::move(target).error());
+        }
+        mutation.targetTransactionId = std::move(target).value();
+    }
+    if(cursorValue->kind() != foundation::Value::Kind::Null) {
+        const auto* text = cursorValue->getIf<std::string>();
+        std::uint64_t cursor = 0U;
+        if(text == nullptr) {
+            return foundation::Result<runtime::HistoryMutation>::failure(recoveryError(
+                "Persistence.JournalHistoryInvalid",
+                foundation::ErrorCategory::Infrastructure,
+                "A journal history cursor is invalid"));
+        }
+        const auto parsed = std::from_chars(
+            text->data(), text->data() + text->size(), cursor);
+        if(parsed.ec != std::errc {} || parsed.ptr != text->data() + text->size()) {
+            return foundation::Result<runtime::HistoryMutation>::failure(recoveryError(
+                "Persistence.JournalHistoryInvalid",
+                foundation::ErrorCategory::Infrastructure,
+                "A journal history cursor is invalid"));
+        }
+        mutation.expectedCursor = cursor;
+    }
+
+    const bool recordShape = mutation.kind == runtime::HistoryMutationKind::Record
+        && mutation.command.has_value() && mutation.commandVersion.has_value()
+        && !mutation.targetTransactionId.has_value() && !mutation.expectedCursor.has_value();
+    const bool emptyShape =
+        (mutation.kind == runtime::HistoryMutationKind::None
+         || mutation.kind == runtime::HistoryMutationKind::Barrier)
+        && !mutation.command.has_value() && !mutation.commandVersion.has_value()
+        && !mutation.targetTransactionId.has_value() && !mutation.expectedCursor.has_value();
+    const bool cursorShape =
+        (mutation.kind == runtime::HistoryMutationKind::Undo
+         || mutation.kind == runtime::HistoryMutationKind::Redo)
+        && !mutation.command.has_value() && !mutation.commandVersion.has_value()
+        && mutation.targetTransactionId.has_value() && mutation.expectedCursor.has_value();
+    if(!recordShape && !emptyShape && !cursorShape) {
+        return foundation::Result<runtime::HistoryMutation>::failure(recoveryError(
+            "Persistence.JournalHistoryInvalid",
+            foundation::ErrorCategory::Infrastructure,
+            "A journal history mutation has inconsistent fields"));
+    }
+    return foundation::Result<runtime::HistoryMutation>::success(std::move(mutation));
+}
+
 struct DecodedJournal final {
     JournalRecord record;
     std::vector<runtime::ObjectChange> changes;
+    runtime::HistoryMutation history;
 };
 
 foundation::Result<JournalRecord> journalRecordFromRow(
@@ -375,6 +516,7 @@ foundation::Result<DecodedJournal> decodeJournal(
     const auto* afterValue = field(*root, "revisionsAfter");
     const auto* changesValue = field(*root, "changes");
     const auto* eventsValue = field(*root, "events");
+    const auto* historyValue = field(*root, "history");
     if(!format || !transactionId || !projectId || !documentId || version == nullptr
        || beforeValue == nullptr || afterValue == nullptr || changesValue == nullptr
        || eventsValue == nullptr
@@ -387,8 +529,11 @@ foundation::Result<DecodedJournal> decodeJournal(
     auto before = revisionsFromValue(*beforeValue);
     auto after = revisionsFromValue(*afterValue);
     const auto* changes = changesValue->getIf<foundation::Value::Array>();
+    const auto* events = eventsValue->getIf<foundation::Value::Array>();
     if(!before || !after || changes == nullptr || format.value() != "lasercnc.state-journal"
-       || *version != 1 || transactionId.value() != record.value().transactionId
+       || (*version != 1 && *version != 2)
+       || (*version == 2 && historyValue == nullptr)
+       || transactionId.value() != record.value().transactionId
        || projectId.value() != record.value().projectId
        || documentId.value() != record.value().documentId
        || before.value() != record.value().revisionsBefore
@@ -466,8 +611,22 @@ foundation::Result<DecodedJournal> decodeJournal(
             std::move(beforeRecord).value(),
             std::move(afterRecord).value()});
     }
+    runtime::HistoryMutation decodedHistory;
+    if(historyValue != nullptr) {
+        auto parsedHistory = historyFromValue(*historyValue);
+        if(!parsedHistory) {
+            return foundation::Result<DecodedJournal>::failure(
+                std::move(parsedHistory).error());
+        }
+        decodedHistory = std::move(parsedHistory).value();
+    }
+    if(decodedHistory.kind == runtime::HistoryMutationKind::None
+       && (before.value() != after.value() || !decodedChanges.empty()
+           || !events->empty())) {
+        decodedHistory.kind = runtime::HistoryMutationKind::Barrier;
+    }
     return foundation::Result<DecodedJournal>::success(DecodedJournal {
-        std::move(record).value(), std::move(decodedChanges)});
+        std::move(record).value(), std::move(decodedChanges), std::move(decodedHistory)});
 }
 
 struct SnapshotState final {
@@ -964,6 +1123,18 @@ foundation::Result<RecoveryReport> PersistenceService::recover() const
         RecoveryReport report;
         report.latestJournalSequence = latestSequence;
         report.journalRecordsReplayed = replayed;
+        report.historyCommits.reserve(journals.size());
+        for(const auto& journal : journals) {
+            report.historyCommits.push_back(runtime::TransactionCommit {
+                journal.record.transactionId,
+                journal.record.projectId,
+                journal.record.documentId,
+                journal.record.revisionsBefore,
+                journal.record.revisionsAfter,
+                journal.changes,
+                {},
+                journal.history});
+        }
         report.documents.reserve(working.size());
         for(auto& [unusedId, document] : working) {
             static_cast<void>(unusedId);

@@ -1,6 +1,6 @@
 # LaserCNC v3.0
 
-LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9、K10A Execution Contract 1.0 与 K10B Runtime Project / Document Lifecycle，当前按《Kernel 1.0 最终收口设计规划》继续推进 K10C–K10F。仓库坚持 Command-First、Automation-First、Headless-First 和 Infrastructure-Adapter；CAD、CAM、Machine、Process、Qt GUI、产品 RPC/CLI 与 AI 等上层模块仍未开始。
+LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9、K10A Execution Contract 1.0、K10B Runtime Project / Document Lifecycle 与 K10C History / Undo / Redo，当前按《Kernel 1.0 最终收口设计规划》继续推进 K10D–K10F。仓库坚持 Command-First、Automation-First、Headless-First 和 Infrastructure-Adapter；CAD、CAM、Machine、Process、Qt GUI、产品 RPC/CLI 与 AI 等上层模块仍未开始。
 
 ## 已完成阶段
 
@@ -13,7 +13,7 @@ LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9、K10A Execution Cont
 - Phase 7：Tracing、Metrics 与 Diagnostics
 - Phase 8：Snapshot、Journal、SQLite Persistence 与 Crash Recovery
 - Phase 9：Workflow Runtime 与结构化 Script Runtime
-- Kernel 1.0 Closure：K10A Execution Contract 1.0、K10B Runtime Project / Document Lifecycle 已验收，K10C History / Undo / Redo 待启动
+- Kernel 1.0 Closure：K10A Execution Contract 1.0、K10B Runtime Project / Document Lifecycle、K10C History / Undo / Redo 已验收，K10D Module Governance / Execution Gateway 待启动
 - 标准：C++20
 - 测试：Catch2 + CTest
 

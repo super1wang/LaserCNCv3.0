@@ -58,6 +58,7 @@ add_executable(
     unit/infrastructure/toml_config_adapter_tests.cpp
     unit/runtime/task_runtime_tests.cpp
     unit/runtime/persistence_service_tests.cpp
+    unit/runtime/history_runtime_tests.cpp
 )
 target_link_libraries(
     lasercnc_infrastructure_tests

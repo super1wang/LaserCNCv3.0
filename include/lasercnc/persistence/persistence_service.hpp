@@ -70,6 +70,7 @@ struct DocumentCatalogRecord final {
 
 struct RecoveryReport final {
     std::vector<state::DocumentImage> documents;
+    std::vector<runtime::TransactionCommit> historyCommits;
     std::uint64_t latestJournalSequence{0U};
     std::size_t journalRecordsReplayed{0U};
 };

@@ -229,7 +229,7 @@ TEST_CASE("CommandRegistry resolves exact compatible and deprecated versions", "
 
     auto undoable = commandDescriptor("kernel.command.undoable");
     undoable.undoable = true;
-    CHECK_FALSE(registry.registerHandler(std::move(undoable), handler).hasValue());
+    CHECK(registry.registerHandler(std::move(undoable), handler).hasValue());
     CHECK_FALSE(registry.registerHandler(
         commandDescriptor("kernel.command.null"), nullptr).hasValue());
     auto missing = registry.descriptor(CommandKey {

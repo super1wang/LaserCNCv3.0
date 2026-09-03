@@ -754,6 +754,22 @@ public:
             return foundation::Result<CommandResponse>::failure(std::move(resultValid).error());
         }
 
+        if(descriptor.undoable) {
+            auto historyAttached = transaction.value()->attachHistoryMutation(
+                HistoryMutation {
+                    HistoryMutationKind::Record,
+                    descriptor.name,
+                    descriptor.version,
+                    std::nullopt,
+                    std::nullopt});
+            if(!historyAttached) {
+                static_cast<void>(transaction.value()->rollback());
+                logFailure(services.value(), request, &descriptor.version);
+                return foundation::Result<CommandResponse>::failure(
+                    std::move(historyAttached).error());
+            }
+        }
+
         if(durableLease != nullptr) {
             auto attached = transaction.value()->attachIdempotency(TransactionIdempotency {
                 *request.idempotencyKey,

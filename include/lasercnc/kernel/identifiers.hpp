@@ -36,6 +36,7 @@ struct ScriptNameTag;
 struct ScriptExecutionIdTag;
 struct ScriptNodeIdTag;
 struct EffectGuardIdTag;
+struct HistoryEntryIdTag;
 
 using ServiceId = foundation::StrongId<ServiceIdTag>;
 using ModuleId = foundation::StrongId<ModuleIdTag>;
@@ -69,5 +70,6 @@ using ScriptName = foundation::StrongId<ScriptNameTag>;
 using ScriptExecutionId = foundation::StrongId<ScriptExecutionIdTag>;
 using ScriptNodeId = foundation::StrongId<ScriptNodeIdTag>;
 using EffectGuardId = foundation::StrongId<EffectGuardIdTag>;
+using HistoryEntryId = foundation::StrongId<HistoryEntryIdTag>;
 
 } // namespace lasercnc::kernel

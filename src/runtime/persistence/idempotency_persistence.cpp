@@ -312,6 +312,46 @@ const char* changeKindName(runtime::ObjectChangeKind kind) noexcept
     return "unknown";
 }
 
+const char* historyKindName(runtime::HistoryMutationKind kind) noexcept
+{
+    switch(kind) {
+    case runtime::HistoryMutationKind::None: return "none";
+    case runtime::HistoryMutationKind::Record: return "record";
+    case runtime::HistoryMutationKind::Barrier: return "barrier";
+    case runtime::HistoryMutationKind::Undo: return "undo";
+    case runtime::HistoryMutationKind::Redo: return "redo";
+    }
+    return "unknown";
+}
+
+foundation::Value historyValue(const runtime::HistoryMutation& history)
+{
+    foundation::Value version;
+    if(history.commandVersion.has_value()) {
+        version = foundation::Value {foundation::Value::Object {
+            {"major", foundation::Value {
+                static_cast<std::int64_t>(history.commandVersion->major)}},
+            {"minor", foundation::Value {
+                static_cast<std::int64_t>(history.commandVersion->minor)}},
+            {"patch", foundation::Value {
+                static_cast<std::int64_t>(history.commandVersion->patch)}},
+        }};
+    }
+    return foundation::Value {foundation::Value::Object {
+        {"command", history.command.has_value()
+            ? foundation::Value {std::string(history.command->value())}
+            : foundation::Value {}},
+        {"commandVersion", std::move(version)},
+        {"expectedCursor", history.expectedCursor.has_value()
+            ? foundation::Value {std::to_string(*history.expectedCursor)}
+            : foundation::Value {}},
+        {"kind", foundation::Value {historyKindName(history.kind)}},
+        {"targetTransactionId", history.targetTransactionId.has_value()
+            ? foundation::Value {std::string(history.targetTransactionId->value())}
+            : foundation::Value {}},
+    }};
+}
+
 foundation::Value commitValue(const runtime::TransactionCommit& commit)
 {
     foundation::Value::Array changes;
@@ -348,6 +388,7 @@ foundation::Value commitValue(const runtime::TransactionCommit& commit)
         {"changes", foundation::Value {std::move(changes)}},
         {"documentId", foundation::Value {std::string(commit.documentId.value())}},
         {"events", foundation::Value {std::move(events)}},
+        {"history", historyValue(commit.history)},
         {"projectId", foundation::Value {std::string(commit.projectId.value())}},
         {"revisionsAfter", revisionsValue(commit.revisionsAfter)},
         {"revisionsBefore", revisionsValue(commit.revisionsBefore)},
@@ -396,6 +437,7 @@ struct DecodedCommit final {
     state::RevisionSet after;
     std::vector<runtime::ObjectChange> changes;
     std::vector<PersistedEvent> events;
+    runtime::HistoryMutation history;
 };
 
 bool changesEqual(
@@ -416,6 +458,143 @@ bool changesEqual(
     return true;
 }
 
+foundation::Result<runtime::HistoryMutation> decodeHistoryValue(
+    const foundation::Value& value)
+{
+    const auto* object = value.getIf<foundation::Value::Object>();
+    if(object == nullptr) {
+        return foundation::Result<runtime::HistoryMutation>::failure(idempotencyError(
+            "Persistence.InvalidIdempotencyHistory",
+            foundation::ErrorCategory::Infrastructure,
+            "A persisted command history mutation must be an object"));
+    }
+    auto kind = stringField(*object, "kind");
+    const auto* commandValue = field(*object, "command");
+    const auto* versionValue = field(*object, "commandVersion");
+    const auto* targetValue = field(*object, "targetTransactionId");
+    const auto* cursorValue = field(*object, "expectedCursor");
+    if(object->size() != 5U || !kind || commandValue == nullptr || versionValue == nullptr
+       || targetValue == nullptr || cursorValue == nullptr) {
+        return foundation::Result<runtime::HistoryMutation>::failure(idempotencyError(
+            "Persistence.InvalidIdempotencyHistory",
+            foundation::ErrorCategory::Infrastructure,
+            "A persisted command history mutation is incomplete"));
+    }
+    runtime::HistoryMutation mutation;
+    if(kind.value() == "none") {
+        mutation.kind = runtime::HistoryMutationKind::None;
+    } else if(kind.value() == "record") {
+        mutation.kind = runtime::HistoryMutationKind::Record;
+    } else if(kind.value() == "barrier") {
+        mutation.kind = runtime::HistoryMutationKind::Barrier;
+    } else if(kind.value() == "undo") {
+        mutation.kind = runtime::HistoryMutationKind::Undo;
+    } else if(kind.value() == "redo") {
+        mutation.kind = runtime::HistoryMutationKind::Redo;
+    } else {
+        return foundation::Result<runtime::HistoryMutation>::failure(idempotencyError(
+            "Persistence.InvalidIdempotencyHistory",
+            foundation::ErrorCategory::Infrastructure,
+            "A persisted command history mutation kind is invalid"));
+    }
+    if(commandValue->kind() != foundation::Value::Kind::Null) {
+        const auto* text = commandValue->getIf<std::string>();
+        if(text == nullptr) {
+            return foundation::Result<runtime::HistoryMutation>::failure(idempotencyError(
+                "Persistence.InvalidIdempotencyHistory",
+                foundation::ErrorCategory::Infrastructure,
+                "A persisted command history identity is invalid"));
+        }
+        auto command = idText<kernel::CommandName>(*text, "history.command");
+        if(!command) {
+            return foundation::Result<runtime::HistoryMutation>::failure(
+                std::move(command).error());
+        }
+        mutation.command = std::move(command).value();
+    }
+    if(versionValue->kind() != foundation::Value::Kind::Null) {
+        const auto* version = versionValue->getIf<foundation::Value::Object>();
+        constexpr std::array names {"major", "minor", "patch"};
+        std::array<std::uint32_t, 3U> parts {};
+        if(version == nullptr || version->size() != 3U) {
+            return foundation::Result<runtime::HistoryMutation>::failure(idempotencyError(
+                "Persistence.InvalidIdempotencyHistory",
+                foundation::ErrorCategory::Infrastructure,
+                "A persisted command history version is invalid"));
+        }
+        for(std::size_t index = 0U; index < names.size(); ++index) {
+            const auto* partValue = field(*version, names[index]);
+            const auto* part = partValue == nullptr
+                ? nullptr
+                : partValue->getIf<std::int64_t>();
+            if(part == nullptr || *part < 0
+               || static_cast<std::uint64_t>(*part)
+                    > std::numeric_limits<std::uint32_t>::max()) {
+                return foundation::Result<runtime::HistoryMutation>::failure(idempotencyError(
+                    "Persistence.InvalidIdempotencyHistory",
+                    foundation::ErrorCategory::Infrastructure,
+                    "A persisted command history version part is invalid"));
+            }
+            parts[index] = static_cast<std::uint32_t>(*part);
+        }
+        mutation.commandVersion = foundation::Version {parts[0], parts[1], parts[2]};
+    }
+    if(targetValue->kind() != foundation::Value::Kind::Null) {
+        const auto* text = targetValue->getIf<std::string>();
+        if(text == nullptr) {
+            return foundation::Result<runtime::HistoryMutation>::failure(idempotencyError(
+                "Persistence.InvalidIdempotencyHistory",
+                foundation::ErrorCategory::Infrastructure,
+                "A persisted command history target is invalid"));
+        }
+        auto target = idText<kernel::TransactionId>(*text, "history.targetTransactionId");
+        if(!target) {
+            return foundation::Result<runtime::HistoryMutation>::failure(
+                std::move(target).error());
+        }
+        mutation.targetTransactionId = std::move(target).value();
+    }
+    if(cursorValue->kind() != foundation::Value::Kind::Null) {
+        const auto* text = cursorValue->getIf<std::string>();
+        std::uint64_t cursor = 0U;
+        if(text == nullptr) {
+            return foundation::Result<runtime::HistoryMutation>::failure(idempotencyError(
+                "Persistence.InvalidIdempotencyHistory",
+                foundation::ErrorCategory::Infrastructure,
+                "A persisted command history cursor is invalid"));
+        }
+        const auto parsed = std::from_chars(
+            text->data(), text->data() + text->size(), cursor);
+        if(parsed.ec != std::errc {} || parsed.ptr != text->data() + text->size()) {
+            return foundation::Result<runtime::HistoryMutation>::failure(idempotencyError(
+                "Persistence.InvalidIdempotencyHistory",
+                foundation::ErrorCategory::Infrastructure,
+                "A persisted command history cursor is invalid"));
+        }
+        mutation.expectedCursor = cursor;
+    }
+    const bool recordShape = mutation.kind == runtime::HistoryMutationKind::Record
+        && mutation.command.has_value() && mutation.commandVersion.has_value()
+        && !mutation.targetTransactionId.has_value() && !mutation.expectedCursor.has_value();
+    const bool emptyShape =
+        (mutation.kind == runtime::HistoryMutationKind::None
+         || mutation.kind == runtime::HistoryMutationKind::Barrier)
+        && !mutation.command.has_value() && !mutation.commandVersion.has_value()
+        && !mutation.targetTransactionId.has_value() && !mutation.expectedCursor.has_value();
+    const bool cursorShape =
+        (mutation.kind == runtime::HistoryMutationKind::Undo
+         || mutation.kind == runtime::HistoryMutationKind::Redo)
+        && !mutation.command.has_value() && !mutation.commandVersion.has_value()
+        && mutation.targetTransactionId.has_value() && mutation.expectedCursor.has_value();
+    if(!recordShape && !emptyShape && !cursorShape) {
+        return foundation::Result<runtime::HistoryMutation>::failure(idempotencyError(
+            "Persistence.InvalidIdempotencyHistory",
+            foundation::ErrorCategory::Infrastructure,
+            "A persisted command history mutation has inconsistent fields"));
+    }
+    return foundation::Result<runtime::HistoryMutation>::success(std::move(mutation));
+}
+
 foundation::Result<DecodedCommit> decodeCommitValue(const foundation::Value& value)
 {
     const auto* root = value.getIf<foundation::Value::Object>();
@@ -432,6 +611,7 @@ foundation::Result<DecodedCommit> decodeCommitValue(const foundation::Value& val
     const auto* afterValue = field(*root, "revisionsAfter");
     const auto* changesValue = field(*root, "changes");
     const auto* eventsValue = field(*root, "events");
+    const auto* historyValue = field(*root, "history");
     if(!transactionId || !projectId || !documentId || beforeValue == nullptr
        || afterValue == nullptr || changesValue == nullptr || eventsValue == nullptr) {
         return foundation::Result<DecodedCommit>::failure(idempotencyError(
@@ -594,6 +774,20 @@ foundation::Result<DecodedCommit> decodeCommitValue(const foundation::Value& val
             expectedEventSequence});
         ++expectedEventSequence;
     }
+    runtime::HistoryMutation decodedHistory;
+    if(historyValue != nullptr) {
+        auto history = decodeHistoryValue(*historyValue);
+        if(!history) {
+            return foundation::Result<DecodedCommit>::failure(
+                std::move(history).error());
+        }
+        decodedHistory = std::move(history).value();
+    }
+    if(decodedHistory.kind == runtime::HistoryMutationKind::None
+       && (before.value() != after.value() || !decodedChanges.empty()
+           || !decodedEvents.empty())) {
+        decodedHistory.kind = runtime::HistoryMutationKind::Barrier;
+    }
     return foundation::Result<DecodedCommit>::success(DecodedCommit {
         std::move(transactionId).value(),
         std::move(projectId).value(),
@@ -601,7 +795,8 @@ foundation::Result<DecodedCommit> decodeCommitValue(const foundation::Value& val
         std::move(before).value(),
         std::move(after).value(),
         std::move(decodedChanges),
-        std::move(decodedEvents)});
+        std::move(decodedEvents),
+        std::move(decodedHistory)});
 }
 
 foundation::Result<void> validatePayloadDigest(
@@ -683,7 +878,7 @@ foundation::Result<runtime::TransactionCommit> PersistenceService::loadCommitUnl
         ? nullptr
         : versionValue->getIf<std::int64_t>();
     if(!format || format.value() != "lasercnc.state-journal" || version == nullptr
-       || *version != 1) {
+       || (*version != 1 && *version != 2)) {
         return foundation::Result<runtime::TransactionCommit>::failure(idempotencyError(
             "Persistence.InvalidIdempotencyJournal",
             foundation::ErrorCategory::Infrastructure,
@@ -714,6 +909,7 @@ foundation::Result<runtime::TransactionCommit> PersistenceService::loadCommitUnl
             after.value(),
             event.sequence));
     }
+    auto decodedCommit = std::move(commit).value();
     return foundation::Result<runtime::TransactionCommit>::success(
         runtime::TransactionCommit {
             transactionId,
@@ -721,8 +917,9 @@ foundation::Result<runtime::TransactionCommit> PersistenceService::loadCommitUnl
             std::move(documentId).value(),
             std::move(before).value(),
             std::move(after).value(),
-            std::move(commit).value().changes,
-            std::move(events)});
+            std::move(decodedCommit.changes),
+            std::move(events),
+            std::move(decodedCommit.history)});
 }
 
 foundation::Result<IdempotencyClaim> PersistenceService::claimCommand(
@@ -949,8 +1146,9 @@ foundation::Result<IdempotencyClaim> PersistenceService::claimCommand(
                || embeddedCommit.value().projectId != durableCommit.value().projectId
                || embeddedCommit.value().documentId != durableCommit.value().documentId
                || embeddedCommit.value().before != durableCommit.value().revisionsBefore
-               || embeddedCommit.value().after != durableCommit.value().revisionsAfter
-               || !changesEqual(
+                || embeddedCommit.value().after != durableCommit.value().revisionsAfter
+                || embeddedCommit.value().history != durableCommit.value().history
+                || !changesEqual(
                    embeddedCommit.value().changes,
                    durableCommit.value().changes)) {
                 auto failure = rollback(*backend_, idempotencyError(

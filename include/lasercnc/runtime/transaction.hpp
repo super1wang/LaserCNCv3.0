@@ -1,6 +1,7 @@
 #pragma once
 
 #include <lasercnc/foundation/result.hpp>
+#include <lasercnc/foundation/version.hpp>
 #include <lasercnc/messaging/domain_event.hpp>
 #include <lasercnc/state/document.hpp>
 
@@ -29,6 +30,24 @@ enum class ObjectChangeKind : std::uint8_t {
     Removed
 };
 
+enum class HistoryMutationKind : std::uint8_t {
+    None,
+    Record,
+    Barrier,
+    Undo,
+    Redo
+};
+
+struct HistoryMutation final {
+    HistoryMutationKind kind{HistoryMutationKind::None};
+    std::optional<kernel::CommandName> command;
+    std::optional<foundation::Version> commandVersion;
+    std::optional<kernel::TransactionId> targetTransactionId;
+    std::optional<std::uint64_t> expectedCursor;
+
+    friend bool operator==(const HistoryMutation&, const HistoryMutation&) = default;
+};
+
 struct ObjectChange final {
     ObjectChangeKind kind;
     kernel::ObjectId objectId;
@@ -44,6 +63,7 @@ struct TransactionCommit final {
     state::RevisionSet revisionsAfter;
     std::vector<ObjectChange> changes;
     std::vector<messaging::CommittedDomainEvent> events;
+    HistoryMutation history;
 };
 
 struct TransactionIdempotency final {
@@ -82,6 +102,7 @@ public:
 
 private:
     friend class CommandRuntime;
+    friend class HistoryRuntime;
     friend class TransactionManager;
 
     static constexpr std::size_t revisionScopeCount = 6U;
@@ -94,6 +115,8 @@ private:
     [[nodiscard]] foundation::Result<void> ensureActive() const;
     [[nodiscard]] foundation::Result<void> attachIdempotency(
         TransactionIdempotency idempotency);
+    [[nodiscard]] foundation::Result<void> attachHistoryMutation(
+        HistoryMutation mutation);
     [[nodiscard]] foundation::Result<void> fail(foundation::Error error);
     void markDocumentChanged() noexcept;
     [[nodiscard]] std::vector<ObjectChange> buildChanges() const;
@@ -108,6 +131,7 @@ private:
     std::array<bool, revisionScopeCount> affectedScopes_ {};
     std::vector<messaging::PendingDomainEvent> pendingEvents_;
     std::optional<TransactionIdempotency> idempotency_;
+    HistoryMutation historyMutation_;
 };
 
 } // namespace lasercnc::runtime

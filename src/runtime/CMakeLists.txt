@@ -4,6 +4,7 @@ target_sources(
         transaction/domain_event.cpp
         transaction/application_transaction.cpp
         transaction/transaction_manager.cpp
+        history/history_runtime.cpp
         document/document_runtime.cpp
         execution/capability_service.cpp
         execution/execution_services.cpp
@@ -46,6 +47,7 @@ target_sources(
             "${PROJECT_SOURCE_DIR}/include/lasercnc/messaging/domain_event.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/transaction.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/transaction_manager.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/history_runtime.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/document_runtime.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/capability_service.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/execution_services.hpp"
