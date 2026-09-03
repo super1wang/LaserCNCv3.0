@@ -6,9 +6,11 @@
 #include <lasercnc/foundation/version.hpp>
 #include <lasercnc/kernel/identifiers.hpp>
 #include <lasercnc/state/revision.hpp>
+#include <lasercnc/runtime/transaction.hpp>
 
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 namespace lasercnc::runtime {
 
@@ -64,6 +66,13 @@ public:
     [[nodiscard]] virtual foundation::Result<foundation::Value> execute(
         const CommandRequest& request,
         ApplicationTransaction& transaction) = 0;
+};
+
+struct CommandResponse final {
+    foundation::Value result;
+    TransactionCommit commit;
+    std::vector<foundation::Error> postCommitErrors;
+    bool replayed{false};
 };
 
 } // namespace lasercnc::runtime

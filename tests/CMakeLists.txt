@@ -27,6 +27,7 @@ add_executable(
     unit/kernel/transaction_tests.cpp
     unit/kernel/runtime_registry_tests.cpp
     unit/kernel/event_bus_tests.cpp
+    unit/kernel/command_query_runtime_tests.cpp
     unit/kernel/module_runtime_tests.cpp
     unit/kernel/infrastructure_ports_tests.cpp
 )

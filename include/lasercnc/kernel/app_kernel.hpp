@@ -4,6 +4,13 @@
 #include <lasercnc/kernel/module_runtime.hpp>
 #include <lasercnc/kernel/service_registry.hpp>
 #include <lasercnc/runtime/transaction_manager.hpp>
+#include <lasercnc/messaging/event_bus.hpp>
+#include <lasercnc/runtime/capability_service.hpp>
+#include <lasercnc/runtime/command_registry.hpp>
+#include <lasercnc/runtime/command_runtime.hpp>
+#include <lasercnc/runtime/execution_services.hpp>
+#include <lasercnc/runtime/query_registry.hpp>
+#include <lasercnc/runtime/query_runtime.hpp>
 #include <lasercnc/state/document_store.hpp>
 
 #include <memory>
@@ -39,6 +46,20 @@ public:
     [[nodiscard]] const state::DocumentStore& documents() const noexcept;
     [[nodiscard]] runtime::TransactionManager& transactions() noexcept;
     [[nodiscard]] const runtime::TransactionManager& transactions() const noexcept;
+    [[nodiscard]] runtime::ExecutionServices& executionServices() noexcept;
+    [[nodiscard]] const runtime::ExecutionServices& executionServices() const noexcept;
+    [[nodiscard]] runtime::CapabilityService& capabilities() noexcept;
+    [[nodiscard]] const runtime::CapabilityService& capabilities() const noexcept;
+    [[nodiscard]] messaging::EventBus& events() noexcept;
+    [[nodiscard]] const messaging::EventBus& events() const noexcept;
+    [[nodiscard]] runtime::CommandRegistry& commandRegistry() noexcept;
+    [[nodiscard]] const runtime::CommandRegistry& commandRegistry() const noexcept;
+    [[nodiscard]] runtime::QueryRegistry& queryRegistry() noexcept;
+    [[nodiscard]] const runtime::QueryRegistry& queryRegistry() const noexcept;
+    [[nodiscard]] runtime::CommandRuntime& commands() noexcept;
+    [[nodiscard]] const runtime::CommandRuntime& commands() const noexcept;
+    [[nodiscard]] runtime::QueryRuntime& queries() noexcept;
+    [[nodiscard]] const runtime::QueryRuntime& queries() const noexcept;
     [[nodiscard]] AppKernelState state() const noexcept;
 
 private:
@@ -46,6 +67,13 @@ private:
     ModuleRuntime modules_;
     state::DocumentStore documents_;
     runtime::TransactionManager transactions_;
+    runtime::ExecutionServices executionServices_;
+    runtime::CapabilityService capabilities_;
+    messaging::EventBus events_;
+    runtime::CommandRegistry commandRegistry_;
+    runtime::QueryRegistry queryRegistry_;
+    runtime::CommandRuntime commands_;
+    runtime::QueryRuntime queries_;
     AppKernelState state_{AppKernelState::Configuring};
 };
 

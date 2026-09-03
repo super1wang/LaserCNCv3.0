@@ -8,6 +8,7 @@
 #include <lasercnc/state/document.hpp>
 
 #include <optional>
+#include <vector>
 
 namespace lasercnc::runtime {
 
@@ -43,6 +44,12 @@ public:
     [[nodiscard]] virtual foundation::Result<foundation::Value> execute(
         const QueryRequest& request,
         const QueryContext& context) = 0;
+};
+
+struct QueryResponse final {
+    foundation::Value result;
+    std::optional<state::RevisionSet> revisions;
+    std::vector<foundation::Error> postExecutionErrors;
 };
 
 } // namespace lasercnc::runtime

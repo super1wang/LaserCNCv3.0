@@ -8,7 +8,11 @@
 namespace lasercnc::kernel {
 
 AppKernel::AppKernel()
-    : modules_(services_), transactions_(documents_)
+    : modules_(services_),
+      transactions_(documents_),
+      commands_(
+          commandRegistry_, transactions_, capabilities_, events_, executionServices_),
+      queries_(queryRegistry_, documents_, capabilities_, executionServices_)
 {
 }
 
@@ -46,7 +50,27 @@ foundation::Result<void> AppKernel::bootstrap()
         return result;
     }
 
+    if((commandRegistry_.size() != 0U || queryRegistry_.size() != 0U)
+       && !executionServices_.configured()) {
+        auto stopped = modules_.shutdown(*this);
+        state_ = AppKernelState::Failed;
+        return foundation::Result<void>::failure(foundation::makeError(
+            "Runtime.ExecutionServicesNotConfigured",
+            foundation::ErrorCategory::Conflict,
+            "Registered commands and queries require schema validation and logging services",
+            foundation::Value {},
+            foundation::Severity::Error,
+            stopped.hasValue()
+                ? nullptr
+                : std::make_shared<const foundation::Error>(std::move(stopped).error())));
+    }
+
     services_.freeze();
+    executionServices_.freeze();
+    commandRegistry_.freeze();
+    queryRegistry_.freeze();
+    commands_.start();
+    queries_.start();
     state_ = AppKernelState::Ready;
     return foundation::Result<void>::success();
 }
@@ -73,8 +97,22 @@ foundation::Result<void> AppKernel::shutdown()
                  foundation::Value {std::to_string(activeTransactionCount)}},
             }}));
     }
+    const auto activeCommandCount = commands_.activeExecutionCount();
+    const auto activeQueryCount = queries_.activeExecutionCount();
+    if(activeCommandCount != 0U || activeQueryCount != 0U) {
+        return foundation::Result<void>::failure(foundation::makeError(
+            "Kernel.ActiveExecutions",
+            foundation::ErrorCategory::Conflict,
+            "The application kernel cannot stop while command or query executions are active",
+            foundation::Value {foundation::Value::Object {
+                {"activeCommandCount", foundation::Value {std::to_string(activeCommandCount)}},
+                {"activeQueryCount", foundation::Value {std::to_string(activeQueryCount)}},
+            }}));
+    }
 
     state_ = AppKernelState::Stopping;
+    commands_.stop();
+    queries_.stop();
     auto result = modules_.shutdown(*this);
     if(!result) {
         state_ = AppKernelState::Failed;
@@ -123,6 +161,76 @@ runtime::TransactionManager& AppKernel::transactions() noexcept
 const runtime::TransactionManager& AppKernel::transactions() const noexcept
 {
     return transactions_;
+}
+
+runtime::ExecutionServices& AppKernel::executionServices() noexcept
+{
+    return executionServices_;
+}
+
+const runtime::ExecutionServices& AppKernel::executionServices() const noexcept
+{
+    return executionServices_;
+}
+
+runtime::CapabilityService& AppKernel::capabilities() noexcept
+{
+    return capabilities_;
+}
+
+const runtime::CapabilityService& AppKernel::capabilities() const noexcept
+{
+    return capabilities_;
+}
+
+messaging::EventBus& AppKernel::events() noexcept
+{
+    return events_;
+}
+
+const messaging::EventBus& AppKernel::events() const noexcept
+{
+    return events_;
+}
+
+runtime::CommandRegistry& AppKernel::commandRegistry() noexcept
+{
+    return commandRegistry_;
+}
+
+const runtime::CommandRegistry& AppKernel::commandRegistry() const noexcept
+{
+    return commandRegistry_;
+}
+
+runtime::QueryRegistry& AppKernel::queryRegistry() noexcept
+{
+    return queryRegistry_;
+}
+
+const runtime::QueryRegistry& AppKernel::queryRegistry() const noexcept
+{
+    return queryRegistry_;
+}
+
+runtime::CommandRuntime& AppKernel::commands() noexcept
+{
+    return commands_;
+}
+
+const runtime::CommandRuntime& AppKernel::commands() const noexcept
+{
+    return commands_;
+}
+
+runtime::QueryRuntime& AppKernel::queries() noexcept
+{
+    return queries_;
+}
+
+const runtime::QueryRuntime& AppKernel::queries() const noexcept
+{
+    return queries_;
 }
 
 AppKernelState AppKernel::state() const noexcept

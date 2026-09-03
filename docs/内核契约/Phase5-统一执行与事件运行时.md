@@ -22,10 +22,36 @@ Phase 5 建立所有 Headless、CLI、未来 GUI/Script/AI 必须共用的 Comma
 - 发布先在锁内准备投递快照，回调始终在锁外执行；回调可以重入发布，单个订阅者异常被转换为 delivery failure，不阻断其他订阅者，也不改变已提交业务状态。
 - queued 事件由调用方显式 drain；Phase 6 之前 EventBus 不私建线程、不借用三方线程池冒充 Scheduler。
 
-## 本阶段后续工作
+## 已建立的 CommandRuntime
 
-- 实现 CommandRuntime 的 Schema -> Capability -> Revision Precondition -> ApplicationTransaction -> Handler -> Result Schema -> Commit -> EventBus -> Log 完整链；
-- 实现只基于不可变快照的 QueryRuntime；
-- 实现并发安全、有限容量的内存幂等记录，重复请求返回原结果且不重复提交/发事件；持久化幂等留给 Phase 8；
-- 接入 AppKernel 冻结与生命周期；
-- 建立无领域代码的 Headless/CLI 测试入口，验证发现、命令执行、查询执行、日志与 CTest 共用同一 Runtime。
+命令固定执行链为：
+
+`Registry -> Argument Schema -> Idempotency Contract -> Capability -> Project Revision -> ApplicationTransaction -> Handler -> Result Schema -> Commit -> EventBus -> Structured Log -> Response`
+
+- CommandRuntime 只在 AppKernel Ready 状态接受请求，关闭后拒绝新执行；
+- Request 的 ProjectId 必须与 Document 所属项目一致，`expectedRevision` 映射为 ProjectRevision 前置条件；
+- Handler 异常转换为 Kernel Error，Handler failure 或结果 Schema failure 会 rollback staging state；
+- commit 成功后，EventBus 或日志失败只进入 `postCommitErrors`，不得把已提交命令反转成失败，防止无幂等键调用方误重试；
+- 幂等记录在内存中并发安全且容量有限。相同 key 与相同业务签名共享一个 in-flight 执行，重试返回原 commit 并标记 replayed，不重新执行、不重复发事件；不同业务签名绑定同一 key 会冲突；
+- 业务签名包含 Session、Project、Document、Command、Arguments 和 ExpectedRevision，不包含每次传输可变化的 RequestId、CorrelationId、TraceId；
+- 当前幂等记录不是持久化 exactly-once 保证，进程重启后的恢复与淘汰策略持久化属于 Phase 8。
+
+## 已建立的 QueryRuntime
+
+- QueryRuntime 固定执行 Registry、Argument Schema、Capability、Snapshot、Handler、Result Schema、Structured Log；
+- `requiresDocument` 查询必须携带 DocumentId；Document 所属 Project 必须匹配 Request；
+- Handler 只获得按值不可变 Document 快照，返回快照 RevisionSet；不获得 Transaction 或 DocumentStore 可变入口；
+- 日志失败进入 `postExecutionErrors`，不改变成功查询结果；
+- Query 不使用幂等记录，因为它不得产生业务副作用。
+
+## AppKernel 生命周期
+
+- AppKernel 拥有 ExecutionServices、CapabilityService、EventBus、Command/Query Registry 和 Command/Query Runtime；
+- 模块完成注册后，AppKernel 在 Ready 边界冻结 ExecutionServices 和两个 Registry，再开启执行入口；
+- 已注册 Command/Query 但未配置 Schema/Log 端口时 bootstrap fail-closed，并清理已启动模块；
+- shutdown 前检查活动 Transaction、Command 和 Query；生命周期本身不支持并发驱动。
+
+## 本阶段剩余工作
+
+- 建立无领域代码的 Headless/CLI 测试入口，验证发现、命令执行、查询执行、jsoncons Schema、spdlog 日志与 CTest 共用同一 Runtime；
+- 补齐完整 Release、重复执行、production-only 和架构边界门禁，再更新阶段交付文档。

@@ -9,6 +9,8 @@ target_sources(
         execution/command_registry.cpp
         execution/query_registry.cpp
         messaging/event_bus.cpp
+        execution/command_runtime.cpp
+        execution/query_runtime.cpp
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS "${PROJECT_SOURCE_DIR}/include"
@@ -23,4 +25,6 @@ target_sources(
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/query.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/query_registry.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/messaging/event_bus.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/command_runtime.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/query_runtime.hpp"
 )

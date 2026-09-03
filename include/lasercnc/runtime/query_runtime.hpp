@@ -1,0 +1,50 @@
+#pragma once
+
+#include <lasercnc/foundation/result.hpp>
+#include <lasercnc/runtime/query.hpp>
+
+#include <cstddef>
+#include <memory>
+
+namespace lasercnc::kernel {
+class AppKernel;
+}
+
+namespace lasercnc::state {
+class DocumentStore;
+}
+
+namespace lasercnc::runtime {
+
+class CapabilityService;
+class ExecutionServices;
+class QueryRegistry;
+
+class QueryRuntime final {
+public:
+    QueryRuntime(
+        QueryRegistry& registry,
+        state::DocumentStore& documents,
+        CapabilityService& capabilities,
+        ExecutionServices& executionServices);
+    ~QueryRuntime();
+
+    QueryRuntime(const QueryRuntime&) = delete;
+    QueryRuntime& operator=(const QueryRuntime&) = delete;
+
+    [[nodiscard]] foundation::Result<QueryResponse> execute(const QueryRequest& request);
+    [[nodiscard]] std::size_t activeExecutionCount() const noexcept;
+    [[nodiscard]] bool accepting() const noexcept;
+
+private:
+    friend class kernel::AppKernel;
+
+    class Impl;
+
+    void start() noexcept;
+    void stop() noexcept;
+
+    std::unique_ptr<Impl> impl_;
+};
+
+} // namespace lasercnc::runtime
