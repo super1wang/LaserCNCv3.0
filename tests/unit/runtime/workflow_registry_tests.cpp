@@ -1058,8 +1058,20 @@ TEST_CASE("ScriptRuntime evaluates structured control flow through registered po
     REQUIRE(scriptSpan != spans.end());
     REQUIRE(commandSpan != spans.end());
     REQUIRE(querySpan != spans.end());
-    CHECK(commandSpan->parentSpanId == std::optional<SpanId> {scriptSpan->spanId});
-    CHECK(querySpan->parentSpanId == std::optional<SpanId> {scriptSpan->spanId});
+    REQUIRE(commandSpan->parentSpanId.has_value());
+    REQUIRE(querySpan->parentSpanId.has_value());
+    const auto commandNodeSpan = std::find_if(spans.begin(), spans.end(), [&](const auto& span) {
+        return span.spanId == *commandSpan->parentSpanId;
+    });
+    const auto queryNodeSpan = std::find_if(spans.begin(), spans.end(), [&](const auto& span) {
+        return span.spanId == *querySpan->parentSpanId;
+    });
+    REQUIRE(commandNodeSpan != spans.end());
+    REQUIRE(queryNodeSpan != spans.end());
+    CHECK(commandNodeSpan->name == "script.node");
+    CHECK(queryNodeSpan->name == "script.node");
+    CHECK(commandNodeSpan->parentSpanId == std::optional<SpanId> {scriptSpan->spanId});
+    CHECK(queryNodeSpan->parentSpanId.has_value());
     CHECK(commandSpan->traceId == scriptSpan->traceId);
     CHECK(querySpan->traceId == scriptSpan->traceId);
 
@@ -1180,9 +1192,21 @@ TEST_CASE("ScriptRuntime invokes workflows through the workflow boundary", "[scr
     const auto workflowSpan = std::find_if(spans.begin(), spans.end(), [](const auto& span) {
         return span.name == "workflow.advance";
     });
+    const auto workflowStepSpan = std::find_if(spans.begin(), spans.end(), [](const auto& span) {
+        return span.name == "workflow.step";
+    });
     REQUIRE(scriptSpan != spans.end());
     REQUIRE(workflowSpan != spans.end());
-    CHECK(workflowSpan->parentSpanId == std::optional<SpanId> {scriptSpan->spanId});
+    REQUIRE(workflowStepSpan != spans.end());
+    REQUIRE(workflowSpan->parentSpanId.has_value());
+    const auto workflowNodeSpan = std::find_if(
+        spans.begin(), spans.end(), [&](const auto& span) {
+            return span.spanId == *workflowSpan->parentSpanId;
+        });
+    REQUIRE(workflowNodeSpan != spans.end());
+    CHECK(workflowNodeSpan->name == "script.node");
+    CHECK(workflowNodeSpan->parentSpanId == std::optional<SpanId> {scriptSpan->spanId});
+    CHECK(workflowStepSpan->parentSpanId == std::optional<SpanId> {workflowSpan->spanId});
     CHECK(workflowSpan->traceId == scriptSpan->traceId);
 }
 

@@ -26,6 +26,8 @@
 namespace lasercnc::runtime {
 namespace {
 
+constexpr std::size_t maximumObservedStepsPerInstance = 256U;
+
 foundation::Error runtimeError(
     std::string code,
     foundation::ErrorCategory category,
@@ -306,6 +308,52 @@ const char* workflowStateLabel(WorkflowState state) noexcept
     return "unknown";
 }
 
+const char* workflowStepKindLabel(WorkflowStepKind kind) noexcept
+{
+    switch(kind) {
+    case WorkflowStepKind::Command:
+        return "command";
+    case WorkflowStepKind::Query:
+        return "query";
+    case WorkflowStepKind::WaitTask:
+        return "wait_task";
+    case WorkflowStepKind::Assign:
+        return "assign";
+    case WorkflowStepKind::Assert:
+        return "assert";
+    case WorkflowStepKind::Barrier:
+        return "barrier";
+    }
+    return "unknown";
+}
+
+const char* workflowStepStateLabel(WorkflowStepState state) noexcept
+{
+    switch(state) {
+    case WorkflowStepState::Succeeded:
+        return "succeeded";
+    case WorkflowStepState::Waiting:
+        return "waiting";
+    case WorkflowStepState::Failed:
+        return "failed";
+    case WorkflowStepState::Cancelled:
+        return "cancelled";
+    case WorkflowStepState::CompensationFailed:
+        return "compensation_failed";
+    case WorkflowStepState::Compensated:
+        return "compensated";
+    case WorkflowStepState::Pending:
+        return "pending";
+    case WorkflowStepState::Ready:
+        return "ready";
+    case WorkflowStepState::Running:
+        return "running";
+    case WorkflowStepState::Skipped:
+        return "skipped";
+    }
+    return "unknown";
+}
+
 observability::TraceStatus workflowTraceStatus(WorkflowState state) noexcept
 {
     if(state == WorkflowState::Cancelled) {
@@ -326,6 +374,15 @@ foundation::Result<kernel::SpanId> workflowSpanId(const kernel::WorkflowId& work
         + std::to_string(sequence.fetch_add(1U, std::memory_order_relaxed)));
 }
 
+foundation::Result<kernel::SpanId> workflowStepSpanId(
+    const kernel::WorkflowId& workflowId)
+{
+    static std::atomic_ullong sequence {0U};
+    return kernel::SpanId::create(
+        "span.workflow-step." + std::string(workflowId.value()) + "."
+        + std::to_string(sequence.fetch_add(1U, std::memory_order_relaxed)));
+}
+
 void recordWorkflowMetrics(
     observability::IMetricsService& metrics,
     const char* outcome,
@@ -338,6 +395,33 @@ void recordWorkflowMetrics(
             static_cast<void>(metrics.addCounter(std::move(completed).value(), 1.0, labels));
         }
         auto duration = kernel::MetricName::create("kernel.workflow.advance.duration_ms");
+        if(duration) {
+            static_cast<void>(metrics.observeHistogram(
+                std::move(duration).value(),
+                std::chrono::duration<double, std::milli>(elapsed).count(),
+                labels));
+        }
+    } catch(...) {
+    }
+}
+
+void recordWorkflowStepMetrics(
+    observability::IMetricsService& metrics,
+    WorkflowStepKind kind,
+    WorkflowStepState state,
+    bool compensation,
+    std::chrono::steady_clock::duration elapsed) noexcept
+{
+    try {
+        const observability::MetricLabels labels {
+            {"compensation", compensation ? "true" : "false"},
+            {"kind", workflowStepKindLabel(kind)},
+            {"outcome", workflowStepStateLabel(state)}};
+        auto completed = kernel::MetricName::create("kernel.workflow.step.completed");
+        if(completed) {
+            static_cast<void>(metrics.addCounter(std::move(completed).value(), 1.0, labels));
+        }
+        auto duration = kernel::MetricName::create("kernel.workflow.step.duration_ms");
         if(duration) {
             static_cast<void>(metrics.observeHistogram(
                 std::move(duration).value(),
@@ -392,6 +476,8 @@ public:
         bool cancellationRequested{false};
         bool checkpointDirty{false};
         std::optional<kernel::SpanId> activeAdvanceSpanId;
+        std::optional<kernel::SpanId> activeStepSpanId;
+        std::size_t observedStepCount{0U};
     };
 
     foundation::Result<WorkflowSnapshot> startWorkflow(WorkflowRequest request)
@@ -849,9 +935,61 @@ public:
                 }
             }
 
-            StepOutcome outcome = compensation
-                ? executeCompensation(*instance, *operation, variables, attempt)
-                : executeStep(*instance, *operation, variables, attempt);
+            const auto stepStartedAt = std::chrono::steady_clock::now();
+            const auto previousStepSpanId = instance->activeStepSpanId;
+            std::unique_ptr<observability::ITraceSpan> stepSpan;
+            if(instance->observedStepCount < maximumObservedStepsPerInstance) {
+                ++instance->observedStepCount;
+                try {
+                    auto createdSpanId = workflowStepSpanId(workflowId);
+                    if(createdSpanId) {
+                        const auto spanId = createdSpanId.value();
+                        auto started = traces_.startSpan(observability::TraceSpanStart {
+                            instance->request.traceId,
+                            spanId,
+                            instance->activeAdvanceSpanId.has_value()
+                                ? instance->activeAdvanceSpanId
+                                : instance->request.parentSpanId,
+                            "workflow.step",
+                            foundation::Value::Object {
+                                {"compensation", foundation::Value {compensation}},
+                                {"kind", foundation::Value {workflowStepKindLabel(operation->kind)}},
+                                {"step", foundation::Value {std::string(operation->stepId.value())}},
+                            }});
+                        if(started && started.value() != nullptr) {
+                            instance->activeStepSpanId = spanId;
+                            stepSpan = std::move(started).value();
+                        }
+                    }
+                } catch(...) {
+                }
+            }
+            StepOutcome outcome;
+            try {
+                outcome = compensation
+                    ? executeCompensation(*instance, *operation, variables, attempt)
+                    : executeStep(*instance, *operation, variables, attempt);
+            } catch(...) {
+                instance->activeStepSpanId = previousStepSpanId;
+                throw;
+            }
+            instance->activeStepSpanId = previousStepSpanId;
+            if(stepSpan != nullptr) {
+                stepSpan->end(
+                    outcome.state == WorkflowStepState::Failed
+                            || outcome.state == WorkflowStepState::CompensationFailed
+                        ? observability::TraceStatus::Failed
+                        : outcome.state == WorkflowStepState::Cancelled
+                            ? observability::TraceStatus::Cancelled
+                            : observability::TraceStatus::Succeeded,
+                    outcome.error);
+            }
+            recordWorkflowStepMetrics(
+                metrics_,
+                operation->kind,
+                outcome.state,
+                compensation,
+                std::chrono::steady_clock::now() - stepStartedAt);
             bool cancelTasks = false;
             {
                 std::lock_guard lock(instance->mutex);
@@ -1285,8 +1423,10 @@ private:
                 instance.request.correlationId,
                 instance.request.traceId,
                 std::move(idempotency).value(),
-                instance.activeAdvanceSpanId.has_value()
-                    ? instance.activeAdvanceSpanId
+                instance.activeStepSpanId.has_value()
+                    ? instance.activeStepSpanId
+                    : instance.activeAdvanceSpanId.has_value()
+                        ? instance.activeAdvanceSpanId
                     : instance.request.parentSpanId});
             if(!response) {
                 return StepOutcome {
@@ -1332,8 +1472,10 @@ private:
                 std::move(arguments).value(),
                 instance.request.correlationId,
                 instance.request.traceId,
-                instance.activeAdvanceSpanId.has_value()
-                    ? instance.activeAdvanceSpanId
+                instance.activeStepSpanId.has_value()
+                    ? instance.activeStepSpanId
+                    : instance.activeAdvanceSpanId.has_value()
+                        ? instance.activeAdvanceSpanId
                     : instance.request.parentSpanId});
             if(!response) {
                 return StepOutcome {
@@ -1526,8 +1668,10 @@ private:
             instance.request.correlationId,
             instance.request.traceId,
             std::move(idempotency).value(),
-            instance.activeAdvanceSpanId.has_value()
-                ? instance.activeAdvanceSpanId
+            instance.activeStepSpanId.has_value()
+                ? instance.activeStepSpanId
+                : instance.activeAdvanceSpanId.has_value()
+                    ? instance.activeAdvanceSpanId
                 : instance.request.parentSpanId});
         if(!response) {
             return StepOutcome {

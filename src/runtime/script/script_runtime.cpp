@@ -27,6 +27,8 @@
 namespace lasercnc::runtime {
 namespace {
 
+constexpr std::size_t maximumObservedNodesPerExecution = 256U;
+
 struct ScriptObservationContext final {
     kernel::TraceId traceId;
     std::optional<kernel::SpanId> parentSpanId;
@@ -52,6 +54,31 @@ const char* scriptStateLabel(ScriptState state) noexcept
     return "unknown";
 }
 
+const char* scriptNodeKindLabel(ScriptNodeKind kind) noexcept
+{
+    switch(kind) {
+    case ScriptNodeKind::Command:
+        return "command";
+    case ScriptNodeKind::Query:
+        return "query";
+    case ScriptNodeKind::Workflow:
+        return "workflow";
+    case ScriptNodeKind::Wait:
+        return "wait";
+    case ScriptNodeKind::Assign:
+        return "assign";
+    case ScriptNodeKind::Assert:
+        return "assert";
+    case ScriptNodeKind::If:
+        return "if";
+    case ScriptNodeKind::ForEach:
+        return "foreach";
+    case ScriptNodeKind::Include:
+        return "include";
+    }
+    return "unknown";
+}
+
 observability::TraceStatus scriptTraceStatus(ScriptState state) noexcept
 {
     if(state == ScriptState::Cancelled) {
@@ -70,6 +97,15 @@ foundation::Result<kernel::SpanId> scriptSpanId(
         + std::to_string(sequence.fetch_add(1U, std::memory_order_relaxed)));
 }
 
+foundation::Result<kernel::SpanId> scriptNodeSpanId(
+    const kernel::ScriptExecutionId& executionId)
+{
+    static std::atomic_ullong sequence {0U};
+    return kernel::SpanId::create(
+        "span.script-node." + std::string(executionId.value()) + "."
+        + std::to_string(sequence.fetch_add(1U, std::memory_order_relaxed)));
+}
+
 void recordScriptMetrics(
     observability::IMetricsService& metrics,
     const char* outcome,
@@ -82,6 +118,30 @@ void recordScriptMetrics(
             static_cast<void>(metrics.addCounter(std::move(completed).value(), 1.0, labels));
         }
         auto duration = kernel::MetricName::create("kernel.script.advance.duration_ms");
+        if(duration) {
+            static_cast<void>(metrics.observeHistogram(
+                std::move(duration).value(),
+                std::chrono::duration<double, std::milli>(elapsed).count(),
+                labels));
+        }
+    } catch(...) {
+    }
+}
+
+void recordScriptNodeMetrics(
+    observability::IMetricsService& metrics,
+    ScriptNodeKind kind,
+    const char* outcome,
+    std::chrono::steady_clock::duration elapsed) noexcept
+{
+    try {
+        const observability::MetricLabels labels {
+            {"kind", scriptNodeKindLabel(kind)}, {"outcome", outcome}};
+        auto completed = kernel::MetricName::create("kernel.script.node.completed");
+        if(completed) {
+            static_cast<void>(metrics.addCounter(std::move(completed).value(), 1.0, labels));
+        }
+        auto duration = kernel::MetricName::create("kernel.script.node.duration_ms");
         if(duration) {
             static_cast<void>(metrics.observeHistogram(
                 std::move(duration).value(),
@@ -386,6 +446,8 @@ public:
         bool advancing{false};
         bool cancellationRequested{false};
         std::optional<kernel::SpanId> activeAdvanceSpanId;
+        std::optional<kernel::SpanId> activeNodeSpanId;
+        std::size_t observedNodeCount{0U};
     };
 
     enum class NodeOutcome : std::uint8_t { Completed, Waiting, Failed };
@@ -731,7 +793,58 @@ private:
             if(!consumeBudget(instance, node)) {
                 return NodeOutcome::Failed;
             }
-            const auto outcome = executeNode(instance, node, key, locals, depth, lock);
+            const auto nodeStartedAt = std::chrono::steady_clock::now();
+            const auto previousNodeSpanId = instance.activeNodeSpanId;
+            std::unique_ptr<observability::ITraceSpan> nodeSpan;
+            if(instance.observedNodeCount < maximumObservedNodesPerExecution) {
+                ++instance.observedNodeCount;
+                try {
+                    auto createdSpanId = scriptNodeSpanId(instance.request.executionId);
+                    if(createdSpanId) {
+                        const auto spanId = createdSpanId.value();
+                        auto started = traces_.startSpan(observability::TraceSpanStart {
+                            instance.request.traceId,
+                            spanId,
+                            instance.activeNodeSpanId.has_value()
+                                ? instance.activeNodeSpanId
+                                : instance.activeAdvanceSpanId.has_value()
+                                    ? instance.activeAdvanceSpanId
+                                    : instance.request.parentSpanId,
+                            "script.node",
+                            foundation::Value::Object {
+                                {"kind", foundation::Value {scriptNodeKindLabel(node.kind)}},
+                                {"node", foundation::Value {std::string(node.nodeId.value())}},
+                            }});
+                        if(started && started.value() != nullptr) {
+                            instance.activeNodeSpanId = spanId;
+                            nodeSpan = std::move(started).value();
+                        }
+                    }
+                } catch(...) {
+                }
+            }
+            NodeOutcome outcome;
+            try {
+                outcome = executeNode(instance, node, key, locals, depth, lock);
+            } catch(...) {
+                instance.activeNodeSpanId = previousNodeSpanId;
+                throw;
+            }
+            instance.activeNodeSpanId = previousNodeSpanId;
+            const auto outcomeLabel = outcome == NodeOutcome::Completed
+                ? "completed"
+                : outcome == NodeOutcome::Waiting ? "waiting" : "failed";
+            if(nodeSpan != nullptr) {
+                nodeSpan->end(
+                    outcome == NodeOutcome::Failed ? observability::TraceStatus::Failed
+                                                   : observability::TraceStatus::Succeeded,
+                    outcome == NodeOutcome::Failed ? instance.snapshot.error : std::nullopt);
+            }
+            recordScriptNodeMetrics(
+                metrics_,
+                node.kind,
+                outcomeLabel,
+                std::chrono::steady_clock::now() - nodeStartedAt);
             if(outcome != NodeOutcome::Completed) {
                 return outcome;
             }
@@ -955,8 +1068,10 @@ private:
             instance.request.correlationId,
             instance.request.traceId,
             std::move(idempotency).value(),
-            instance.activeAdvanceSpanId.has_value()
-                ? instance.activeAdvanceSpanId
+            instance.activeNodeSpanId.has_value()
+                ? instance.activeNodeSpanId
+                : instance.activeAdvanceSpanId.has_value()
+                    ? instance.activeAdvanceSpanId
                 : instance.request.parentSpanId};
         lock.unlock();
         auto response = commands_.execute(request);
@@ -1026,8 +1141,10 @@ private:
             std::move(arguments).value(),
             instance.request.correlationId,
             instance.request.traceId,
-            instance.activeAdvanceSpanId.has_value()
-                ? instance.activeAdvanceSpanId
+            instance.activeNodeSpanId.has_value()
+                ? instance.activeNodeSpanId
+                : instance.activeAdvanceSpanId.has_value()
+                    ? instance.activeAdvanceSpanId
                 : instance.request.parentSpanId};
         lock.unlock();
         auto response = queries_.execute(request);
@@ -1077,8 +1194,10 @@ private:
             instance.request.correlationId,
             instance.request.traceId,
             std::nullopt,
-            instance.activeAdvanceSpanId.has_value()
-                ? instance.activeAdvanceSpanId
+            instance.activeNodeSpanId.has_value()
+                ? instance.activeNodeSpanId
+                : instance.activeAdvanceSpanId.has_value()
+                    ? instance.activeAdvanceSpanId
                 : instance.request.parentSpanId};
         lock.unlock();
         auto started = workflows_.startWorkflow(request);
