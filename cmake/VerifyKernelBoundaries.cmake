@@ -68,6 +68,8 @@ lcnc_require_pattern_in_directory("toml::" "/src/infrastructure/config/toml11/")
 lcnc_require_pattern_in_directory("#include <toml.hpp>" "/src/infrastructure/config/toml11/")
 lcnc_require_pattern_in_directory("BS::thread_pool" "/src/infrastructure/execution/bs_thread_pool/")
 lcnc_require_pattern_in_directory("#include <BS_thread_pool.hpp>" "/src/infrastructure/execution/bs_thread_pool/")
+lcnc_require_pattern_in_directory("BCrypt" "/src/infrastructure/hash/windows/")
+lcnc_require_pattern_in_directory("#include <bcrypt.h>" "/src/infrastructure/hash/windows/")
 
 list(LENGTH production_sources production_source_count)
 message(STATUS "第三方实现目录隔离检查通过，共检查 ${production_source_count} 个生产源文件")

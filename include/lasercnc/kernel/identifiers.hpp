@@ -25,6 +25,8 @@ struct TraceIdTag;
 struct SpanIdTag;
 struct MetricNameTag;
 struct DiagnosticIdTag;
+struct SnapshotIdTag;
+struct ContentDigestTag;
 struct IdempotencyKeyTag;
 struct SubscriptionIdTag;
 
@@ -49,6 +51,8 @@ using TraceId = foundation::StrongId<TraceIdTag>;
 using SpanId = foundation::StrongId<SpanIdTag>;
 using MetricName = foundation::StrongId<MetricNameTag>;
 using DiagnosticId = foundation::StrongId<DiagnosticIdTag>;
+using SnapshotId = foundation::StrongId<SnapshotIdTag>;
+using ContentDigest = foundation::StrongId<ContentDigestTag>;
 using IdempotencyKey = foundation::StrongId<IdempotencyKeyTag>;
 using SubscriptionId = foundation::StrongId<SubscriptionIdTag>;
 

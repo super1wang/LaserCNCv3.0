@@ -50,6 +50,7 @@ add_executable(
     lasercnc_infrastructure_tests
     unit/infrastructure/bs_thread_pool_executor_tests.cpp
     unit/infrastructure/jsoncons_adapter_tests.cpp
+    unit/infrastructure/sha256_hash_service_tests.cpp
     unit/infrastructure/spdlog_log_service_tests.cpp
     unit/infrastructure/sqlite_persistence_backend_tests.cpp
     unit/infrastructure/toml_config_adapter_tests.cpp
