@@ -1,6 +1,7 @@
 #include <lasercnc/kernel/app_kernel.hpp>
 
 #include <catch2/catch_test_macros.hpp>
+#include "kernel_test_module.hpp"
 
 #include <algorithm>
 #include <memory>
@@ -398,9 +399,10 @@ ModuleDescriptor governedDescriptor(const char* id)
     return descriptor;
 }
 
-Result<void> registerGovernedContributions(ModuleRegistrar& registrar)
+Result<void> registerGovernedContributionsObserved(ModuleRegistrar& registrar, std::weak_ptr<IProbeService>* observed)
 {
     std::shared_ptr<IProbeService> service = std::make_shared<ProbeService>();
+    if(observed) { *observed = service; }
     auto result = registrar.registerService(
         makeServiceId("service.module.governed"), std::move(service));
     if(result) {
@@ -435,7 +437,90 @@ Result<void> registerGovernedContributions(ModuleRegistrar& registrar)
     return result;
 }
 
+Result<void> registerGovernedContributions(ModuleRegistrar& registrar)
+{
+    return registerGovernedContributionsObserved(registrar, nullptr);
+}
+
 } // namespace
+
+TEST_CASE("Kernel module stress failures release all contributions and owned services", "[kernel][modules][stress][f3b]")
+{
+    for(unsigned int round = 0U; round < 20U; ++round) {
+        for(unsigned int failureMode = 0U; failureMode < 3U; ++failureMode) {
+            INFO("round=" << round << " failureMode=" << failureMode);
+            std::weak_ptr<IProbeService> lifetime;
+            {
+                AppKernel kernel;
+                REQUIRE(kernel.executionServices().configure(std::make_shared<PassSchemaValidator>(),
+                    std::make_shared<NullLogService>()));
+                auto descriptor = governedDescriptor("module.stress.provider");
+                descriptor.objectTypes = {makeId<ObjectTypeId>("type.stress.module")};
+                REQUIRE(kernel.addModule(std::make_unique<RegistrarModule>(descriptor,
+                    [&](ModuleRegistrar& registrar) {
+                        auto result = registerGovernedContributionsObserved(registrar, &lifetime);
+                        if(result) { result = registrar.registerObjectType(lasercnc::test::valueObjectType("type.stress.module")); }
+                        if(!result) { return result; }
+                        if(failureMode == 0U) {
+                            return Result<void>::failure(makeError("Test.StressRegistrationFailed", ErrorCategory::Internal,
+                                "Failure after all contributions were installed"));
+                        }
+                        if(failureMode == 1U) { throw std::runtime_error("Stress registration exception"); }
+                        return Result<void>::success();
+                    })));
+                if(failureMode == 2U) {
+                    REQUIRE(kernel.addModule(std::make_unique<RegistrarModule>(makeDescriptor("module.stress.failing",
+                        {1U, 0U, 0U}, {{descriptor.id, {1U, 0U, 0U}}}),
+                        [](ModuleRegistrar&) { return Result<void>::success(); }, true)));
+                }
+                const auto started = kernel.bootstrap();
+                REQUIRE_FALSE(started);
+                REQUIRE(std::string(started.error().code.value()) == "Kernel.ModuleLifecycleFailed");
+                REQUIRE(started.error().cause != nullptr);
+                if(failureMode == 0U) {
+                    REQUIRE(std::string(started.error().cause->code.value()) == "Test.StressRegistrationFailed");
+                }
+                if(failureMode == 1U) {
+                    REQUIRE(std::string(started.error().cause->code.value()) == "Kernel.ModuleLifecycleException");
+                }
+                if(failureMode == 2U) {
+                    REQUIRE(std::string(started.error().cause->code.value()) == "Test.RegistrarStartFailed");
+                }
+                REQUIRE(kernel.state() == AppKernelState::Failed);
+                REQUIRE(lifetime.expired());
+                REQUIRE_FALSE(kernel.services().contains(makeServiceId("service.module.governed")));
+                REQUIRE(kernel.commandRegistry().size() == 0U);
+                REQUIRE(kernel.queryRegistry().size() == 0U);
+                REQUIRE(kernel.taskRegistry().size() == 0U);
+                REQUIRE(kernel.workflowRegistry().size() == 0U);
+                REQUIRE(kernel.scriptRegistry().size() == 0U);
+                REQUIRE(kernel.objectTypes().size() == 0U);
+            }
+            REQUIRE(lifetime.expired());
+            // The same declared identities must remain usable in a new composition.
+            // 中文翻译：新的内核组合仍能使用相同声明身份，失败不能泄漏进程级所有权。
+            AppKernel healthy;
+            REQUIRE(healthy.executionServices().configure(std::make_shared<PassSchemaValidator>(),
+                std::make_shared<NullLogService>()));
+            REQUIRE(healthy.configureTaskExecutor(std::make_unique<InlineTaskExecutor>()));
+            auto descriptor = governedDescriptor("module.stress.provider");
+            descriptor.objectTypes = {makeId<ObjectTypeId>("type.stress.module")};
+            REQUIRE(healthy.addModule(std::make_unique<RegistrarModule>(descriptor,
+                [](ModuleRegistrar& registrar) {
+                    auto result = registerGovernedContributions(registrar);
+                    if(result) { result = registrar.registerObjectType(lasercnc::test::valueObjectType("type.stress.module")); }
+                    return result;
+                })));
+            const auto started = healthy.bootstrap();
+            INFO((started ? std::string{} : std::string(started.error().code.value())));
+            REQUIRE(started);
+            REQUIRE(healthy.commandRegistry().size() > 0U);
+            REQUIRE(healthy.queryRegistry().size() == 1U);
+            REQUIRE(healthy.objectTypes().size() == 1U);
+            REQUIRE(healthy.shutdown());
+        }
+    }
+}
 
 TEST_CASE("ModuleRuntime uses deterministic dependency lifecycle ordering", "[kernel][modules]")
 {

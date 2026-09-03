@@ -48,7 +48,7 @@ target_compile_features(lasercnc_kernel_tests PRIVATE cxx_std_20)
 set_target_properties(lasercnc_kernel_tests PROPERTIES CXX_EXTENSIONS OFF)
 lcnc_enable_warnings(lasercnc_kernel_tests)
 
-catch_discover_tests(lasercnc_kernel_tests)
+catch_discover_tests(lasercnc_kernel_tests PROPERTIES TIMEOUT 120)
 
 add_executable(
     lasercnc_infrastructure_tests
@@ -78,7 +78,7 @@ target_compile_definitions(lasercnc_infrastructure_tests PRIVATE
 target_compile_features(lasercnc_infrastructure_tests PRIVATE cxx_std_20)
 set_target_properties(lasercnc_infrastructure_tests PROPERTIES CXX_EXTENSIONS OFF)
 lcnc_enable_warnings(lasercnc_infrastructure_tests)
-catch_discover_tests(lasercnc_infrastructure_tests PROPERTIES TIMEOUT 120)
+catch_discover_tests(lasercnc_infrastructure_tests PROPERTIES TIMEOUT 300)
 
 add_test(
     NAME architecture.kernel_public_api_boundary

@@ -1,6 +1,7 @@
 #include "kernel_test_module.hpp"
 
 #include <lasercnc/infrastructure/filesystem_snapshot_store.hpp>
+#include <lasercnc/infrastructure/bs_thread_pool_executor.hpp>
 #include <lasercnc/infrastructure/jsoncons_adapter.hpp>
 #include <lasercnc/infrastructure/sha256_hash_service.hpp>
 #include <lasercnc/infrastructure/sqlite_persistence_backend.hpp>
@@ -148,6 +149,39 @@ private:
     std::unique_ptr<platform::ISnapshotStore> store_;
 };
 
+const auto taskResource = id<ResourceId>("resource.stress.task");
+class GatedTaskHandler final : public ITaskHandler {
+public:
+    Result<Value> execute(const TaskRequest&, const TaskContext& context) override
+    {
+        ++calls;
+        if(std::this_thread::get_id() == caller || !context.document
+           || context.document->id() != document || context.resources.claims.size() != 1U) {
+            throw std::runtime_error("Test.InvalidTaskContext");
+        }
+        take(context.progress.report(0.5, "held at completion boundary"));
+        gate.arriveAndWait();
+        return Result<Value>::success(Value{Value::Object{{"done", Value{true}}}});
+    }
+    TimedGate gate;
+    std::atomic_uint calls{0U};
+    std::thread::id caller{std::this_thread::get_id()};
+};
+
+class TaskPlanHandler final : public IAsyncCommandHandler {
+public:
+    Result<AsyncCommandPlan> prepare(const CommandRequest& request) override
+    {
+        TaskRequest task{take(TaskId::create("task." + std::string(request.requestId.value()))),
+            id<TaskName>("task.stress"), Value{Value::Object{}}, request.traceId, request.correlationId,
+            project, document};
+        task.resources = {{ResourceKind::DiskIO, taskResource, ResourceAccess::Exclusive, 1U}};
+        return Result<AsyncCommandPlan>::success({std::move(task), Value{Value::Object{{"accepted", Value{true}}}}});
+    }
+};
+
+enum class ExecutionScenario { None, Task, Workflow };
+
 std::filesystem::path newRoot()
 {
     static std::atomic_ullong sequence{0U};
@@ -160,7 +194,8 @@ std::filesystem::path newRoot()
 }
 
 struct Fixture final {
-    explicit Fixture(const std::filesystem::path& root, bool seed = true)
+    explicit Fixture(const std::filesystem::path& root, bool seed = true,
+        ExecutionScenario execution = ExecutionScenario::None)
     {
         if(seed) { take(kernel.addDocument(project, document)); }
         take(kernel.executionServices().configure(std::make_shared<JsonconsAdapter>(), std::make_shared<NullLog>()));
@@ -171,6 +206,26 @@ struct Fixture final {
             id<CapabilityId>("document.write"), true, true, true}, command));
         take(test::registerQuery(kernel, QueryDescriptor{id<QueryName>("test.stress.read"), {1U, 0U, 0U},
             schema, schema, id<CapabilityId>("document.read"), ExecutionScope::Document, true}, query));
+        if(execution == ExecutionScenario::Task) {
+            take(kernel.configureTaskExecutor(take(BsThreadPoolExecutor::create({1U}))));
+            take(kernel.resources().configure(ResourceKind::DiskIO, taskResource, 1U));
+            take(test::registerTask(kernel, TaskDescriptor{id<TaskName>("task.stress"), {1U, 0U, 0U}, schema, schema}, task));
+            take(test::registerAsyncCommand(kernel, CommandDescriptor{id<CommandName>("test.stress.task"), {1U, 0U, 0U},
+                schema, schema, ExecutionMode::Asynchronous, SideEffectLevel::ReadOnly,
+                id<CapabilityId>("document.read"), false, true, true}, std::make_shared<TaskPlanHandler>()));
+        }
+        if(execution == ExecutionScenario::Workflow) {
+            WorkflowStep first{id<WorkflowStepId>("step.stress.first"), WorkflowStepKind::Command};
+            first.command = WorkflowCommandCall{id<CommandName>("test.stress.create"), {1U, 0U, 0U},
+                Value{Value::Object{{"id", Value{"object.stress.first"}}}}};
+            WorkflowStep second{id<WorkflowStepId>("step.stress.second"), WorkflowStepKind::Command};
+            second.dependencies = {first.stepId};
+            second.command = WorkflowCommandCall{id<CommandName>("test.stress.create"), {1U, 0U, 0U},
+                Value{Value::Object{{"id", Value{"object.stress.second"}}}}};
+            take(test::registerWorkflow(kernel, WorkflowDefinition{WorkflowDescriptor{
+                id<WorkflowName>("workflow.stress"), {1U, 0U, 0U}, schema, schema},
+                {first, second}, Value{Value::Object{}}}));
+        }
         take(kernel.capabilities().replace(session, std::array{id<CapabilityId>("document.write"), id<CapabilityId>("document.read")}));
         auto snapshotStore = std::make_unique<GatedSnapshotStore>(take(FilesystemSnapshotStore::create({root / "snapshots", 1024U * 1024U})));
         store = snapshotStore.get();
@@ -183,6 +238,7 @@ struct Fixture final {
     AppKernel kernel;
     std::shared_ptr<CreateHandler> command{std::make_shared<CreateHandler>()};
     std::shared_ptr<QueryHandler> query{std::make_shared<QueryHandler>()};
+    std::shared_ptr<GatedTaskHandler> task{std::make_shared<GatedTaskHandler>()};
     GatedSnapshotStore* store{nullptr};
 };
 
@@ -239,7 +295,307 @@ void verifyQuery(const QueryResponse& response)
     REQUIRE(response.revisions == RevisionSet{});
     REQUIRE(response.postExecutionErrors.empty());
 }
+
+enum class CancelOrder { BeforeCompletion, AfterCompletion, Race };
+CommandRequest taskCommand()
+{
+    auto request = createRequest();
+    request.command = id<CommandName>("test.stress.task");
+    request.arguments = Value{Value::Object{}};
+    request.idempotencyKey = id<IdempotencyKey>("key.stress.task");
+    return request;
+}
+void verifyResources(AppKernel& kernel, bool held)
+{
+    const auto resources = kernel.resources().snapshot();
+    REQUIRE(resources.size() == 1U);
+    REQUIRE(resources.front().resource == taskResource);
+    REQUIRE(resources.front().exclusivelyHeld == held);
+    REQUIRE(resources.front().sharedUnits == 0U);
+}
+void verifyTask(const TaskSnapshot& snapshot, TaskState expected)
+{
+    REQUIRE(snapshot.state == expected);
+    REQUIRE(snapshot.sourceRevisions == RevisionSet{});
+    if(expected == TaskState::Cancelled) {
+        REQUIRE(snapshot.error.has_value());
+        REQUIRE(std::string(snapshot.error->code.value()) == "Task.Cancelled");
+        REQUIRE_FALSE(snapshot.result.has_value());
+    } else {
+        REQUIRE_FALSE(snapshot.error.has_value());
+        REQUIRE(snapshot.result == Value{Value::Object{{"done", Value{true}}}});
+    }
+}
+
+void exerciseTaskCancellation(CancelOrder order)
+{
+    for(unsigned int round = 0U; round < rounds; ++round) {
+        const auto root = newRoot();
+        INFO("round=" << round << " evidence=" << root.string());
+        const auto request = taskCommand();
+        std::optional<TaskId> taskId;
+        TaskState finalState{TaskState::Failed};
+        {
+            Fixture fixture{root, true, ExecutionScenario::Task};
+            auto& kernel = fixture.kernel;
+            TimedGate race;
+            std::vector<std::future<Result<void>>> cancels;
+            std::future<void> finish;
+            ReleaseOnExit releaseWorker{fixture.task->gate};
+            ReleaseOnExit releaseRace{race};
+            const auto accepted = take(kernel.execution().executeCommand(request));
+            REQUIRE(accepted.taskId.has_value());
+            taskId = accepted.taskId;
+            REQUIRE(fixture.task->gate.awaitArrivals(1U));
+            REQUIRE(take(kernel.execution().task(*taskId)).state == TaskState::Running);
+            REQUIRE(kernel.scheduler().activeTaskCount() == 1U);
+            verifyResources(kernel, true);
+            const auto closed = kernel.documentRuntime().close(document);
+            REQUIRE_FALSE(closed);
+            REQUIRE(std::string(closed.error().code.value()) == "Document.CloseBlocked");
+            REQUIRE(take(kernel.documentRuntime().lifecycle(document)).state == DocumentLifecycleState::Open);
+            if(order == CancelOrder::AfterCompletion) {
+                fixture.task->gate.release();
+                verifyTask(take(kernel.execution().waitTask(*taskId, 5s)), TaskState::Succeeded);
+            }
+            for(unsigned int index = 0U; index < 8U; ++index) {
+                cancels.push_back(std::async(std::launch::async, [&] {
+                    if(order == CancelOrder::Race) { race.arriveAndWait(); }
+                    return kernel.execution().cancelTask(*taskId);
+                }));
+            }
+            if(order == CancelOrder::Race) {
+                finish = std::async(std::launch::async, [&] { race.arriveAndWait(); fixture.task->gate.release(); });
+                REQUIRE(race.awaitArrivals(9U));
+                race.release();
+            }
+            for(auto& future : cancels) { REQUIRE(completed(future)); }
+            if(order == CancelOrder::BeforeCompletion) {
+                REQUIRE(take(kernel.execution().task(*taskId)).state == TaskState::CancelRequested);
+                REQUIRE(kernel.scheduler().activeTaskCount() == 1U);
+                verifyResources(kernel, true);
+                const auto stillBlocked = kernel.documentRuntime().close(document);
+                REQUIRE_FALSE(stillBlocked);
+                REQUIRE(std::string(stillBlocked.error().code.value()) == "Document.CloseBlocked");
+                fixture.task->gate.release();
+            }
+            if(finish.valid()) { completed(finish); }
+            const auto terminal = take(kernel.execution().waitTask(*taskId, 5s));
+            finalState = terminal.state;
+            if(order == CancelOrder::BeforeCompletion) { REQUIRE(finalState == TaskState::Cancelled); }
+            else if(order == CancelOrder::AfterCompletion) { REQUIRE(finalState == TaskState::Succeeded); }
+            else { REQUIRE((finalState == TaskState::Cancelled || finalState == TaskState::Succeeded)); }
+            verifyTask(terminal, finalState);
+            REQUIRE(fixture.task->calls == 1U);
+            verifyResources(kernel, false);
+            verifyState(kernel, 0U);
+            // Prove released executor capacity and resource claims by running another task.
+            // 中文翻译：实际执行下一任务，验证线程池容量和独占资源都已释放。
+            auto next = request;
+            next.requestId = id<RequestId>("request.stress.next");
+            next.idempotencyKey.reset();
+            const auto nextAccepted = take(kernel.execution().executeCommand(next));
+            REQUIRE(nextAccepted.taskId.has_value());
+            verifyTask(take(kernel.execution().waitTask(*nextAccepted.taskId, 5s)), TaskState::Succeeded);
+            REQUIRE(fixture.task->calls == 2U);
+            verifyResources(kernel, false);
+            REQUIRE(kernel.documentRuntime().close(document));
+            REQUIRE(kernel.documentRuntime().open(document));
+            verifyState(kernel, 0U);
+            REQUIRE(kernel.shutdown());
+        }
+        Fixture recovered{root, false, ExecutionScenario::Task};
+        const auto accepted = take(recovered.kernel.execution().executeCommand(request));
+        REQUIRE(accepted.replayed);
+        REQUIRE(accepted.taskId == taskId);
+        verifyTask(take(recovered.kernel.execution().waitTask(*taskId, 5s)), finalState);
+        REQUIRE(recovered.task->calls == 0U);
+        verifyResources(recovered.kernel, false);
+        verifyState(recovered.kernel, 0U);
+        REQUIRE(recovered.kernel.shutdown());
+    }
+}
+
+WorkflowRequest stressWorkflow()
+{
+    return {id<WorkflowId>("workflow.stress.instance"), id<WorkflowName>("workflow.stress"), Value{Value::Object{}},
+        session, project, document, id<CorrelationId>("correlation.stress"), id<TraceId>("trace.stress")};
+}
+void verifyWorkflow(const WorkflowSnapshot& snapshot, WorkflowState expected, std::size_t commits)
+{
+    REQUIRE(snapshot.state == expected);
+    REQUIRE(snapshot.steps.size() == 2U);
+    REQUIRE(snapshot.steps.front().state == WorkflowStepState::Succeeded);
+    REQUIRE(snapshot.steps.front().attempt == 1U);
+    REQUIRE(snapshot.steps.front().result == Value{Value::Object{{"id", Value{"object.stress.first"}}}});
+    REQUIRE_FALSE(snapshot.steps.front().error.has_value());
+    const auto& second = snapshot.steps.back();
+    if(commits == 1U) {
+        REQUIRE(second.state == WorkflowStepState::Cancelled);
+        REQUIRE(second.attempt == 0U);
+        REQUIRE_FALSE(second.result.has_value());
+    } else {
+        REQUIRE(second.state == WorkflowStepState::Succeeded);
+        REQUIRE(second.attempt == 1U);
+        REQUIRE(second.result == Value{Value::Object{{"id", Value{"object.stress.second"}}}});
+    }
+    if(expected == WorkflowState::Cancelled) {
+        REQUIRE(snapshot.error.has_value());
+        REQUIRE(std::string(snapshot.error->code.value()) == "Workflow.Cancelled");
+    } else {
+        REQUIRE_FALSE(snapshot.error.has_value());
+        REQUIRE(snapshot.result == Value{Value::Object{}});
+    }
+}
+
+void exerciseWorkflowCancellation(CancelOrder order)
+{
+    for(unsigned int round = 0U; round < rounds; ++round) {
+        const auto root = newRoot();
+        INFO("round=" << round << " evidence=" << root.string());
+        const auto request = stressWorkflow();
+        WorkflowState finalState{WorkflowState::Failed};
+        std::size_t commits = 0U;
+        {
+            Fixture fixture{root, true, ExecutionScenario::Workflow};
+            auto& kernel = fixture.kernel;
+            auto gate = std::make_shared<TimedGate>();
+            fixture.command->gate = gate;
+            TimedGate race;
+            std::future<Result<WorkflowSnapshot>> advance;
+            std::vector<std::future<Result<WorkflowSnapshot>>> cancels;
+            std::future<void> finish;
+            ReleaseOnExit releaseWorker{*gate};
+            ReleaseOnExit releaseRace{race};
+            REQUIRE(kernel.execution().startWorkflow(request));
+            advance = std::async(std::launch::async, [&] { return kernel.execution().advanceWorkflow(request.workflowId); });
+            REQUIRE(gate->awaitArrivals(1U));
+            const auto running = take(kernel.execution().workflow(request.workflowId));
+            REQUIRE(running.steps.front().state == WorkflowStepState::Running);
+            REQUIRE(running.steps.front().attempt == 1U);
+            const auto closed = kernel.documentRuntime().close(document);
+            REQUIRE_FALSE(closed);
+            REQUIRE(std::string(closed.error().code.value()) == "Document.ActiveOperations");
+            const auto stopped = kernel.shutdown();
+            REQUIRE_FALSE(stopped);
+            REQUIRE(std::string(stopped.error().code.value()) == "Kernel.ActiveTransactions");
+            REQUIRE(kernel.state() == AppKernelState::Ready);
+            if(order == CancelOrder::AfterCompletion) {
+                gate->release();
+                REQUIRE(take(completed(advance)).state == WorkflowState::Succeeded);
+            }
+            for(unsigned int index = 0U; index < 8U; ++index) {
+                cancels.push_back(std::async(std::launch::async, [&] {
+                    if(order == CancelOrder::Race) { race.arriveAndWait(); }
+                    return kernel.execution().cancelWorkflow(request.workflowId);
+                }));
+            }
+            if(order == CancelOrder::Race) {
+                finish = std::async(std::launch::async, [&] { race.arriveAndWait(); gate->release(); });
+                REQUIRE(race.awaitArrivals(9U));
+                race.release();
+            }
+            for(auto& future : cancels) {
+                const auto cancelled = take(completed(future));
+                REQUIRE((cancelled.state == WorkflowState::CancelRequested
+                    || cancelled.state == WorkflowState::Cancelled || cancelled.state == WorkflowState::Succeeded));
+            }
+            if(order == CancelOrder::BeforeCompletion) {
+                const auto cancelling = take(kernel.execution().workflow(request.workflowId));
+                REQUIRE(cancelling.state == WorkflowState::CancelRequested);
+                REQUIRE(cancelling.steps.front().state == WorkflowStepState::Running);
+                REQUIRE(take(kernel.documents().snapshot(document)).objects().size() == 0U);
+                gate->release();
+            }
+            if(finish.valid()) { completed(finish); }
+            const auto terminal = advance.valid() ? take(completed(advance))
+                : take(kernel.execution().workflow(request.workflowId));
+            finalState = terminal.state;
+            commits = terminal.steps.back().state == WorkflowStepState::Succeeded ? 2U : 1U;
+            if(order == CancelOrder::BeforeCompletion) {
+                REQUIRE(finalState == WorkflowState::Cancelled);
+                REQUIRE(commits == 1U);
+            } else if(order == CancelOrder::AfterCompletion) {
+                REQUIRE(finalState == WorkflowState::Succeeded);
+                REQUIRE(commits == 2U);
+            } else { REQUIRE((finalState == WorkflowState::Cancelled || finalState == WorkflowState::Succeeded)); }
+            verifyWorkflow(terminal, finalState, commits);
+            REQUIRE(fixture.command->calls == commits);
+            verifyState(kernel, commits);
+            verifyWorkflow(take(kernel.execution().advanceWorkflow(request.workflowId)), finalState, commits);
+            REQUIRE(fixture.command->calls == commits);
+            REQUIRE(kernel.documentRuntime().close(document));
+            REQUIRE(kernel.documentRuntime().open(document));
+            verifyState(kernel, commits);
+            REQUIRE(kernel.shutdown());
+        }
+        Fixture recovered{root, false, ExecutionScenario::Workflow};
+        verifyWorkflow(take(recovered.kernel.execution().workflow(request.workflowId)), finalState, commits);
+        verifyWorkflow(take(recovered.kernel.execution().cancelWorkflow(request.workflowId)), finalState, commits);
+        verifyWorkflow(take(recovered.kernel.execution().advanceWorkflow(request.workflowId)), finalState, commits);
+        REQUIRE(recovered.command->calls == 0U);
+        verifyState(recovered.kernel, commits);
+        REQUIRE(recovered.kernel.shutdown());
+    }
+}
 } // namespace
+
+TEST_CASE("Kernel task stress repeated cancellation preserves running ownership", "[runtime][stress][f3b]")
+{ exerciseTaskCancellation(CancelOrder::BeforeCompletion); }
+TEST_CASE("Kernel task stress cancellation after completion preserves success", "[runtime][stress][f3b]")
+{ exerciseTaskCancellation(CancelOrder::AfterCompletion); }
+TEST_CASE("Kernel task stress cancellation races completion without losing resources", "[runtime][stress][f3b]")
+{ exerciseTaskCancellation(CancelOrder::Race); }
+
+TEST_CASE("Kernel workflow stress running cancellation retains accepted commits", "[runtime][stress][f3b]")
+{ exerciseWorkflowCancellation(CancelOrder::BeforeCompletion); }
+TEST_CASE("Kernel workflow stress late cancellation preserves completed steps", "[runtime][stress][f3b]")
+{ exerciseWorkflowCancellation(CancelOrder::AfterCompletion); }
+TEST_CASE("Kernel workflow stress cancellation races command completion", "[runtime][stress][f3b]")
+{ exerciseWorkflowCancellation(CancelOrder::Race); }
+
+TEST_CASE("Kernel task stress shutdown timeout retains ownership until actual completion", "[runtime][stress][f3b]")
+{
+    for(unsigned int round = 0U; round < rounds; ++round) {
+        const auto root = newRoot();
+        INFO("round=" << round << " evidence=" << root.string());
+        const auto request = taskCommand();
+        std::optional<TaskId> taskId;
+        {
+            Fixture fixture{root, true, ExecutionScenario::Task};
+            auto& kernel = fixture.kernel;
+            ReleaseOnExit releaseWorker{fixture.task->gate};
+            const auto accepted = take(kernel.execution().executeCommand(request));
+            REQUIRE(accepted.taskId.has_value());
+            taskId = accepted.taskId;
+            REQUIRE(fixture.task->gate.awaitArrivals(1U));
+            const auto stopped = kernel.shutdown(1ms);
+            REQUIRE_FALSE(stopped);
+            REQUIRE(std::string(stopped.error().code.value()) == "Task.ShutdownTimeout");
+            REQUIRE(kernel.state() == AppKernelState::Stopping);
+            for(unsigned int index = 0U; index < 8U; ++index) { REQUIRE(kernel.execution().cancelTask(*taskId)); }
+            REQUIRE(take(kernel.execution().task(*taskId)).state == TaskState::CancelRequested);
+            REQUIRE(kernel.scheduler().activeTaskCount() == 1U);
+            verifyResources(kernel, true);
+            REQUIRE_FALSE(kernel.execution().executeCommand(request));
+            REQUIRE_FALSE(kernel.execution().executeQuery(queryRequest()));
+            REQUIRE_FALSE(kernel.documentRuntime().close(document));
+            fixture.task->gate.release();
+            verifyTask(take(kernel.execution().waitTask(*taskId, 5s)), TaskState::Cancelled);
+            REQUIRE(fixture.task->calls == 1U);
+            verifyResources(kernel, false);
+            verifyState(kernel, 0U);
+            REQUIRE(kernel.shutdown());
+            REQUIRE(kernel.state() == AppKernelState::Stopped);
+        }
+        Fixture recovered{root, false, ExecutionScenario::Task};
+        verifyTask(take(recovered.kernel.execution().waitTask(*taskId, 5s)), TaskState::Cancelled);
+        REQUIRE(recovered.task->calls == 0U);
+        verifyResources(recovered.kernel, false);
+        verifyState(recovered.kernel, 0U);
+        REQUIRE(recovered.kernel.shutdown());
+    }
+}
 
 TEST_CASE("Kernel concurrency queries block close and shutdown without mutating state", "[runtime][stress][f3a]")
 {

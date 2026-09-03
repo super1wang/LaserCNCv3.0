@@ -368,7 +368,9 @@ foundation::Result<void> Scheduler::requestCancel(const kernel::TaskId& taskId)
             return foundation::Result<void>::success();
         }
         record.cancellation->requested.store(true, std::memory_order_release);
-        if(record.state == TaskState::Running) {
+        // Repeated cancellation must not finish work that still owns a worker/resources.
+        // 中文翻译：重复取消不能提前终结仍持有工作线程和资源的任务。
+        if(record.state == TaskState::Running || record.state == TaskState::CancelRequested) {
             record.state = TaskState::CancelRequested;
         } else {
             record.state = TaskState::Cancelled;
