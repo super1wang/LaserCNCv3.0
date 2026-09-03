@@ -1,6 +1,7 @@
 #include <lasercnc/runtime/transaction_manager.hpp>
 
 #include <lasercnc/foundation/error.hpp>
+#include <lasercnc/persistence/persistence_service.hpp>
 
 #include <array>
 #include <exception>
@@ -37,8 +38,10 @@ constexpr std::array allRevisionScopes {
 
 } // namespace
 
-TransactionManager::TransactionManager(state::DocumentStore& documents) noexcept
-    : documents_(documents)
+TransactionManager::TransactionManager(
+    state::DocumentStore& documents,
+    persistence::PersistenceService* persistence) noexcept
+    : documents_(documents), persistence_(persistence)
 {
 }
 
@@ -127,82 +130,112 @@ foundation::Result<TransactionCommit> TransactionManager::commit(
     ApplicationTransaction& transaction,
     std::vector<ObjectChange> changes)
 {
-    std::unique_lock lock(documents_.mutex_);
-    const auto documentIterator = documents_.documents_.find(transaction.documentId());
-    if(documentIterator == documents_.documents_.end()) {
-        return foundation::Result<TransactionCommit>::failure(managerError(
-            "Document.NotFound",
-            foundation::ErrorCategory::NotFound,
-            "The transaction document is no longer available",
-            transaction.id()));
-    }
-    const auto projectIterator = documents_.projectRevisions_.find(
-        documentIterator->second.projectId);
-    if(projectIterator == documents_.projectRevisions_.end()) {
-        return foundation::Result<TransactionCommit>::failure(managerError(
-            "Document.ProjectRevisionMissing",
-            foundation::ErrorCategory::Internal,
-            "The transaction project revision is missing",
-            transaction.id()));
-    }
-
-    auto currentRevisions = documentIterator->second.revisions;
-    currentRevisions.atMutable(state::RevisionScope::Project) = projectIterator->second;
-    std::array<state::RevisionPrecondition, allRevisionScopes.size()> capturedRevisions;
-    for(std::size_t index = 0; index < allRevisionScopes.size(); ++index) {
-        capturedRevisions[index] = state::RevisionPrecondition {
-            allRevisionScopes[index],
-            transaction.baseRevisions().at(allRevisionScopes[index])};
-    }
-    auto valid = state::RevisionManager::validate(currentRevisions, capturedRevisions);
-    if(!valid.hasValue()) {
-        return foundation::Result<TransactionCommit>::failure(std::move(valid).error());
-    }
-
-    std::array<state::RevisionScope, ApplicationTransaction::revisionScopeCount> affectedScopes;
-    std::size_t affectedScopeCount = 0U;
-    for(std::size_t index = 0; index < allRevisionScopes.size(); ++index) {
-        if(transaction.affectedScopes_[index]) {
-            affectedScopes[affectedScopeCount] = allRevisionScopes[index];
-            ++affectedScopeCount;
+    std::lock_guard commitLock(commitMutex_);
+    std::optional<TransactionCommit> receipt;
+    {
+        std::unique_lock documentLock(documents_.mutex_);
+        const auto documentIterator = documents_.documents_.find(transaction.documentId());
+        if(documentIterator == documents_.documents_.end()) {
+            return foundation::Result<TransactionCommit>::failure(managerError(
+                "Document.NotFound",
+                foundation::ErrorCategory::NotFound,
+                "The transaction document is no longer available",
+                transaction.id()));
         }
-    }
-    auto nextRevisions = state::RevisionManager::advance(
-        currentRevisions,
-        std::span<const state::RevisionScope> {affectedScopes.data(), affectedScopeCount});
-    if(!nextRevisions.hasValue()) {
-        return foundation::Result<TransactionCommit>::failure(std::move(nextRevisions).error());
-    }
+        const auto projectIterator = documents_.projectRevisions_.find(
+            documentIterator->second.projectId);
+        if(projectIterator == documents_.projectRevisions_.end()) {
+            return foundation::Result<TransactionCommit>::failure(managerError(
+                "Document.ProjectRevisionMissing",
+                foundation::ErrorCategory::Internal,
+                "The transaction project revision is missing",
+                transaction.id()));
+        }
 
-    std::vector<messaging::CommittedDomainEvent> committedEvents;
-    committedEvents.reserve(transaction.pendingEvents_.size());
-    for(std::size_t index = 0; index < transaction.pendingEvents_.size(); ++index) {
-        const auto& pending = transaction.pendingEvents_[index];
-        committedEvents.push_back(messaging::CommittedDomainEvent(
-            pending.name,
-            pending.version,
-            pending.aggregateId,
-            pending.payload,
+        auto currentRevisions = documentIterator->second.revisions;
+        currentRevisions.atMutable(state::RevisionScope::Project) = projectIterator->second;
+        std::array<state::RevisionPrecondition, allRevisionScopes.size()> capturedRevisions;
+        for(std::size_t index = 0; index < allRevisionScopes.size(); ++index) {
+            capturedRevisions[index] = state::RevisionPrecondition {
+                allRevisionScopes[index],
+                transaction.baseRevisions().at(allRevisionScopes[index])};
+        }
+        auto valid = state::RevisionManager::validate(currentRevisions, capturedRevisions);
+        if(!valid.hasValue()) {
+            return foundation::Result<TransactionCommit>::failure(std::move(valid).error());
+        }
+
+        std::array<state::RevisionScope, ApplicationTransaction::revisionScopeCount>
+            affectedScopes;
+        std::size_t affectedScopeCount = 0U;
+        for(std::size_t index = 0; index < allRevisionScopes.size(); ++index) {
+            if(transaction.affectedScopes_[index]) {
+                affectedScopes[affectedScopeCount] = allRevisionScopes[index];
+                ++affectedScopeCount;
+            }
+        }
+        auto nextRevisions = state::RevisionManager::advance(
+            currentRevisions,
+            std::span<const state::RevisionScope> {
+                affectedScopes.data(), affectedScopeCount});
+        if(!nextRevisions.hasValue()) {
+            return foundation::Result<TransactionCommit>::failure(
+                std::move(nextRevisions).error());
+        }
+
+        std::vector<messaging::CommittedDomainEvent> committedEvents;
+        committedEvents.reserve(transaction.pendingEvents_.size());
+        for(std::size_t index = 0; index < transaction.pendingEvents_.size(); ++index) {
+            const auto& pending = transaction.pendingEvents_[index];
+            committedEvents.push_back(messaging::CommittedDomainEvent(
+                pending.name,
+                pending.version,
+                pending.aggregateId,
+                pending.payload,
+                transaction.id(),
+                transaction.projectId(),
+                transaction.documentId(),
+                nextRevisions.value(),
+                index));
+        }
+
+        receipt.emplace(TransactionCommit {
             transaction.id(),
             transaction.projectId(),
             transaction.documentId(),
+            currentRevisions,
             nextRevisions.value(),
-            index));
+            std::move(changes),
+            std::move(committedEvents)});
     }
 
-    TransactionCommit receipt {
-        transaction.id(),
-        transaction.projectId(),
-        transaction.documentId(),
-        currentRevisions,
-        nextRevisions.value(),
-        std::move(changes),
-        std::move(committedEvents)};
+    if(persistence_ != nullptr && persistence_->configured()) {
+        auto persisted = persistence_->append(*receipt);
+        if(!persisted) {
+            return foundation::Result<TransactionCommit>::failure(
+                std::move(persisted).error());
+        }
+    }
 
-    documentIterator->second.objects.swap(transaction.stagedObjects_);
-    documentIterator->second.revisions = receipt.revisionsAfter;
-    projectIterator->second = receipt.revisionsAfter.at(state::RevisionScope::Project);
-    return foundation::Result<TransactionCommit>::success(std::move(receipt));
+    {
+        std::unique_lock documentLock(documents_.mutex_);
+        const auto documentIterator = documents_.documents_.find(transaction.documentId());
+        const auto projectIterator = documentIterator == documents_.documents_.end()
+            ? documents_.projectRevisions_.end()
+            : documents_.projectRevisions_.find(documentIterator->second.projectId);
+        if(documentIterator == documents_.documents_.end()
+           || projectIterator == documents_.projectRevisions_.end()) {
+            return foundation::Result<TransactionCommit>::failure(managerError(
+                "Document.StateChangedDuringPersistence",
+                foundation::ErrorCategory::Internal,
+                "Document ownership changed while its journal record was being persisted",
+                transaction.id()));
+        }
+        documentIterator->second.objects.swap(transaction.stagedObjects_);
+        documentIterator->second.revisions = receipt->revisionsAfter;
+        projectIterator->second = receipt->revisionsAfter.at(state::RevisionScope::Project);
+    }
+    return foundation::Result<TransactionCommit>::success(std::move(*receipt));
 }
 
 void TransactionManager::release(const kernel::TransactionId& transactionId) noexcept

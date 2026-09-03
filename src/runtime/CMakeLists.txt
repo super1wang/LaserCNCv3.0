@@ -20,6 +20,7 @@ target_sources(
         observability/local_metrics_service.cpp
         observability/log_observability_exporter.cpp
         observability/diagnostics_service.cpp
+        persistence/persistence_service.cpp
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS "${PROJECT_SOURCE_DIR}/include"
@@ -45,4 +46,5 @@ target_sources(
             "${PROJECT_SOURCE_DIR}/include/lasercnc/observability/metrics_service.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/observability/log_observability_exporter.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/observability/diagnostics_service.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/persistence/persistence_service.hpp"
 )

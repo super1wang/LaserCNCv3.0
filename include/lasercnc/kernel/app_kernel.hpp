@@ -8,6 +8,7 @@
 #include <lasercnc/observability/diagnostics_service.hpp>
 #include <lasercnc/observability/metrics_service.hpp>
 #include <lasercnc/observability/trace_service.hpp>
+#include <lasercnc/persistence/persistence_service.hpp>
 #include <lasercnc/runtime/capability_service.hpp>
 #include <lasercnc/runtime/command_registry.hpp>
 #include <lasercnc/runtime/command_runtime.hpp>
@@ -85,12 +86,15 @@ public:
     [[nodiscard]] const observability::LocalMetricsService& metrics() const noexcept;
     [[nodiscard]] observability::DiagnosticsService& diagnostics() noexcept;
     [[nodiscard]] const observability::DiagnosticsService& diagnostics() const noexcept;
+    [[nodiscard]] persistence::PersistenceService& persistence() noexcept;
+    [[nodiscard]] const persistence::PersistenceService& persistence() const noexcept;
     [[nodiscard]] AppKernelState state() const noexcept;
 
 private:
     ServiceRegistry services_;
     ModuleRuntime modules_;
     state::DocumentStore documents_;
+    persistence::PersistenceService persistence_;
     runtime::TransactionManager transactions_;
     runtime::ExecutionServices executionServices_;
     runtime::CapabilityService capabilities_;

@@ -563,6 +563,7 @@ TEST_CASE("AppKernel owns freezes and stops the task stack", "[kernel][runtime][
     CHECK(kernel.traces().frozen());
     CHECK(kernel.metrics().frozen());
     CHECK(kernel.diagnostics().frozen());
+    CHECK(kernel.persistence().frozen());
 
     auto task = request("kernel-owned", "task.kernel-owned");
     REQUIRE(kernel.tasks().submit(task).hasValue());

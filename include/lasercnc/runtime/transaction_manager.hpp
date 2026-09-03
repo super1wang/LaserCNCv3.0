@@ -13,11 +13,17 @@
 #include <span>
 #include <vector>
 
+namespace lasercnc::persistence {
+class PersistenceService;
+}
+
 namespace lasercnc::runtime {
 
 class TransactionManager final {
 public:
-    explicit TransactionManager(state::DocumentStore& documents) noexcept;
+    explicit TransactionManager(
+        state::DocumentStore& documents,
+        persistence::PersistenceService* persistence = nullptr) noexcept;
 
     TransactionManager(const TransactionManager&) = delete;
     TransactionManager& operator=(const TransactionManager&) = delete;
@@ -37,6 +43,8 @@ private:
     void release(const kernel::TransactionId& transactionId) noexcept;
 
     state::DocumentStore& documents_;
+    persistence::PersistenceService* persistence_;
+    std::mutex commitMutex_;
     mutable std::mutex activeMutex_;
     std::set<kernel::TransactionId> activeTransactions_;
 };

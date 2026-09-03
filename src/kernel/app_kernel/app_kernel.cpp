@@ -9,7 +9,7 @@ namespace lasercnc::kernel {
 
 AppKernel::AppKernel()
     : modules_(services_),
-      transactions_(documents_),
+      transactions_(documents_, &persistence_),
       scheduler_(resources_, traces_, metrics_),
       tasks_(taskRegistry_, scheduler_, executionServices_, documents_),
       commands_(
@@ -83,6 +83,22 @@ foundation::Result<void> AppKernel::bootstrap()
         return result;
     }
 
+    if(persistence_.configured()) {
+        auto initialized = persistence_.initialize();
+        if(!initialized) {
+            auto stopped = modules_.shutdown(*this);
+            state_ = AppKernelState::Failed;
+            return foundation::Result<void>::failure(foundation::makeError(
+                "Persistence.KernelInitializationFailed",
+                foundation::ErrorCategory::Infrastructure,
+                "The application kernel could not initialize persistence",
+                foundation::Value {},
+                foundation::Severity::Error,
+                std::make_shared<const foundation::Error>(
+                    std::move(initialized).error())));
+        }
+    }
+
     if((commandRegistry_.size() != 0U || queryRegistry_.size() != 0U
         || taskRegistry_.size() != 0U)
        && !executionServices_.configured()) {
@@ -132,6 +148,7 @@ foundation::Result<void> AppKernel::bootstrap()
     commandRegistry_.freeze();
     queryRegistry_.freeze();
     taskRegistry_.freeze();
+    persistence_.freeze();
     traces_.freeze();
     metrics_.freeze();
     diagnostics_.freeze();
@@ -378,6 +395,16 @@ observability::DiagnosticsService& AppKernel::diagnostics() noexcept
 const observability::DiagnosticsService& AppKernel::diagnostics() const noexcept
 {
     return diagnostics_;
+}
+
+persistence::PersistenceService& AppKernel::persistence() noexcept
+{
+    return persistence_;
+}
+
+const persistence::PersistenceService& AppKernel::persistence() const noexcept
+{
+    return persistence_;
 }
 
 AppKernelState AppKernel::state() const noexcept
