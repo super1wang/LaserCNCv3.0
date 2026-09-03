@@ -97,6 +97,7 @@ add_executable(
     lasercnc_kernel_headless_contract
     integration/kernel_headless_contract.cpp
     integration/kernel_crash_contract.cpp
+    integration/kernel_file_crash_probe.cpp
 )
 target_link_libraries(
     lasercnc_kernel_headless_contract
@@ -113,7 +114,9 @@ lcnc_enable_warnings(lasercnc_kernel_headless_contract)
 foreach(scenario IN ITEMS command-staged journal-inserted outcome-written transaction-before-commit
     transaction-committed command-returned undo-inserted undo-committed redo-inserted redo-committed
     task-handler workflow-handler workflow-committed effect-safe effect-idempotent effect-reconcile effect-never
-    workflow-effect-reconcile workflow-effect-never)
+    workflow-effect-reconcile workflow-effect-never
+    asset-before-write asset-before-rename asset-after-rename asset-published
+    asset-reference-inserted asset-reference-committed asset-missing-committed asset-corrupt-committed)
     add_test(NAME integration.kernel_crash_${scenario}
         COMMAND "${CMAKE_COMMAND}"
             "-DLCNC_CONTRACT_EXECUTABLE=$<TARGET_FILE:lasercnc_kernel_headless_contract>"
@@ -154,6 +157,7 @@ set_tests_properties(
     integration.kernel_persistence_process_recovery
     PROPERTIES
         PASS_REGULAR_EXPRESSION "独立进程持久化恢复契约通过"
+        TIMEOUT 70
         RUN_SERIAL TRUE
 )
 
@@ -169,5 +173,6 @@ set_tests_properties(
     integration.kernel_workflow_process_recovery
     PROPERTIES
         PASS_REGULAR_EXPRESSION "独立进程工作流恢复契约通过"
+        TIMEOUT 70
         RUN_SERIAL TRUE
 )

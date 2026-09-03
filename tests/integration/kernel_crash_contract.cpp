@@ -1,7 +1,9 @@
 #include "kernel_crash_contract.hpp"
 #include "kernel_test_module.hpp"
+#include "kernel_file_crash_probe.hpp"
 
 #include <lasercnc/infrastructure/filesystem_snapshot_store.hpp>
+#include <lasercnc/infrastructure/filesystem_asset_store.hpp>
 #include <lasercnc/infrastructure/bs_thread_pool_executor.hpp>
 #include <lasercnc/infrastructure/jsoncons_adapter.hpp>
 #include <lasercnc/infrastructure/sha256_hash_service.hpp>
@@ -11,6 +13,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
+#include <iterator>
 #include <functional>
 #include <fstream>
 #include <memory>
@@ -47,12 +50,30 @@ const auto document = id<DocumentId>("document.crash");
 const auto session = id<SessionId>("session.crash");
 const auto key = id<IdempotencyKey>("key.crash.target");
 
+const std::string assetContent{"immutable crash asset\0binary\xff", 29U};
+std::span<const std::byte> assetBytes()
+{
+    return {reinterpret_cast<const std::byte*>(assetContent.data()), assetContent.size()};
+}
+AssetRef expectedAsset()
+{
+    const auto kind = id<AssetKind>("test.crash.binary");
+    const auto digest = take(Sha256HashService{}.digest(assetBytes()));
+    const std::string identity = "LCNCAssetRef1\n" + std::to_string(kind.value().size()) + ':'
+        + std::string(kind.value()) + '\n' + std::string(digest.value()) + ':' + std::to_string(assetContent.size());
+    const auto identityDigest = take(Sha256HashService{}.digest(
+        {reinterpret_cast<const std::byte*>(identity.data()), identity.size()}));
+    return {take(AssetId::create("asset.sha256." + std::string(identityDigest.value().substr(7U)))),
+        digest, kind, assetContent.size()};
+}
+
 struct CrashControl {
     std::string scenario;
     bool armed{false};
     std::function<void()> verifyBeforeExit;
     std::filesystem::path root;
     std::thread::id caller{std::this_thread::get_id()};
+    std::shared_ptr<platform::IAssetStore> assets;
     void recordCall(const char* category) const
     {
         std::ofstream stream(root / "execution-calls.log", std::ios::app);
@@ -133,7 +154,15 @@ public:
         ++calls;
         const auto& name = *request.arguments.getIf<Value::Object>()->at("id").getIf<std::string>();
         if(name == "object.target" && control_.scenario.starts_with("workflow-")) { control_.recordCall("document"); }
-        take(transaction.createObject({take(ObjectId::create(name)), id<ObjectTypeId>("type.crash"), Value{name}}));
+        std::vector<AssetRef> assets;
+        if(name == "object.target" && control_.scenario.starts_with("asset-")) {
+            if(control_.armed && control_.scenario == "asset-before-write") { control_.terminate("asset-before-write"); }
+            assets.push_back(take(control_.assets->publish(expectedAsset().kind, assetBytes())));
+            check(assets.front() == expectedAsset(), "Published asset identity drift");
+            if(control_.armed && control_.scenario == "asset-published") { control_.terminate("asset-published"); }
+        }
+        take(transaction.createObject({take(ObjectId::create(name)), id<ObjectTypeId>("type.crash"), Value{name},
+            {1U, 0U, 0U}, std::move(assets)}));
         take(transaction.touchRevision(RevisionScope::Geometry));
         if(control_.armed && (control_.scenario == "command-staged" || control_.scenario == "workflow-handler")) {
             control_.terminate("handler-staged");
@@ -222,8 +251,23 @@ CommandRequest historyRequest(bool undo, const char* phase = "recover")
 }
 
 std::shared_ptr<CreateHandler> configure(AppKernel& kernel, const std::filesystem::path& root,
-    CrashControl& control, bool seed)
+    CrashControl& control, bool seed, Result<void>* startup = nullptr)
 {
+    if(control.scenario.starts_with("asset-")) {
+        control.assets = take(FilesystemAssetStore::create({root / "assets", 4096U}, std::make_shared<Sha256HashService>()));
+        take(kernel.configureAssetStore(control.assets));
+        setKernelFilePublishProbe([&control](const auto& temporary, const auto& target, bool after) {
+            if(!control.armed || target.parent_path() != control.root / "assets") { return; }
+            if((!after && control.scenario == "asset-before-rename")
+                || (after && control.scenario == "asset-after-rename")) {
+                check(std::filesystem::exists(temporary) == !after && std::filesystem::exists(target) == after,
+                    "Atomic publication file-state drift");
+                check(std::filesystem::file_size(after ? target : temporary)
+                    == 12U + expectedAsset().kind.value().size() + assetContent.size(), "Asset envelope incomplete at rename");
+                control.terminate(after ? "asset-after-rename" : "asset-before-rename");
+            }
+        });
+    }
     if(seed) { take(kernel.addDocument(project, document)); }
     take(kernel.executionServices().configure(std::make_shared<JsonconsAdapter>(), std::make_shared<NullLog>()));
     take(test::registerObjectType(kernel, test::valueObjectType("type.crash")));
@@ -271,13 +315,15 @@ std::shared_ptr<CreateHandler> configure(AppKernel& kernel, const std::filesyste
     auto store = take(FilesystemSnapshotStore::create({root / "snapshots", 1024U * 1024U}));
     take(kernel.persistence().configure(std::make_unique<CrashBackend>(std::move(backend), control),
         std::make_shared<JsonconsAdapter>(), std::make_shared<Sha256HashService>(), std::move(store)));
-    take(kernel.bootstrap());
+    auto bootstrapped = kernel.bootstrap();
+    if(startup) { *startup = std::move(bootstrapped); }
+    else { take(std::move(bootstrapped)); }
     return handler;
 }
 
 struct Expected { std::uint64_t revision; std::size_t position; std::size_t extent; bool target; };
 
-void verify(AppKernel& kernel, Expected expected)
+void verify(AppKernel& kernel, Expected expected, const std::vector<AssetRef>& assets = {})
 {
     const auto image = take(kernel.documents().snapshot(document));
     check(image.projectId() == project, "Document ownership drift");
@@ -285,7 +331,8 @@ void verify(AppKernel& kernel, Expected expected)
     check(image.objects().contains(id<ObjectId>("object.target")) == expected.target, "Target existence drift");
     for(const auto& object : image.objects().all()) {
         check(object.type == id<ObjectTypeId>("type.crash") && object.schemaVersion == Version{1U, 0U, 0U}
-            && object.assets.empty() && object.data == Value{std::string(object.id.value())}, "Object material drift");
+            && object.assets == (object.id == id<ObjectId>("object.target") ? assets : std::vector<AssetRef>{})
+            && object.data == Value{std::string(object.id.value())}, "Object material drift");
     }
     for(const auto scope : {RevisionScope::Project, RevisionScope::Document, RevisionScope::Geometry}) {
         check(image.revisions().at(scope) == Revision{expected.revision}, "Revision drift");
@@ -427,15 +474,104 @@ void recoverExecution(AppKernel& kernel, CrashControl& control, const CreateHand
     verify(kernel, workflow && !effect ? Expected{2U, 2U, 2U, true} : Expected{1U, 1U, 1U, false});
 }
 
+bool damagedAssetScenario(std::string_view scenario)
+{
+    return scenario == "asset-missing-committed" || scenario == "asset-corrupt-committed";
+}
+
+std::filesystem::path assetPath(const CrashControl& control)
+{
+    return control.root / "assets" / (std::string(expectedAsset().id.value()) + ".snapshot");
+}
+
+void damagePublishedAsset(const CrashControl& control)
+{
+    const auto target = assetPath(control);
+    const auto evidence = control.root / "asset-original.snapshot";
+    check(std::filesystem::is_regular_file(target) && !std::filesystem::exists(evidence), "Invalid damage fixture paths");
+    if(control.scenario == "asset-missing-committed") {
+        std::filesystem::rename(target, evidence);
+    } else {
+        std::filesystem::copy_file(target, evidence);
+        std::fstream stream(target, std::ios::binary | std::ios::in | std::ios::out);
+        stream.seekp(-1, std::ios::end);
+        stream.put('^');
+        stream.close();
+        check(!stream.fail(), "Cannot create corrupted asset fixture");
+    }
+}
+
+void verifyAssetFiles(const CrashControl& control, bool published)
+{
+    const auto target = assetPath(control);
+    std::size_t temporaryCount = 0U;
+    std::size_t publishedCount = 0U;
+    for(const auto& file : std::filesystem::directory_iterator(control.root / "assets")) {
+        check(file.is_regular_file(), "Unexpected asset directory entry");
+        if(file.path() == target) { ++publishedCount; }
+        else {
+            check(file.path().filename().string().starts_with(target.filename().string() + ".tmp."),
+                "Unexpected file in asset storage");
+            ++temporaryCount;
+            std::ifstream stream(file.path(), std::ios::binary);
+            check(stream.is_open(), "Temporary orphan is unreadable after process exit");
+            const std::string payload{std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
+            check(!stream.bad() && payload.starts_with("LCNCAS01")
+                && payload.size() == 12U + expectedAsset().kind.value().size() + assetContent.size()
+                && payload.substr(12U + expectedAsset().kind.value().size()) == assetContent,
+                "Flushed temporary orphan content drift");
+        }
+    }
+    check(publishedCount == (published ? 1U : 0U), "Published asset file count drift");
+    check(temporaryCount == (control.scenario == "asset-before-rename" ? 1U : 0U), "Temporary orphan state drift");
+    const auto content = control.assets->read(expectedAsset());
+    if(published) {
+        check(content.hasValue() && content.value() == std::vector<std::byte>(assetBytes().begin(), assetBytes().end()),
+            "Published asset content drift");
+    } else {
+        check(!content && containsError(content.error(), "Asset.NotFound"), "Unpublished temporary asset became readable");
+    }
+}
+
+void recoverAsset(AppKernel& kernel, CrashControl& control, const CreateHandler& handler, bool audit)
+{
+    const bool committed = control.scenario == "asset-reference-committed";
+    const bool filePublished = audit || (control.scenario != "asset-before-write" && control.scenario != "asset-before-rename");
+    const auto reference = expectedAsset();
+    verifyAssetFiles(control, filePublished);
+    verify(kernel, audit ? Expected{4U, 2U, 2U, true} : committed ? Expected{2U, 2U, 2U, true}
+        : Expected{1U, 1U, 1U, false}, {reference});
+    check(handler.calls == 0U, "Bootstrap republished an asset");
+    auto observer = take(SqlitePersistenceBackend::open({control.root / "state.db"}));
+    const auto claims = take(observer->query("SELECT status FROM command_idempotency"));
+    check(claims.size() == 1U && claims.front().at("status") == Value{audit || committed ? "completed" : "abandoned"},
+        "Asset command idempotency disposition drift");
+    const auto result = take(kernel.execution().executeCommand(createRequest()));
+    check(result.replayed == (audit || committed) && result.commit && result.commit->changes.size() == 1U
+        && result.commit->changes.front().after && result.commit->changes.front().after->assets == std::vector{reference},
+        "Asset reference was lost from the command receipt");
+    if(!audit) {
+        verify(kernel, {2U, 2U, 2U, true}, {reference});
+        take(kernel.execution().executeCommand(historyRequest(true)));
+        verify(kernel, {3U, 1U, 2U, false}, {reference});
+        take(kernel.execution().executeCommand(historyRequest(false)));
+    }
+    const auto replay = take(kernel.execution().executeCommand(createRequest()));
+    check(replay.replayed && handler.calls == (!audit && !committed ? 1U : 0U), "Recovery repeated asset publication");
+    verify(kernel, {4U, 2U, 2U, true}, {reference});
+    verifyAssetFiles(control, true);
+}
+
 } // namespace
 
 int runKernelCrashContract(std::string_view mode, const std::filesystem::path& root, std::string_view scenario)
 {
-    const std::array<std::string_view, 19> scenarios{"command-staged", "journal-inserted", "outcome-written",
+    const std::array<std::string_view, 27> scenarios{"command-staged", "journal-inserted", "outcome-written",
         "transaction-before-commit", "transaction-committed", "command-returned",
         "undo-inserted", "undo-committed", "redo-inserted", "redo-committed", "task-handler",
         "workflow-handler", "workflow-committed", "effect-safe", "effect-idempotent", "effect-reconcile", "effect-never",
-        "workflow-effect-reconcile", "workflow-effect-never"};
+        "workflow-effect-reconcile", "workflow-effect-never", "asset-before-write", "asset-before-rename", "asset-after-rename",
+        "asset-published", "asset-reference-inserted", "asset-reference-committed", "asset-missing-committed", "asset-corrupt-committed"};
     check(std::find(scenarios.begin(), scenarios.end(), scenario) != scenarios.end(), "Unknown crash scenario");
     check(root.is_absolute(), "Crash contract requires an absolute isolated state root");
     check(mode == "crash-seed" || mode == "crash-recover" || mode == "crash-audit", "Unknown crash mode");
@@ -448,7 +584,35 @@ int runKernelCrashContract(std::string_view mode, const std::filesystem::path& r
     }
     CrashControl control{std::string(scenario), false, {}, root};
     AppKernel kernel;
-    const auto handler = configure(kernel, root, control, seed);
+    auto startup = Result<void>::success();
+    const bool expectedRejection = !seed && damagedAssetScenario(scenario);
+    const auto handler = configure(kernel, root, control, seed, expectedRejection ? &startup : nullptr);
+    if(expectedRejection) {
+        check(!startup && containsError(startup.error(), "Asset.StateAdmissionFailed")
+            && containsError(startup.error(), scenario == "asset-missing-committed" ? "Asset.NotFound" : "Asset.DigestMismatch"),
+            "Recovery accepted a dangling or corrupted asset");
+        check(kernel.state() == AppKernelState::Failed && !kernel.documents().snapshot(document)
+            && handler->calls == 0U, "Failed asset recovery partially installed or executed state");
+        check(take(kernel.persistence().journalAfter(document, 0U)).size() == 2U, "Recovery erased committed journal evidence");
+        const auto candidate = take(kernel.persistence().recover());
+        check(candidate.documents.size() == 1U && candidate.historyCommits.size() == 2U,
+            "Failed admission erased persisted recovery/history materials");
+        const auto& image = candidate.documents.front();
+        const auto target = std::find_if(image.objects.begin(), image.objects.end(), [](const auto& object) {
+            return object.id == id<ObjectId>("object.target");
+        });
+        check(image.documentId == document && image.projectId == project
+            && image.revisions.at(RevisionScope::Document) == Revision{2U}
+            && target != image.objects.end() && target->assets == std::vector{expectedAsset()},
+            "Failed asset admission silently changed durable references");
+        auto observer = take(SqlitePersistenceBackend::open({root / "state.db"}));
+        const auto claims = take(observer->query("SELECT status FROM command_idempotency"));
+        check(claims.size() == 1U && claims.front().at("status") == Value{"completed"},
+            "Failed asset admission erased a committed receipt");
+        check(std::filesystem::is_regular_file(root / "asset-original.snapshot"), "Original asset evidence missing");
+        std::cout << (mode == "crash-audit" ? "crash-audited:" : "crash-recovered:") << scenario << '\n';
+        return 0;
+    }
     if(seed) {
         take(kernel.execution().executeCommand(createRequest(true)));
         take(kernel.persistence().captureSnapshot(id<SnapshotId>("snapshot.crash.baseline"), take(kernel.documents().snapshot(document))));
@@ -467,6 +631,7 @@ int runKernelCrashContract(std::string_view mode, const std::filesystem::path& r
                     check(running.state == TaskState::Running && running.progress == 0.5
                         && kernel.scheduler().activeTaskCount() == 1U, "Task did not reach active execution");
                 }
+                if(damagedAssetScenario(control.scenario)) { damagePublishedAsset(control); }
             };
         }
         control.armed = true;
@@ -487,6 +652,12 @@ int runKernelCrashContract(std::string_view mode, const std::filesystem::path& r
             : scenario.starts_with("redo-") ? historyRequest(false, "crash") : createRequest()));
         if(scenario == "command-returned") { verify(kernel, {2U, 2U, 2U, true}); control.terminate("command-returned"); }
         throw std::runtime_error("Crash point was not reached");
+    }
+    if(scenario.starts_with("asset-")) {
+        recoverAsset(kernel, control, *handler, mode == "crash-audit");
+        take(kernel.shutdown());
+        std::cout << (mode == "crash-audit" ? "crash-audited:" : "crash-recovered:") << scenario << '\n';
+        return 0;
     }
     if(executionScenario(scenario)) {
         recoverExecution(kernel, control, *handler, mode == "crash-audit");

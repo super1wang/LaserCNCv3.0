@@ -7,7 +7,9 @@ endif()
 set(scenarios command-staged journal-inserted outcome-written transaction-before-commit
     transaction-committed command-returned undo-inserted undo-committed redo-inserted redo-committed
     task-handler workflow-handler workflow-committed effect-safe effect-idempotent effect-reconcile effect-never
-    workflow-effect-reconcile workflow-effect-never)
+    workflow-effect-reconcile workflow-effect-never
+    asset-before-write asset-before-rename asset-after-rename asset-published
+    asset-reference-inserted asset-reference-committed asset-missing-committed asset-corrupt-committed)
 if(NOT LCNC_CRASH_SCENARIO IN_LIST scenarios)
     message(FATAL_ERROR "未知崩溃场景")
 endif()
@@ -17,6 +19,8 @@ elseif(LCNC_CRASH_SCENARIO STREQUAL "task-handler")
     set(expected_point task-handler)
 elseif(LCNC_CRASH_SCENARIO MATCHES "effect-")
     set(expected_point effect-handler)
+elseif(LCNC_CRASH_SCENARIO MATCHES "^asset-(before-write|before-rename|after-rename|published)$")
+    set(expected_point "${LCNC_CRASH_SCENARIO}")
 elseif(LCNC_CRASH_SCENARIO MATCHES "inserted$")
     set(expected_point journal-inserted)
 elseif(LCNC_CRASH_SCENARIO STREQUAL "outcome-written")
