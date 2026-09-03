@@ -11,6 +11,7 @@
 #include <lasercnc/runtime/execution_services.hpp>
 #include <lasercnc/runtime/transaction_manager.hpp>
 #include <lasercnc/runtime/task_runtime.hpp>
+#include <lasercnc/state/document_store.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -248,6 +249,7 @@ class CommandRuntime::Impl final {
 public:
     Impl(
         CommandRegistry& commandRegistry,
+        const state::DocumentStore& documentStore,
         TransactionManager& transactionManager,
         CapabilityService& capabilityService,
         messaging::EventBus& eventBus,
@@ -258,6 +260,7 @@ public:
         observability::IMetricsService& metricsService,
         std::size_t capacity)
         : registry(commandRegistry),
+          documents(documentStore),
           transactions(transactionManager),
           capabilities(capabilityService),
           events(eventBus),
@@ -365,6 +368,108 @@ public:
         if(!authorized.hasValue()) {
             logFailure(services.value(), request, &descriptor.version);
             return foundation::Result<CommandResponse>::failure(std::move(authorized).error());
+        }
+
+        if(descriptor.executionMode == ExecutionMode::Synchronous
+           && descriptor.sideEffect == SideEffectLevel::ReadOnly) {
+            ReadOnlyCommandContext context;
+            if(request.context.documentId.has_value()) {
+                auto document = documents.snapshot(*request.context.documentId);
+                if(!document) {
+                    logFailure(services.value(), request, &descriptor.version);
+                    return foundation::Result<CommandResponse>::failure(
+                        std::move(document).error());
+                }
+                if(document.value().projectId() != *request.context.projectId) {
+                    auto error = commandError(
+                        "Command.ProjectMismatch",
+                        foundation::ErrorCategory::Validation,
+                        "The command project does not own the target document",
+                        request);
+                    logFailure(services.value(), request, &descriptor.version);
+                    return foundation::Result<CommandResponse>::failure(std::move(error));
+                }
+                if(request.expectedRevision.has_value()
+                   && document.value().revisions().at(state::RevisionScope::Project)
+                       != *request.expectedRevision) {
+                    auto error = commandError(
+                        "Command.RevisionConflict",
+                        foundation::ErrorCategory::Conflict,
+                        "The command project revision does not match the caller precondition",
+                        request);
+                    logFailure(services.value(), request, &descriptor.version);
+                    return foundation::Result<CommandResponse>::failure(std::move(error));
+                }
+                context.document = std::move(document).value();
+            } else if(request.expectedRevision.has_value()) {
+                auto error = commandError(
+                    "Command.RevisionScopeMismatch",
+                    foundation::ErrorCategory::Validation,
+                    "Revision preconditions require document scope",
+                    request);
+                logFailure(services.value(), request, &descriptor.version);
+                return foundation::Result<CommandResponse>::failure(std::move(error));
+            }
+
+            foundation::Result<foundation::Value> handled = [&]() {
+                try {
+                    return entry.value().readOnlyHandler->execute(request, context);
+                } catch(const std::exception& exception) {
+                    return foundation::Result<foundation::Value>::failure(commandError(
+                        "Command.HandlerFailed",
+                        foundation::ErrorCategory::Internal,
+                        "The read-only command handler raised an exception",
+                        request,
+                        std::make_shared<const foundation::Error>(foundation::makeError(
+                            "Command.HandlerException",
+                            foundation::ErrorCategory::Internal,
+                            exception.what()))));
+                } catch(...) {
+                    return foundation::Result<foundation::Value>::failure(commandError(
+                        "Command.HandlerFailed",
+                        foundation::ErrorCategory::Internal,
+                        "The read-only command handler raised an exception",
+                        request));
+                }
+            }();
+            if(!handled) {
+                logFailure(services.value(), request, &descriptor.version);
+                return foundation::Result<CommandResponse>::failure(
+                    std::move(handled).error());
+            }
+            auto resultValid = services.value().schemaValidator->validate(
+                descriptor.result, handled.value());
+            if(!resultValid) {
+                logFailure(services.value(), request, &descriptor.version);
+                return foundation::Result<CommandResponse>::failure(
+                    std::move(resultValid).error());
+            }
+            CommandResponse response {
+                std::move(handled).value(),
+                std::nullopt,
+                std::nullopt,
+                {},
+                false,
+                descriptor.version,
+                descriptor.status};
+            try {
+                auto logged = services.value().logService->write(commandLog(
+                    request, observability::LogLevel::Info, "success", &descriptor.version));
+                if(!logged) {
+                    response.postExecutionErrors.push_back(std::move(logged).error());
+                }
+            } catch(const std::exception& exception) {
+                try {
+                    response.postExecutionErrors.push_back(commandError(
+                        "Command.PostExecutionIntegrationFailed",
+                        foundation::ErrorCategory::Internal,
+                        exception.what(),
+                        request));
+                } catch(...) {
+                }
+            } catch(...) {
+            }
+            return foundation::Result<CommandResponse>::success(std::move(response));
         }
 
         std::unique_ptr<PersistentIdempotencyLease> durableLease;
@@ -668,6 +773,7 @@ public:
     }
 
     CommandRegistry& registry;
+    const state::DocumentStore& documents;
     TransactionManager& transactions;
     CapabilityService& capabilities;
     messaging::EventBus& events;
@@ -686,6 +792,7 @@ public:
 
 CommandRuntime::CommandRuntime(
     CommandRegistry& registry,
+    const state::DocumentStore& documents,
     TransactionManager& transactions,
     CapabilityService& capabilities,
     messaging::EventBus& events,
@@ -697,6 +804,7 @@ CommandRuntime::CommandRuntime(
     std::size_t idempotencyCapacity)
     : impl_(std::make_unique<Impl>(
           registry,
+          documents,
           transactions,
           capabilities,
           events,

@@ -233,6 +233,20 @@ public:
     std::atomic_size_t calls{0U};
 };
 
+class ScopeCommandHandler final : public IReadOnlyCommandHandler {
+public:
+    Result<Value> execute(
+        const CommandRequest&,
+        const ReadOnlyCommandContext& context) override
+    {
+        ++calls;
+        return Result<Value>::success(Value {Value::Object {
+            {"hasDocument", Value {context.document.has_value()}}}});
+    }
+
+    std::atomic_size_t calls{0U};
+};
+
 class FailingHandler final : public ICommandHandler {
 public:
     explicit FailingHandler(bool shouldThrow) : throws(shouldThrow) {}
@@ -585,6 +599,69 @@ TEST_CASE("QueryRuntime enforces global session project and document scopes", "[
         ExecutionContext {fixture.session, fixture.project, std::nullopt});
     REQUIRE_FALSE(mismatched.hasValue());
     CHECK(std::string(mismatched.error().code.value()) == "Query.ScopeMismatch");
+    CHECK(handler->calls == 4U);
+
+    REQUIRE(fixture.kernel.shutdown().hasValue());
+}
+
+TEST_CASE("Synchronous read-only commands preserve every execution scope", "[runtime][command][scope]")
+{
+    RuntimeFixture fixture;
+    auto handler = std::make_shared<ScopeCommandHandler>();
+    const std::array scopes {
+        std::pair {"kernel.command-scope.global", ExecutionScope::Global},
+        std::pair {"kernel.command-scope.session", ExecutionScope::Session},
+        std::pair {"kernel.command-scope.project", ExecutionScope::Project},
+        std::pair {"kernel.command-scope.document", ExecutionScope::Document}};
+    for(const auto& [name, scope] : scopes) {
+        auto descriptor = commandDescriptor(name);
+        descriptor.sideEffect = SideEffectLevel::ReadOnly;
+        descriptor.capability = validId<CapabilityId>("document.read");
+        descriptor.idempotent = false;
+        descriptor.scope = scope;
+        REQUIRE(fixture.kernel.commandRegistry().registerReadOnlyHandler(
+            descriptor, handler).hasValue());
+    }
+    REQUIRE(fixture.kernel.bootstrap().hasValue());
+
+    auto execute = [&](const char* requestId, const char* command, ExecutionContext context) {
+        return fixture.kernel.commands().execute(CommandRequest {
+            validId<RequestId>(requestId),
+            std::move(context),
+            validId<CommandName>(command),
+            Version {1U, 0U, 0U},
+            Value {Value::Object {}},
+            std::nullopt,
+            validId<CorrelationId>("correlation.command-scope"),
+            validId<TraceId>("trace.command-scope")});
+    };
+
+    auto global = execute(
+        "request.command-scope.global",
+        "kernel.command-scope.global",
+        ExecutionContext {fixture.session, std::nullopt, std::nullopt});
+    REQUIRE(global.hasValue());
+    CHECK_FALSE(global.value().commit.has_value());
+    CHECK(execute(
+        "request.command-scope.session",
+        "kernel.command-scope.session",
+        ExecutionContext {fixture.session, std::nullopt, std::nullopt}).hasValue());
+    CHECK(execute(
+        "request.command-scope.project",
+        "kernel.command-scope.project",
+        ExecutionContext {fixture.session, fixture.project, std::nullopt}).hasValue());
+    CHECK(execute(
+        "request.command-scope.document",
+        "kernel.command-scope.document",
+        ExecutionContext {fixture.session, fixture.project, fixture.document}).hasValue());
+    CHECK(handler->calls == 4U);
+
+    auto mismatch = execute(
+        "request.command-scope.mismatch",
+        "kernel.command-scope.project",
+        ExecutionContext {fixture.session, fixture.project, fixture.document});
+    REQUIRE_FALSE(mismatch.hasValue());
+    CHECK(std::string(mismatch.error().code.value()) == "Command.ScopeMismatch");
     CHECK(handler->calls == 4U);
 
     REQUIRE(fixture.kernel.shutdown().hasValue());

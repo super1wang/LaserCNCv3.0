@@ -73,6 +73,19 @@ public:
         ApplicationTransaction& transaction) = 0;
 };
 
+struct ReadOnlyCommandContext final {
+    std::optional<state::Document> document;
+};
+
+class IReadOnlyCommandHandler {
+public:
+    virtual ~IReadOnlyCommandHandler() = default;
+
+    [[nodiscard]] virtual foundation::Result<foundation::Value> execute(
+        const CommandRequest& request,
+        const ReadOnlyCommandContext& context) = 0;
+};
+
 struct AsyncCommandPlan final {
     TaskRequest task;
     foundation::Value acceptance;

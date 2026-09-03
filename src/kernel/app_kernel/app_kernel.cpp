@@ -41,6 +41,7 @@ AppKernel::AppKernel()
       tasks_(taskRegistry_, scheduler_, executionServices_, documents_, persistence_),
       commands_(
           commandRegistry_,
+          documents_,
           transactions_,
           capabilities_,
           events_,

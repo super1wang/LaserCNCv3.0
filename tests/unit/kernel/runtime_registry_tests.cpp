@@ -87,6 +87,14 @@ public:
     }
 };
 
+class ReadOnlyHandler final : public IReadOnlyCommandHandler {
+public:
+    Result<Value> execute(const CommandRequest&, const ReadOnlyCommandContext&) override
+    {
+        return Result<Value>::success(Value {});
+    }
+};
+
 } // namespace
 
 TEST_CASE("CapabilityService is deny by default and replaces exact grants", "[runtime][capability]")
@@ -208,6 +216,35 @@ TEST_CASE("CommandRegistry resolves exact compatible and deprecated versions", "
         validId<CommandName>("kernel.command.missing"), Version {1U, 0U, 0U}});
     REQUIRE_FALSE(missing.hasValue());
     CHECK(std::string(missing.error().code.value()) == "Command.NotFound");
+}
+
+TEST_CASE("CommandRegistry keeps synchronous read-only handlers outside transactions", "[runtime][command][scope]")
+{
+    CommandRegistry registry;
+    auto handler = std::make_shared<ReadOnlyHandler>();
+    auto descriptor = commandDescriptor("kernel.command.read-only");
+    descriptor.sideEffect = SideEffectLevel::ReadOnly;
+    descriptor.capability = validId<CapabilityId>("system.read");
+    descriptor.idempotent = false;
+    descriptor.scope = ExecutionScope::Global;
+    REQUIRE(registry.registerReadOnlyHandler(descriptor, handler).hasValue());
+
+    auto transactional = descriptor;
+    transactional.name = validId<CommandName>("kernel.command.read-only-writes");
+    transactional.sideEffect = SideEffectLevel::DocumentWrite;
+    auto wrongSideEffect = registry.registerReadOnlyHandler(transactional, handler);
+    REQUIRE_FALSE(wrongSideEffect.hasValue());
+    CHECK(std::string(wrongSideEffect.error().code.value())
+          == "Command.ReadOnlySideEffectMismatch");
+
+    auto idempotent = descriptor;
+    idempotent.name = validId<CommandName>("kernel.command.read-only-idempotent");
+    idempotent.idempotent = true;
+    auto wrongIdempotency = registry.registerReadOnlyHandler(idempotent, handler);
+    REQUIRE_FALSE(wrongIdempotency.hasValue());
+    CHECK(std::string(wrongIdempotency.error().code.value())
+          == "Command.ReadOnlyIdempotencyUnsupported");
+    CHECK_FALSE(registry.registerReadOnlyHandler(descriptor, nullptr).hasValue());
 }
 
 TEST_CASE("QueryRegistry resolves exact compatible and deprecated versions", "[runtime][query]")

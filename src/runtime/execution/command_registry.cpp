@@ -163,6 +163,75 @@ foundation::Result<void> CommandRegistry::registerAsyncHandler(
     return foundation::Result<void>::success();
 }
 
+foundation::Result<void> CommandRegistry::registerReadOnlyHandler(
+    CommandDescriptor descriptor,
+    std::shared_ptr<IReadOnlyCommandHandler> handler)
+{
+    const auto key = keyOf(descriptor);
+    if(handler == nullptr) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.InvalidHandler",
+            foundation::ErrorCategory::Validation,
+            "A read-only command handler is required",
+            key));
+    }
+    if(descriptor.executionMode != ExecutionMode::Synchronous) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.HandlerModeMismatch",
+            foundation::ErrorCategory::Validation,
+            "A synchronous read-only command requires an IReadOnlyCommandHandler",
+            key));
+    }
+    if(!validExecutionScope(descriptor.scope)) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.InvalidScope",
+            foundation::ErrorCategory::Validation,
+            "The command scope is invalid",
+            key));
+    }
+    if(descriptor.sideEffect != SideEffectLevel::ReadOnly) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.ReadOnlySideEffectMismatch",
+            foundation::ErrorCategory::Validation,
+            "A read-only command cannot declare side effects",
+            key));
+    }
+    if(descriptor.undoable) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.UndoUnsupported",
+            foundation::ErrorCategory::Validation,
+            "Read-only commands cannot create history entries",
+            key));
+    }
+    if(descriptor.idempotent) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.ReadOnlyIdempotencyUnsupported",
+            foundation::ErrorCategory::Validation,
+            "Synchronous read-only commands do not use the command idempotency store",
+            key));
+    }
+
+    std::unique_lock lock(mutex_);
+    if(frozen_) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.RegistryFrozen",
+            foundation::ErrorCategory::Conflict,
+            "Command registration is closed",
+            key));
+    }
+    const auto [unused, inserted] = entries_.emplace(
+        key, Entry {std::move(descriptor), nullptr, nullptr, std::move(handler)});
+    static_cast<void>(unused);
+    if(!inserted) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.AlreadyRegistered",
+            foundation::ErrorCategory::Conflict,
+            "The exact command name and version are already registered",
+            key));
+    }
+    return foundation::Result<void>::success();
+}
+
 foundation::Result<CommandDescriptor> CommandRegistry::descriptor(
     const CommandKey& key,
     VersionResolution resolution) const

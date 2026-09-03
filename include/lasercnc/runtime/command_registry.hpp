@@ -24,6 +24,9 @@ public:
     [[nodiscard]] foundation::Result<void> registerAsyncHandler(
         CommandDescriptor descriptor,
         std::shared_ptr<IAsyncCommandHandler> handler);
+    [[nodiscard]] foundation::Result<void> registerReadOnlyHandler(
+        CommandDescriptor descriptor,
+        std::shared_ptr<IReadOnlyCommandHandler> handler);
     [[nodiscard]] foundation::Result<CommandDescriptor> descriptor(
         const CommandKey& key,
         VersionResolution resolution = VersionResolution::Exact) const;
@@ -39,6 +42,7 @@ private:
         CommandDescriptor descriptor;
         std::shared_ptr<ICommandHandler> handler;
         std::shared_ptr<IAsyncCommandHandler> asyncHandler;
+        std::shared_ptr<IReadOnlyCommandHandler> readOnlyHandler;
     };
 
     [[nodiscard]] foundation::Result<Entry> resolve(

@@ -31,10 +31,19 @@ class ExecutionServices;
 class TransactionManager;
 class TaskRuntime;
 
+} // namespace lasercnc::runtime
+
+namespace lasercnc::state {
+class DocumentStore;
+}
+
+namespace lasercnc::runtime {
+
 class CommandRuntime final {
 public:
     CommandRuntime(
         CommandRegistry& registry,
+        const state::DocumentStore& documents,
         TransactionManager& transactions,
         CapabilityService& capabilities,
         messaging::EventBus& events,
