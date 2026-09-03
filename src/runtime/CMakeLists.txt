@@ -4,6 +4,11 @@ target_sources(
         transaction/domain_event.cpp
         transaction/application_transaction.cpp
         transaction/transaction_manager.cpp
+        execution/capability_service.cpp
+        execution/execution_services.cpp
+        execution/command_registry.cpp
+        execution/query_registry.cpp
+        messaging/event_bus.cpp
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS "${PROJECT_SOURCE_DIR}/include"
@@ -11,4 +16,11 @@ target_sources(
             "${PROJECT_SOURCE_DIR}/include/lasercnc/messaging/domain_event.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/transaction.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/transaction_manager.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/capability_service.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/execution_services.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/command.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/command_registry.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/query.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/query_registry.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/messaging/event_bus.hpp"
 )

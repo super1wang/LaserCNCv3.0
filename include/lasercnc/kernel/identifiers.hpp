@@ -16,6 +16,12 @@ struct DocumentIdTag;
 struct ObjectIdTag;
 struct ObjectTypeIdTag;
 struct TransactionIdTag;
+struct RequestIdTag;
+struct SessionIdTag;
+struct CorrelationIdTag;
+struct TraceIdTag;
+struct IdempotencyKeyTag;
+struct SubscriptionIdTag;
 
 using ServiceId = foundation::StrongId<ServiceIdTag>;
 using ModuleId = foundation::StrongId<ModuleIdTag>;
@@ -29,5 +35,11 @@ using DocumentId = foundation::StrongId<DocumentIdTag>;
 using ObjectId = foundation::StrongId<ObjectIdTag>;
 using ObjectTypeId = foundation::StrongId<ObjectTypeIdTag>;
 using TransactionId = foundation::StrongId<TransactionIdTag>;
+using RequestId = foundation::StrongId<RequestIdTag>;
+using SessionId = foundation::StrongId<SessionIdTag>;
+using CorrelationId = foundation::StrongId<CorrelationIdTag>;
+using TraceId = foundation::StrongId<TraceIdTag>;
+using IdempotencyKey = foundation::StrongId<IdempotencyKeyTag>;
+using SubscriptionId = foundation::StrongId<SubscriptionIdTag>;
 
 } // namespace lasercnc::kernel
