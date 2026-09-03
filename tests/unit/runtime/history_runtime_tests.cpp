@@ -1,4 +1,5 @@
 #include <lasercnc/infrastructure/jsoncons_adapter.hpp>
+#include <lasercnc/infrastructure/filesystem_snapshot_store.hpp>
 #include <lasercnc/infrastructure/sha256_hash_service.hpp>
 #include <lasercnc/infrastructure/sqlite_persistence_backend.hpp>
 #include <lasercnc/kernel/app_kernel.hpp>
@@ -7,6 +8,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include "kernel_test_module.hpp"
 #include "fault_injecting_backend.hpp"
+#include "fault_injecting_data_plane.hpp"
 
 #include <array>
 #include <atomic>
@@ -970,6 +972,213 @@ TEST_CASE("Rollback failure quarantines persistence until a fresh recovery", "[h
                 REQUIRE(kernel.shutdown().hasValue());
             }
             removeDatabase(path);
+        }
+    }
+}
+
+TEST_CASE("Snapshot publication failures preserve the indexed state and permit orphan reuse", "[snapshot][persistence][fault-matrix]")
+{
+    using namespace lasercnc::test;
+    for(const std::string stage : {"hash", "begin", "journal-query", "write-before", "write-after", "index", "commit", "existing-read", "existing-hash"}) {
+        for(const bool throws : {false, true}) {
+            DYNAMIC_SECTION(stage << " throws=" << throws) {
+                const auto path = databasePath();
+                const auto directory = std::filesystem::path{path.string() + ".snapshots"};
+                const auto project = validId<ProjectId>("project.snapshot-fault");
+                const auto document = validId<DocumentId>("document.snapshot-fault");
+                const auto session = validId<SessionId>("session.snapshot-fault");
+                const auto baseline = validId<SnapshotId>("snapshot.baseline");
+                const auto candidate = validId<SnapshotId>("snapshot.candidate");
+                RevisionSet revisions;
+                std::vector<ObjectRecord> objects;
+                {
+                    AppKernel kernel;
+                    auto sqlite = SqlitePersistenceBackend::open({path});
+                    REQUIRE(sqlite.hasValue());
+                    auto backend = std::make_unique<FaultInjectingBackend>(std::move(sqlite).value());
+                    auto* db = backend.get();
+                    auto files = FilesystemSnapshotStore::create({directory, 1024U * 1024U});
+                    REQUIRE(files.hasValue());
+                    auto snapshots = std::make_unique<FaultSnapshotStore>(std::move(files).value());
+                    auto* data = snapshots.get();
+                    auto hashes = std::make_shared<FaultHashService>(std::make_shared<Sha256HashService>());
+                    REQUIRE(kernel.persistence().configure(std::move(backend), std::make_shared<JsonconsAdapter>(),
+                        hashes, std::move(snapshots)).hasValue());
+                    configureRuntime(kernel, project, document, session, true);
+                    REQUIRE(kernel.bootstrap().hasValue());
+                    REQUIRE(kernel.execution().executeCommand(request("request.snapshot.seed", "kernel.history.create",
+                        project, document, session, "object.snapshot")).hasValue());
+                    const auto image = kernel.documents().snapshot(document).value();
+                    revisions = image.revisions();
+                    objects = image.objects().all();
+                    REQUIRE(kernel.persistence().captureSnapshot(baseline, image).hasValue());
+                    if(stage == "hash") { hashes->arm("lasercnc.document-snapshot", 1U, throws); }
+                    if(stage == "begin") { db->arm(BackendPoint::Begin, "", 1U, throws); }
+                    if(stage == "journal-query") { db->arm(BackendPoint::Query, "FROM state_journal WHERE document_id", 1U, throws); }
+                    if(stage == "write-before") { data->arm(SnapshotFault::BeforeWrite, throws); }
+                    if(stage == "write-after") { data->arm(SnapshotFault::AfterWrite, throws); }
+                    if(stage == "index") { db->arm(BackendPoint::Execute, "INSERT INTO snapshot_index", 1U, throws); }
+                    if(stage == "commit") { db->arm(BackendPoint::Commit, "", 1U, throws); }
+                    if(stage == "existing-read") { data->arm(SnapshotFault::Read, throws); }
+                    if(stage == "existing-hash") { hashes->arm("lasercnc.document-snapshot", 2U, throws); }
+                    const auto target = stage.starts_with("existing-") ? baseline : candidate;
+                    REQUIRE_FALSE(kernel.persistence().captureSnapshot(target, image).hasValue());
+                    CHECK(db->hits + data->hits + hashes->hits == 1U);
+                    auto indexed = db->query("SELECT * FROM snapshot_index");
+                    REQUIRE(indexed.hasValue());
+                    CHECK(indexed.value().size() == 1U);
+                    CHECK(kernel.persistence().latestSnapshot(document).value()->snapshotId == baseline);
+                    CHECK(kernel.documents().snapshot(document).value().objects().all() == objects);
+                    CHECK(kernel.documents().snapshot(document).value().revisions() == revisions);
+                    CHECK(kernel.history().snapshot(document).value().cursor == HistoryCursor{1U, 1U});
+                    CHECK(kernel.persistence().journalAfter(document, 0U).value().size() == 1U);
+                    CHECK(std::filesystem::exists(directory / "snapshot.candidate.snapshot") ==
+                        (stage == "write-after" || stage == "index" || stage == "commit"));
+                    REQUIRE(kernel.shutdown().hasValue());
+                }
+                {
+                    AppKernel kernel;
+                    auto sqlite = SqlitePersistenceBackend::open({path});
+                    REQUIRE(sqlite.hasValue());
+                    auto files = FilesystemSnapshotStore::create({directory, 1024U * 1024U});
+                    REQUIRE(files.hasValue());
+                    REQUIRE(kernel.persistence().configure(std::move(sqlite).value(), std::make_shared<JsonconsAdapter>(),
+                        std::make_shared<Sha256HashService>(), std::move(files).value()).hasValue());
+                    configureRuntime(kernel, project, document, session, false);
+                    REQUIRE(kernel.bootstrap().hasValue());
+                    const auto image = kernel.documents().snapshot(document).value();
+                    CHECK(image.objects().all() == objects);
+                    CHECK(image.revisions() == revisions);
+                    CHECK(kernel.history().snapshot(document).value().cursor == HistoryCursor{1U, 1U});
+                    REQUIRE(kernel.persistence().captureSnapshot(candidate, image).hasValue());
+                    REQUIRE(kernel.persistence().captureSnapshot(candidate, image).hasValue());
+                    CHECK(kernel.persistence().latestSnapshot(document).value()->snapshotId == candidate);
+                    REQUIRE(kernel.shutdown().hasValue());
+                }
+                removeDatabase(path);
+                std::filesystem::remove_all(directory);
+            }
+        }
+    }
+}
+
+TEST_CASE("Close metadata faults retain committed data without claiming a detached document", "[document][snapshot][fault-matrix]")
+{
+    using namespace lasercnc::test;
+    for(const bool failIndex : {false, true}) {
+        for(const bool throws : {false, true}) {
+            DYNAMIC_SECTION("failIndex=" << failIndex << " throws=" << throws) {
+                const auto path = databasePath();
+                const auto directory = std::filesystem::path{path.string() + ".snapshots"};
+                const auto project = validId<ProjectId>("project.close-fault");
+                const auto document = validId<DocumentId>("document.close-fault");
+                const auto session = validId<SessionId>("session.close-fault");
+                RevisionSet revisions;
+                std::vector<ObjectRecord> objects;
+                const auto setup = [&](AppKernel& kernel, std::unique_ptr<lasercnc::platform::IPersistenceBackend> backend, bool add) {
+                    auto files = FilesystemSnapshotStore::create({directory, 1024U * 1024U});
+                    REQUIRE(files.hasValue());
+                    REQUIRE(kernel.persistence().configure(std::move(backend), std::make_shared<JsonconsAdapter>(),
+                        std::make_shared<Sha256HashService>(), std::move(files).value()).hasValue());
+                    configureRuntime(kernel, project, document, session, add);
+                    REQUIRE(kernel.bootstrap().hasValue());
+                };
+                {
+                    AppKernel kernel;
+                    auto sqlite = SqlitePersistenceBackend::open({path});
+                    REQUIRE(sqlite.hasValue());
+                    auto backend = std::make_unique<FaultInjectingBackend>(std::move(sqlite).value());
+                    auto* db = backend.get();
+                    setup(kernel, std::move(backend), true);
+                    REQUIRE(kernel.execution().executeCommand(request("request.close-fault", "kernel.history.create",
+                        project, document, session, "object.close-fault")).hasValue());
+                    const auto before = kernel.documents().snapshot(document).value();
+                    objects = before.objects().all();
+                    revisions = before.revisions();
+                    db->arm(BackendPoint::Execute, failIndex ? "INSERT INTO snapshot_index" : "INSERT INTO document_catalog",
+                        failIndex ? 1U : 2U, throws);
+                    REQUIRE_FALSE(kernel.documentRuntime().close(document).hasValue());
+                    CHECK(db->hits == 1U);
+                    CHECK(kernel.documentRuntime().lifecycle(document).value().state == DocumentLifecycleState::Failed);
+                    CHECK(kernel.documents().snapshot(document).value().objects().all() == objects);
+                    CHECK(kernel.documents().snapshot(document).value().revisions() == revisions);
+                    CHECK(kernel.persistence().journalAfter(document, 0U).value().size() == 1U);
+                    CHECK(kernel.persistence().latestSnapshot(document).value().has_value() == !failIndex);
+                    CHECK(kernel.persistence().documentCatalog().value().front().state == lasercnc::persistence::DocumentPersistenceState::Failed);
+                    auto rawCatalog = db->query("SELECT state FROM document_catalog");
+                    REQUIRE(rawCatalog.hasValue());
+                    CHECK(*rawCatalog.value().front().at("state").getIf<std::string>() == (failIndex ? "failed" : "closing"));
+                    REQUIRE(kernel.shutdown().hasValue());
+                }
+                {
+                    AppKernel kernel;
+                    auto sqlite = SqlitePersistenceBackend::open({path});
+                    REQUIRE(sqlite.hasValue());
+                    setup(kernel, std::move(sqlite).value(), false);
+                    CHECK_FALSE(kernel.documents().contains(document));
+                    CHECK(kernel.documentRuntime().lifecycle(document).value().state == DocumentLifecycleState::Failed);
+                    CHECK_FALSE(kernel.documentRuntime().open(document).hasValue());
+                    auto recovered = kernel.persistence().recover();
+                    REQUIRE(recovered.hasValue());
+                    REQUIRE(recovered.value().documents.size() == 1U);
+                    CHECK(recovered.value().documents.front().objects == objects);
+                    CHECK(recovered.value().documents.front().revisions == revisions);
+                    REQUIRE(kernel.shutdown().hasValue());
+                }
+                removeDatabase(path);
+                std::filesystem::remove_all(directory);
+            }
+        }
+    }
+}
+
+TEST_CASE("Journal and outcome hash faults leave no partial history or idempotency", "[history][hash][fault-matrix]")
+{
+    for(const std::string stage : {"journal-digest", "journal-verify", "outcome-digest"}) {
+        for(const bool throws : {false, true}) {
+            DYNAMIC_SECTION(stage << " throws=" << throws) {
+                const auto path = databasePath();
+                const auto project = validId<ProjectId>("project.hash-fault");
+                const auto document = validId<DocumentId>("document.hash-fault");
+                const auto session = validId<SessionId>("session.hash-fault");
+                auto command = request("request.hash-fault", "kernel.history.create", project, document, session, "object.hash");
+                command.idempotencyKey = validId<IdempotencyKey>("key.hash-fault");
+                {
+                    AppKernel kernel;
+                    auto sqlite = SqlitePersistenceBackend::open({path});
+                    REQUIRE(sqlite.hasValue());
+                    auto hashes = std::make_shared<lasercnc::test::FaultHashService>(std::make_shared<Sha256HashService>());
+                    REQUIRE(kernel.persistence().configure(std::move(sqlite).value(), std::make_shared<JsonconsAdapter>(), hashes).hasValue());
+                    configureRuntime(kernel, project, document, session, true);
+                    REQUIRE(kernel.bootstrap().hasValue());
+                    hashes->arm(stage == "outcome-digest" ? "lasercnc.command-outcome" : "lasercnc.state-journal",
+                        stage == "journal-verify" ? 2U : 1U, throws);
+                    REQUIRE_FALSE(kernel.execution().executeCommand(command).hasValue());
+                    CHECK(hashes->hits == 1U);
+                    CHECK(kernel.documents().snapshot(document).value().objects().empty());
+                    CHECK(kernel.documents().snapshot(document).value().revisions() == RevisionSet{});
+                    CHECK(kernel.history().snapshot(document).value().cursor == HistoryCursor{});
+                    CHECK(kernel.persistence().journalAfter(document, 0U).value().empty());
+                    auto observer = SqlitePersistenceBackend::open({path});
+                    REQUIRE(observer.hasValue());
+                    CHECK(observer.value()->query("SELECT * FROM command_idempotency").value().empty());
+                    REQUIRE(kernel.shutdown().hasValue());
+                }
+                {
+                    AppKernel kernel;
+                    configurePersistence(kernel, path);
+                    configureRuntime(kernel, project, document, session, false);
+                    REQUIRE(kernel.bootstrap().hasValue());
+                    CHECK(kernel.documents().snapshot(document).value().objects().empty());
+                    auto retried = kernel.execution().executeCommand(command);
+                    REQUIRE(retried.hasValue());
+                    CHECK_FALSE(retried.value().replayed);
+                    CHECK(kernel.execution().executeCommand(command).value().replayed);
+                    CHECK(kernel.persistence().journalAfter(document, 0U).value().size() == 1U);
+                    REQUIRE(kernel.shutdown().hasValue());
+                }
+                removeDatabase(path);
+            }
         }
     }
 }

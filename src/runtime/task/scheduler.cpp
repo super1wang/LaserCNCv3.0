@@ -716,20 +716,28 @@ void Scheduler::pump(const std::shared_ptr<Core>& core)
             ResourceContext {taskRequest.resources},
             std::move(document)};
 
-        auto submitted = core->executor->submit(
-            [handler = std::move(handler), taskRequest, context, outcome]() mutable {
-                auto result = handler->execute(taskRequest, context);
-                std::lock_guard lock(outcome->mutex);
-                if(result) {
-                    outcome->result = std::move(result).value();
-                    return foundation::Result<void>::success();
-                }
-                outcome->error = std::move(result).error();
-                return foundation::Result<void>::failure(*outcome->error);
-            },
-            [core, taskId, outcome](foundation::Result<void> result) mutable {
-                finish(core, taskId, std::move(result), outcome);
-            });
+        auto submitted = [&]() -> foundation::Result<void> {
+            try {
+                return core->executor->submit(
+                    [handler = std::move(handler), taskRequest, context, outcome]() mutable {
+                        auto result = handler->execute(taskRequest, context);
+                        std::lock_guard lock(outcome->mutex);
+                        if(result) {
+                            outcome->result = std::move(result).value();
+                            return foundation::Result<void>::success();
+                        }
+                        outcome->error = std::move(result).error();
+                        return foundation::Result<void>::failure(*outcome->error);
+                    },
+                    [core, taskId, outcome](foundation::Result<void> result) mutable {
+                        finish(core, taskId, std::move(result), outcome);
+                    });
+            } catch(...) {
+                return foundation::Result<void>::failure(taskError(
+                    "Task.ExecutorSubmitFailed", foundation::ErrorCategory::Infrastructure,
+                    "The executor raised an exception before accepting task work", taskId));
+            }
+        }();
         if(!submitted) {
             finish(core, taskId, std::move(submitted), outcome);
         }

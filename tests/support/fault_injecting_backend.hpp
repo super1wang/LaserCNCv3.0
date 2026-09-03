@@ -32,6 +32,8 @@ public:
     {
         auto checked = check(BackendPoint::Execute, sql);
         if(!checked) { return foundation::Result<std::size_t>::failure(std::move(checked).error()); }
+        transactionSql_.append(sql);
+        transactionSql_.push_back('\n');
         return delegate_->execute(sql, parameters);
     }
     foundation::Result<std::vector<platform::PersistenceRow>> query(std::string_view sql,
@@ -44,11 +46,12 @@ public:
     foundation::Result<void> beginTransaction() override
     {
         auto checked = check(BackendPoint::Begin);
+        transactionSql_.clear();
         return checked ? delegate_->beginTransaction() : checked;
     }
     foundation::Result<void> commitTransaction() override
     {
-        auto checked = check(BackendPoint::Commit);
+        auto checked = check(BackendPoint::Commit, transactionSql_);
         return checked ? delegate_->commitTransaction() : checked;
     }
     foundation::Result<void> rollbackTransaction() override
@@ -85,6 +88,7 @@ private:
     std::unique_ptr<platform::IPersistenceBackend> delegate_;
     BackendPoint point_{BackendPoint::Begin};
     std::string fragment_;
+    std::string transactionSql_;
     unsigned int remaining_{0U};
     bool throws_{false};
 };

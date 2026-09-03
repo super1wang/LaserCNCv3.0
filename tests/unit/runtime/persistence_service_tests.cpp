@@ -13,6 +13,7 @@
 #include <catch2/generators/catch_generators.hpp>
 #include "kernel_test_module.hpp"
 #include "fault_injecting_backend.hpp"
+#include "fault_injecting_data_plane.hpp"
 
 #include <array>
 #include <atomic>
@@ -444,16 +445,19 @@ public:
         if(!taskId) {
             return Result<AsyncCommandPlan>::failure(std::move(taskId).error());
         }
-        return Result<AsyncCommandPlan>::success(AsyncCommandPlan {
+        AsyncCommandPlan plan {
             TaskRequest {
                 std::move(taskId).value(),
                 validId<TaskName>("kernel.persistence.async-task"),
                 Value {Value::Object {{"input", Value {"durable"}}}},
                 command.traceId},
-            Value {Value::Object {{"accepted", Value {true}}}}});
+            Value {Value::Object {{"accepted", Value {true}}}}};
+        plan.task.resources = resources;
+        return Result<AsyncCommandPlan>::success(std::move(plan));
     }
 
     std::atomic_size_t calls{0U};
+    std::vector<ResourceClaim> resources;
 };
 
 class TestEffectHandler final : public IExternalEffectHandler {
@@ -791,7 +795,8 @@ void configureAsyncRuntimeKernel(
     const SessionId& sessionId,
     std::shared_ptr<PersistentAsyncHandler> commandHandler,
     std::shared_ptr<PersistentTaskHandler> taskHandler,
-    std::unique_ptr<lasercnc::platform::IPersistenceBackend> injectedBackend = nullptr)
+    std::unique_ptr<lasercnc::platform::IPersistenceBackend> injectedBackend = nullptr,
+    std::unique_ptr<lasercnc::platform::ITaskExecutor> injectedExecutor = nullptr)
 {
     auto adapter = std::make_shared<JsonconsAdapter>();
     REQUIRE(kernel.executionServices()
@@ -815,9 +820,12 @@ void configureAsyncRuntimeKernel(
                     adapter,
                     std::make_shared<Sha256HashService>())
                 .hasValue());
-    auto executor = BsThreadPoolExecutor::create(BsThreadPoolExecutorOptions {1U});
-    REQUIRE(executor.hasValue());
-    REQUIRE(kernel.configureTaskExecutor(std::move(executor).value()).hasValue());
+    if(injectedExecutor == nullptr) {
+        auto executor = BsThreadPoolExecutor::create(BsThreadPoolExecutorOptions {1U});
+        REQUIRE(executor.hasValue());
+        injectedExecutor = std::move(executor).value();
+    }
+    REQUIRE(kernel.configureTaskExecutor(std::move(injectedExecutor)).hasValue());
 }
 
 CommandRequest persistentAsyncCommandRequest(
@@ -1768,6 +1776,88 @@ TEST_CASE("Task acceptance backend failures discard prepared work and preserve r
     }
 }
 
+TEST_CASE("Executor admission faults finish accepted tasks and do not strand scheduler capacity", "[task][executor][fault-matrix]")
+{
+    class FaultExecutor final : public lasercnc::platform::ITaskExecutor {
+    public:
+        Result<void> submit(lasercnc::platform::ExecutorWork work, lasercnc::platform::ExecutorCompletion done) override
+        {
+            ++calls;
+            if(fail) {
+                fail = false;
+                if(throws) { throw std::runtime_error("Injected executor admission exception"); }
+                return Result<void>::failure(makeError("Test.ExecutorRefused", ErrorCategory::Infrastructure, "Injected refusal"));
+            }
+            done(work());
+            return Result<void>::success();
+        }
+        Result<void> waitIdle() override { return Result<void>::success(); }
+        Result<void> shutdown() override { return Result<void>::success(); }
+        std::size_t concurrency() const noexcept override { return 1U; }
+        bool fail{true};
+        bool throws{false};
+        unsigned int calls{0U};
+    };
+    for(const bool throws : {false, true}) {
+        DYNAMIC_SECTION("executor throws=" << throws) {
+            const auto path = uniqueDatabasePath();
+            const auto project = validId<ProjectId>("project.executor-fault");
+            const auto document = validId<DocumentId>("document.executor-fault");
+            const auto session = validId<SessionId>("session.executor-fault");
+            const auto command = persistentAsyncCommandRequest("request.executor-fault", project, document,
+                session, validId<IdempotencyKey>("key.executor-fault"));
+            const auto task = validId<TaskId>("task.request.executor-fault");
+            {
+                AppKernel kernel;
+                REQUIRE(kernel.addDocument(project, document).hasValue());
+                auto executor = std::make_unique<FaultExecutor>();
+                auto* observed = executor.get();
+                observed->throws = throws;
+                auto commandHandler = std::make_shared<PersistentAsyncHandler>();
+                commandHandler->resources = {ResourceClaim{ResourceKind::DiskIO,
+                    validId<ResourceId>("resource.executor-fault"), ResourceAccess::Exclusive, 1U}};
+                auto taskHandler = std::make_shared<PersistentTaskHandler>();
+                configureAsyncRuntimeKernel(kernel, path, session, commandHandler, taskHandler, nullptr, std::move(executor));
+                REQUIRE(kernel.bootstrap().hasValue());
+                auto accepted = kernel.execution().executeCommand(command);
+                REQUIRE(accepted.hasValue());
+                CHECK(accepted.value().taskId == task);
+                auto terminal = kernel.execution().waitTask(task, std::chrono::seconds(1));
+                REQUIRE(terminal.hasValue());
+                CHECK(terminal.value().state == TaskState::Failed);
+                REQUIRE(terminal.value().error.has_value());
+                CHECK(std::string(terminal.value().error->code.value()) == (throws ? "Task.ExecutorSubmitFailed" : "Test.ExecutorRefused"));
+                CHECK(taskHandler->calls.load() == 0U);
+                CHECK(observed->calls == 1U);
+                auto next = persistentAsyncCommandRequest("request.executor-next", project, document,
+                    session, validId<IdempotencyKey>("key.executor-next"));
+                auto nextAccepted = kernel.execution().executeCommand(next);
+                REQUIRE(nextAccepted.hasValue());
+                auto nextTerminal = kernel.execution().waitTask(*nextAccepted.value().taskId, std::chrono::seconds(1));
+                REQUIRE(nextTerminal.hasValue());
+                CHECK(nextTerminal.value().state == TaskState::Succeeded);
+                CHECK(taskHandler->calls.load() == 1U);
+                CHECK(kernel.execution().executeCommand(command).value().replayed);
+                CHECK(observed->calls == 2U);
+                REQUIRE(kernel.shutdown(std::chrono::seconds(1)).hasValue());
+            }
+            {
+                AppKernel kernel;
+                auto commandHandler = std::make_shared<PersistentAsyncHandler>();
+                auto taskHandler = std::make_shared<PersistentTaskHandler>();
+                configureAsyncRuntimeKernel(kernel, path, session, commandHandler, taskHandler);
+                REQUIRE(kernel.bootstrap().hasValue());
+                CHECK(kernel.execution().executeCommand(command).value().replayed);
+                CHECK(kernel.execution().task(task).value().state == TaskState::Failed);
+                CHECK(commandHandler->calls.load() == 0U);
+                CHECK(taskHandler->calls.load() == 0U);
+                REQUIRE(kernel.shutdown().hasValue());
+            }
+            removeDatabase(path);
+        }
+    }
+}
+
 TEST_CASE("Task completion exposes persistence failure without changing task outcome", "[persistence][task][failure]")
 {
     const auto path = uniqueDatabasePath();
@@ -2604,6 +2694,90 @@ TEST_CASE("Workflow checkpoint failure prevents handler execution", "[persistenc
         REQUIRE(kernel.shutdown().hasValue());
     }
     removeDatabase(path);
+}
+
+TEST_CASE("Workflow post-command checkpoint faults preserve one durable command across restart", "[workflow][persistence][fault-matrix]")
+{
+    using namespace lasercnc::test;
+    const auto retryBeforeRestart = GENERATE(false, true);
+    for(const std::string stage : {"instance-upsert", "step-delete", "step-insert", "commit", "instance-hash", "step-hash"}) {
+        for(const bool throws : {false, true}) {
+            DYNAMIC_SECTION(stage << " throws=" << throws << " retryBeforeRestart=" << retryBeforeRestart) {
+                const auto path = uniqueDatabasePath();
+                const auto workflow = persistentWorkflowRequest("workflow.post-command-fault");
+                const auto definition = persistentWorkflowDefinition(true);
+                const auto setup = [&](AppKernel& kernel, const std::shared_ptr<PersistentCreateHandler>& handler,
+                    std::unique_ptr<lasercnc::platform::IPersistenceBackend> backend,
+                    std::shared_ptr<lasercnc::platform::IHashService> hashes, bool add) {
+                    REQUIRE(registerObjectType(kernel, valueObjectType("kernel.persistence.command")).hasValue());
+                    REQUIRE(kernel.executionServices().configure(std::make_shared<JsonconsAdapter>(),
+                        std::make_shared<NullLogService>()).hasValue());
+                    REQUIRE(kernel.capabilities().replace(workflow.sessionId,
+                        std::array{validId<CapabilityId>("document.write")}).hasValue());
+                    REQUIRE(registerCommand(kernel, persistentCommandDescriptor(), handler).hasValue());
+                    REQUIRE(registerWorkflow(kernel, definition).hasValue());
+                    if(add) { REQUIRE(kernel.addDocument(workflow.projectId, workflow.documentId).hasValue()); }
+                    REQUIRE(kernel.persistence().configure(std::move(backend), std::make_shared<JsonconsAdapter>(),
+                        std::move(hashes)).hasValue());
+                    REQUIRE(kernel.bootstrap().hasValue());
+                };
+                {
+                    AppKernel kernel;
+                    auto sqlite = SqlitePersistenceBackend::open({path});
+                    REQUIRE(sqlite.hasValue());
+                    auto backend = std::make_unique<FaultInjectingBackend>(std::move(sqlite).value());
+                    auto* db = backend.get();
+                    auto hashes = std::make_shared<FaultHashService>(std::make_shared<Sha256HashService>());
+                    auto handler = std::make_shared<PersistentCreateHandler>();
+                    setup(kernel, handler, std::move(backend), hashes, true);
+                    REQUIRE(kernel.execution().startWorkflow(workflow).hasValue());
+                    if(stage == "instance-upsert") { db->arm(BackendPoint::Execute, "INSERT INTO workflow_instances", 2U, throws); }
+                    if(stage == "step-delete") { db->arm(BackendPoint::Execute, "DELETE FROM workflow_steps", 2U, throws); }
+                    if(stage == "step-insert") { db->arm(BackendPoint::Execute, "INSERT INTO workflow_steps", 2U, throws); }
+                    if(stage == "commit") { db->arm(BackendPoint::Commit, "INSERT INTO workflow_instances", 2U, throws); }
+                    if(stage == "instance-hash") { hashes->arm("lasercnc.workflow-checkpoint", 2U, throws); }
+                    if(stage == "step-hash") { hashes->arm("lasercnc.workflow-step-checkpoint", 2U, throws, "lasercnc.workflow-checkpoint"); }
+                    auto failed = kernel.execution().advanceWorkflow(workflow.workflowId);
+                    REQUIRE_FALSE(failed.hasValue());
+                    CHECK(db->hits + hashes->hits == 1U);
+                    CHECK(handler->calls == 1U);
+                    const auto memory = kernel.execution().workflow(workflow.workflowId).value();
+                    CHECK(memory.steps.front().state == WorkflowStepState::Succeeded);
+                    CHECK(memory.steps.front().attempt == 1U);
+                    const auto durable = kernel.persistence().workflowCheckpoint(workflow.workflowId);
+                    REQUIRE(durable.hasValue());
+                    REQUIRE(durable.value().has_value());
+                    CHECK(durable.value()->snapshot.steps.front().state == WorkflowStepState::Running);
+                    CHECK(durable.value()->snapshot.steps.front().attempt == 1U);
+                    CHECK(kernel.persistence().journalAfter(workflow.documentId, 0U).value().size() == 1U);
+                    CHECK(kernel.documents().snapshot(workflow.documentId).value().objects().size() == 1U);
+                    if(retryBeforeRestart) {
+                        auto flushed = kernel.execution().advanceWorkflow(workflow.workflowId);
+                        REQUIRE(flushed.hasValue());
+                        CHECK(flushed.value().state == WorkflowState::Succeeded);
+                        CHECK(handler->calls == 1U);
+                    }
+                    REQUIRE(kernel.shutdown().hasValue());
+                }
+                {
+                    AppKernel kernel;
+                    auto sqlite = SqlitePersistenceBackend::open({path});
+                    REQUIRE(sqlite.hasValue());
+                    auto handler = std::make_shared<PersistentCreateHandler>();
+                    setup(kernel, handler, std::move(sqlite).value(), std::make_shared<Sha256HashService>(), false);
+                    auto recovered = kernel.execution().advanceWorkflow(workflow.workflowId);
+                    REQUIRE(recovered.hasValue());
+                    CHECK(recovered.value().state == WorkflowState::Succeeded);
+                    CHECK(recovered.value().steps.front().attempt == 1U);
+                    CHECK(handler->calls == 0U);
+                    CHECK(kernel.persistence().journalAfter(workflow.documentId, 0U).value().size() == 1U);
+                    CHECK(kernel.documents().snapshot(workflow.documentId).value().revisions().at(RevisionScope::Document) == Revision{1U});
+                    REQUIRE(kernel.shutdown().hasValue());
+                }
+                removeDatabase(path);
+            }
+        }
+    }
 }
 
 TEST_CASE("AppKernel rejects durable workflow definition drift", "[persistence][workflow][recovery]")
