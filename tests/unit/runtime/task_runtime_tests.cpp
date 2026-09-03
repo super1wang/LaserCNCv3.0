@@ -10,6 +10,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <functional>
 #include <future>
@@ -84,6 +85,22 @@ public:
 
 private:
     Function function_;
+};
+
+class AsyncPlanHandler final : public IAsyncCommandHandler {
+public:
+    Result<AsyncCommandPlan> prepare(const CommandRequest& command) override
+    {
+        calls.fetch_add(1U);
+        auto task = request(
+            ("task-" + std::string(command.requestId.value())).c_str(),
+            "task.async-compute");
+        return Result<AsyncCommandPlan>::success(AsyncCommandPlan {
+            std::move(task),
+            Value {Value::Object {{"accepted", Value {true}}}}});
+    }
+
+    std::atomic_size_t calls{0U};
 };
 
 class PassValidator final : public ISchemaValidator {
@@ -465,4 +482,93 @@ TEST_CASE("AppKernel owns freezes and stops the task stack", "[kernel][runtime][
     REQUIRE(kernel.shutdown().hasValue());
     CHECK(kernel.state() == lasercnc::kernel::AppKernelState::Stopped);
     CHECK_FALSE(kernel.tasks().submit(request("late", "task.kernel-owned")).hasValue());
+}
+
+TEST_CASE("Asynchronous commands use CommandRuntime to accept one read-only task", "[runtime][command][task]")
+{
+    lasercnc::kernel::AppKernel kernel;
+    const auto project = validId<ProjectId>("project.async-command");
+    const auto document = validId<DocumentId>("document.async-command");
+    const auto session = validId<SessionId>("session.async-command");
+    const auto capability = validId<CapabilityId>("task.submit");
+    REQUIRE(kernel.addDocument(project, document).hasValue());
+    REQUIRE(kernel.executionServices()
+                .configure(std::make_shared<PassValidator>(), std::make_shared<NullLog>())
+                .hasValue());
+    const std::array grants {capability};
+    REQUIRE(kernel.capabilities().replace(session, grants).hasValue());
+
+    std::atomic_bool receivedCommandContext {false};
+    REQUIRE(kernel.taskRegistry()
+                .registerHandler(
+                    descriptor("task.async-compute"),
+                    std::make_shared<LambdaHandler>(
+                        [&receivedCommandContext, project, document](
+                            const TaskRequest& task,
+                            const TaskContext& context) {
+                            receivedCommandContext.store(
+                                task.projectId == project && task.documentId == document
+                                && task.correlationId
+                                    == validId<CorrelationId>("correlation.async-command")
+                                && context.traceId == validId<TraceId>("trace.async-command")
+                                && context.document.has_value());
+                            return Result<Value>::success(Value {"computed"});
+                        }))
+                .hasValue());
+    auto asyncHandler = std::make_shared<AsyncPlanHandler>();
+    auto asyncDescriptor = CommandDescriptor {
+        validId<CommandName>("command.async-compute"),
+        Version {1U, 0U, 0U},
+        schema("schema.async.arguments"),
+        schema("schema.async.acceptance"),
+        ExecutionMode::Asynchronous,
+        SideEffectLevel::ReadOnly,
+        capability,
+        false,
+        true,
+        true};
+    REQUIRE(kernel.commandRegistry()
+                .registerAsyncHandler(asyncDescriptor, asyncHandler)
+                .hasValue());
+    auto unsafeDescriptor = asyncDescriptor;
+    unsafeDescriptor.name = validId<CommandName>("command.async-write");
+    unsafeDescriptor.sideEffect = SideEffectLevel::DocumentWrite;
+    auto unsafe = kernel.commandRegistry().registerAsyncHandler(unsafeDescriptor, asyncHandler);
+    REQUIRE_FALSE(unsafe.hasValue());
+    CHECK(std::string(unsafe.error().code.value()) == "Command.AsyncSideEffectUnsupported");
+
+    auto executor = BsThreadPoolExecutor::create(BsThreadPoolExecutorOptions {1U});
+    REQUIRE(executor.hasValue());
+    REQUIRE(kernel.configureTaskExecutor(std::move(executor).value()).hasValue());
+    REQUIRE(kernel.bootstrap().hasValue());
+
+    const auto key = validId<IdempotencyKey>("idempotency.async-command");
+    auto command = CommandRequest {
+        validId<RequestId>("request.async-first"),
+        session,
+        project,
+        document,
+        validId<CommandName>("command.async-compute"),
+        Value {Value::Object {}},
+        Revision {0U},
+        validId<CorrelationId>("correlation.async-command"),
+        validId<TraceId>("trace.async-command"),
+        key};
+    auto accepted = kernel.commands().execute(command);
+    REQUIRE(accepted.hasValue());
+    CHECK_FALSE(accepted.value().commit.has_value());
+    REQUIRE(accepted.value().taskId.has_value());
+    CHECK(accepted.value().postExecutionErrors.empty());
+    auto completed = kernel.tasks().wait(*accepted.value().taskId, 2s);
+    REQUIRE(completed.hasValue());
+    CHECK(completed.value().state == TaskState::Succeeded);
+    CHECK(receivedCommandContext.load());
+
+    command.requestId = validId<RequestId>("request.async-retry");
+    auto replayed = kernel.commands().execute(command);
+    REQUIRE(replayed.hasValue());
+    CHECK(replayed.value().replayed);
+    CHECK(replayed.value().taskId == accepted.value().taskId);
+    CHECK(asyncHandler->calls.load() == 1U);
+    REQUIRE(kernel.shutdown().hasValue());
 }

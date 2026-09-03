@@ -7,6 +7,7 @@
 #include <lasercnc/runtime/command_registry.hpp>
 #include <lasercnc/runtime/execution_services.hpp>
 #include <lasercnc/runtime/transaction_manager.hpp>
+#include <lasercnc/runtime/task_runtime.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -118,12 +119,14 @@ public:
         CapabilityService& capabilityService,
         messaging::EventBus& eventBus,
         ExecutionServices& services,
+        TaskRuntime& taskRuntime,
         std::size_t capacity)
         : registry(commandRegistry),
           transactions(transactionManager),
           capabilities(capabilityService),
           events(eventBus),
           executionServices(services),
+          tasks(taskRuntime),
           idempotencyCapacity(capacity)
     {
     }
@@ -211,6 +214,81 @@ public:
             return foundation::Result<CommandResponse>::failure(std::move(authorized).error());
         }
 
+        if(descriptor.executionMode == ExecutionMode::Asynchronous) {
+            foundation::Result<AsyncCommandPlan> prepared = [&]() {
+                try {
+                    return entry.value().asyncHandler->prepare(request);
+                } catch(const std::exception& exception) {
+                    return foundation::Result<AsyncCommandPlan>::failure(commandError(
+                        "Command.HandlerFailed",
+                        foundation::ErrorCategory::Internal,
+                        "The asynchronous command handler raised an exception",
+                        request,
+                        std::make_shared<const foundation::Error>(foundation::makeError(
+                            "Command.HandlerException",
+                            foundation::ErrorCategory::Internal,
+                            exception.what()))));
+                } catch(...) {
+                    return foundation::Result<AsyncCommandPlan>::failure(commandError(
+                        "Command.HandlerFailed",
+                        foundation::ErrorCategory::Internal,
+                        "The asynchronous command handler raised an exception",
+                        request));
+                }
+            }();
+            if(!prepared) {
+                logFailure(services.value(), request, &descriptor.version);
+                return foundation::Result<CommandResponse>::failure(std::move(prepared).error());
+            }
+
+            auto plan = std::move(prepared).value();
+            auto resultValid = services.value().schemaValidator->validate(
+                descriptor.result, plan.acceptance);
+            if(!resultValid) {
+                logFailure(services.value(), request, &descriptor.version);
+                return foundation::Result<CommandResponse>::failure(std::move(resultValid).error());
+            }
+            plan.task.traceId = request.traceId;
+            plan.task.correlationId = request.correlationId;
+            plan.task.projectId = request.projectId;
+            plan.task.documentId = request.documentId;
+            plan.task.expectedProjectRevision = request.expectedRevision;
+            const auto taskId = plan.task.taskId;
+            CommandResponse response {
+                std::move(plan.acceptance), std::nullopt, taskId, {}, false};
+            auto submitted = tasks.submit(std::move(plan.task));
+            if(!submitted) {
+                logFailure(services.value(), request, &descriptor.version);
+                return foundation::Result<CommandResponse>::failure(std::move(submitted).error());
+            }
+            try {
+                auto logged = services.value().logService->write(commandLog(
+                    request, observability::LogLevel::Info, "accepted", &descriptor.version));
+                if(!logged) {
+                    response.postExecutionErrors.push_back(std::move(logged).error());
+                }
+            } catch(const std::exception& exception) {
+                try {
+                    response.postExecutionErrors.push_back(commandError(
+                        "Command.PostAcceptanceIntegrationFailed",
+                        foundation::ErrorCategory::Internal,
+                        exception.what(),
+                        request));
+                } catch(...) {
+                }
+            } catch(...) {
+                try {
+                    response.postExecutionErrors.push_back(commandError(
+                        "Command.PostAcceptanceIntegrationFailed",
+                        foundation::ErrorCategory::Internal,
+                        "Post-acceptance logging integration failed",
+                        request));
+                } catch(...) {
+                }
+            }
+            return foundation::Result<CommandResponse>::success(std::move(response));
+        }
+
         std::optional<state::RevisionPrecondition> expected;
         if(request.expectedRevision.has_value()) {
             expected = state::RevisionPrecondition {
@@ -286,26 +364,26 @@ public:
 
         std::optional<CommandResponse> response;
         response.emplace(CommandResponse {
-            std::move(handled).value(), std::move(committed).value(), {}, false});
+            std::move(handled).value(), std::move(committed).value(), std::nullopt, {}, false});
         try {
-            for(const auto& event : response->commit.events) {
+            for(const auto& event : response->commit->events) {
                 auto delivery = events.publish(event, request.correlationId, request.traceId);
                 if(!delivery.hasValue()) {
-                    response->postCommitErrors.push_back(std::move(delivery).error());
+                    response->postExecutionErrors.push_back(std::move(delivery).error());
                     continue;
                 }
                 for(auto& failure : delivery.value().failures) {
-                    response->postCommitErrors.push_back(std::move(failure.error));
+                    response->postExecutionErrors.push_back(std::move(failure.error));
                 }
             }
             auto logged = services.value().logService->write(commandLog(
                 request, observability::LogLevel::Info, "success", &descriptor.version));
             if(!logged.hasValue()) {
-                response->postCommitErrors.push_back(std::move(logged).error());
+                response->postExecutionErrors.push_back(std::move(logged).error());
             }
         } catch(const std::exception& exception) {
             try {
-                response->postCommitErrors.push_back(commandError(
+                response->postExecutionErrors.push_back(commandError(
                     "Command.PostCommitIntegrationFailed",
                     foundation::ErrorCategory::Internal,
                     exception.what(),
@@ -314,7 +392,7 @@ public:
             }
         } catch(...) {
             try {
-                response->postCommitErrors.push_back(commandError(
+                response->postExecutionErrors.push_back(commandError(
                     "Command.PostCommitIntegrationFailed",
                     foundation::ErrorCategory::Internal,
                     "Post-commit event or logging integration failed",
@@ -343,6 +421,7 @@ public:
     CapabilityService& capabilities;
     messaging::EventBus& events;
     ExecutionServices& executionServices;
+    TaskRuntime& tasks;
     const std::size_t idempotencyCapacity;
     std::atomic_bool accepting{false};
     std::atomic_size_t activeExecutions{0U};
@@ -357,6 +436,7 @@ CommandRuntime::CommandRuntime(
     CapabilityService& capabilities,
     messaging::EventBus& events,
     ExecutionServices& executionServices,
+    TaskRuntime& tasks,
     std::size_t idempotencyCapacity)
     : impl_(std::make_unique<Impl>(
           registry,
@@ -364,6 +444,7 @@ CommandRuntime::CommandRuntime(
           capabilities,
           events,
           executionServices,
+          tasks,
           idempotencyCapacity))
 {
 }

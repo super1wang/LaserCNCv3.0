@@ -365,8 +365,9 @@ TEST_CASE("AppKernel runs one headless command and query chain", "[runtime][comm
         "request.create", fixture.project, fixture.document, fixture.session,
         "kernel.object.create", "object.runtime"));
     REQUIRE(command.hasValue());
-    CHECK(command.value().commit.revisionsAfter.at(RevisionScope::Project) == Revision {1U});
-    CHECK(command.value().postCommitErrors.empty());
+    REQUIRE(command.value().commit.has_value());
+    CHECK(command.value().commit->revisionsAfter.at(RevisionScope::Project) == Revision {1U});
+    CHECK(command.value().postExecutionErrors.empty());
     REQUIRE(events.size() == 1U);
     REQUIRE(events.front().correlationId().has_value());
     CHECK(*events.front().correlationId() == validId<CorrelationId>("correlation.runtime"));
@@ -498,7 +499,9 @@ TEST_CASE("CommandRuntime idempotency replays one commit and rejects key rebindi
         "kernel.object.create", "object.idempotent", key));
     REQUIRE(replay.hasValue());
     CHECK(replay.value().replayed);
-    CHECK(replay.value().commit.transactionId == first.value().commit.transactionId);
+    REQUIRE(replay.value().commit.has_value());
+    REQUIRE(first.value().commit.has_value());
+    CHECK(replay.value().commit->transactionId == first.value().commit->transactionId);
     CHECK(fixture.create->calls == 1U);
     CHECK(eventCount == 1U);
     CHECK(fixture.kernel.commands().idempotencyRecordCount() == 1U);
@@ -565,10 +568,10 @@ TEST_CASE("Post-commit event and logging failures cannot invert command success"
         "request.post-commit", fixture.project, fixture.document, fixture.session,
         "kernel.object.create", "object.post-commit"));
     REQUIRE(command.hasValue());
-    REQUIRE(command.value().postCommitErrors.size() == 2U);
-    CHECK(std::string(command.value().postCommitErrors[0].code.value())
+    REQUIRE(command.value().postExecutionErrors.size() == 2U);
+    CHECK(std::string(command.value().postExecutionErrors[0].code.value())
           == "Event.SubscriberFailed");
-    CHECK(std::string(command.value().postCommitErrors[1].code.value()) == "Test.LogFailed");
+    CHECK(std::string(command.value().postExecutionErrors[1].code.value()) == "Test.LogFailed");
     auto snapshot = fixture.kernel.documents().snapshot(fixture.document);
     REQUIRE(snapshot.hasValue());
     CHECK(snapshot.value().objects().contains(validId<ObjectId>("object.post-commit")));

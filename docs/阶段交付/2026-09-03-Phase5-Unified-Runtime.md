@@ -14,7 +14,7 @@ Phase 5 已验收。CommandRuntime、QueryRuntime、EventBus、Capability 与 Ap
    - 固定执行 Registry、Schema、Idempotency、Capability、Expected ProjectRevision、ApplicationTransaction、Handler、结果 Schema、Commit、EventBus、Log；
    - Handler failure/exception 和结果 Schema failure 全部 rollback；
    - Project/Document 不匹配、旧 Revision、未授权 Session 均在写入前拒绝；
-   - commit 后事件或日志失败写入 `postCommitErrors`，不反转已经提交的命令结果。
+   - commit 后事件或日志失败写入 `postExecutionErrors`，不反转已经提交的命令结果。
 3. QueryRuntime
    - Query 只在 AppKernel Ready 状态运行；
    - Document 查询只接收不可变按值快照，并返回快照 Revision；

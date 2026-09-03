@@ -130,7 +130,7 @@ TEST_CASE("CommandRegistry validates Phase 5 boundaries and discovers determinis
     asynchronous.executionMode = ExecutionMode::Asynchronous;
     auto asyncResult = registry.registerHandler(std::move(asynchronous), handler);
     REQUIRE_FALSE(asyncResult.hasValue());
-    CHECK(std::string(asyncResult.error().code.value()) == "Command.ExecutionModeUnsupported");
+    CHECK(std::string(asyncResult.error().code.value()) == "Command.HandlerModeMismatch");
 
     auto unsafeSideEffect = commandDescriptor("kernel.command.file");
     unsafeSideEffect.sideEffect = SideEffectLevel::FileSystemWrite;

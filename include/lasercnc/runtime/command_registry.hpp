@@ -21,6 +21,9 @@ public:
     [[nodiscard]] foundation::Result<void> registerHandler(
         CommandDescriptor descriptor,
         std::shared_ptr<ICommandHandler> handler);
+    [[nodiscard]] foundation::Result<void> registerAsyncHandler(
+        CommandDescriptor descriptor,
+        std::shared_ptr<IAsyncCommandHandler> handler);
     [[nodiscard]] foundation::Result<CommandDescriptor> descriptor(
         const kernel::CommandName& name) const;
     [[nodiscard]] std::vector<CommandDescriptor> descriptors() const;
@@ -34,6 +37,7 @@ private:
     struct Entry final {
         CommandDescriptor descriptor;
         std::shared_ptr<ICommandHandler> handler;
+        std::shared_ptr<IAsyncCommandHandler> asyncHandler;
     };
 
     [[nodiscard]] foundation::Result<Entry> resolve(const kernel::CommandName& name) const;

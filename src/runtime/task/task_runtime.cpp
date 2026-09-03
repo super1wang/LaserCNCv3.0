@@ -117,6 +117,14 @@ foundation::Result<void> TaskRuntime::submit(TaskRequest request)
                 foundation::ErrorCategory::Conflict,
                 "The task source revisions do not match the caller precondition"));
         }
+        if(request.expectedProjectRevision.has_value()
+           && *request.expectedProjectRevision
+               != captured.value().revisions().at(state::RevisionScope::Project)) {
+            return foundation::Result<void>::failure(foundation::makeError(
+                "Task.RevisionConflict",
+                foundation::ErrorCategory::Conflict,
+                "The task project revision does not match the caller precondition"));
+        }
         const auto documentId = *request.documentId;
         const auto revisions = captured.value().revisions();
         const auto* documents = &documents_;
@@ -125,7 +133,8 @@ foundation::Result<void> TaskRuntime::submit(TaskRequest request)
             return !current || current.value().revisions() != revisions;
         };
         document = std::move(captured).value();
-    } else if(request.expectedRevisions.has_value()) {
+    } else if(request.expectedRevisions.has_value()
+              || request.expectedProjectRevision.has_value()) {
         return foundation::Result<void>::failure(foundation::makeError(
             "Task.DocumentRequiredForRevision",
             foundation::ErrorCategory::Validation,

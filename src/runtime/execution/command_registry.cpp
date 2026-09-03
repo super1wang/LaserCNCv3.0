@@ -39,9 +39,9 @@ foundation::Result<void> CommandRegistry::registerHandler(
     }
     if(descriptor.executionMode != ExecutionMode::Synchronous) {
         return foundation::Result<void>::failure(commandError(
-            "Command.ExecutionModeUnsupported",
+            "Command.HandlerModeMismatch",
             foundation::ErrorCategory::Validation,
-            "Asynchronous commands require the Phase 6 TaskRuntime",
+            "A synchronous command requires an ICommandHandler",
             descriptor.name));
     }
     if(descriptor.sideEffect != SideEffectLevel::DocumentWrite) {
@@ -69,7 +69,62 @@ foundation::Result<void> CommandRegistry::registerHandler(
     }
     const auto name = descriptor.name;
     const auto [unused, inserted] = entries_.emplace(
-        name, Entry {std::move(descriptor), std::move(handler)});
+        name, Entry {std::move(descriptor), std::move(handler), nullptr});
+    static_cast<void>(unused);
+    if(!inserted) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.AlreadyRegistered",
+            foundation::ErrorCategory::Conflict,
+            "A command with the same stable name is already registered",
+            name));
+    }
+    return foundation::Result<void>::success();
+}
+
+foundation::Result<void> CommandRegistry::registerAsyncHandler(
+    CommandDescriptor descriptor,
+    std::shared_ptr<IAsyncCommandHandler> handler)
+{
+    if(handler == nullptr) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.InvalidHandler",
+            foundation::ErrorCategory::Validation,
+            "An asynchronous command handler is required",
+            descriptor.name));
+    }
+    if(descriptor.executionMode != ExecutionMode::Asynchronous) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.HandlerModeMismatch",
+            foundation::ErrorCategory::Validation,
+            "An asynchronous command requires an IAsyncCommandHandler",
+            descriptor.name));
+    }
+    if(descriptor.sideEffect != SideEffectLevel::ReadOnly) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.AsyncSideEffectUnsupported",
+            foundation::ErrorCategory::Validation,
+            "Asynchronous commands may only prepare read-only background computation",
+            descriptor.name));
+    }
+    if(descriptor.undoable) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.UndoUnsupported",
+            foundation::ErrorCategory::Validation,
+            "Undoable commands require the Phase 8 journal contract",
+            descriptor.name));
+    }
+
+    std::unique_lock lock(mutex_);
+    if(frozen_) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.RegistryFrozen",
+            foundation::ErrorCategory::Conflict,
+            "Command registration is closed",
+            descriptor.name));
+    }
+    const auto name = descriptor.name;
+    const auto [unused, inserted] = entries_.emplace(
+        name, Entry {std::move(descriptor), nullptr, std::move(handler)});
     static_cast<void>(unused);
     if(!inserted) {
         return foundation::Result<void>::failure(commandError(

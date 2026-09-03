@@ -63,9 +63,11 @@ struct TaskRequest final {
     kernel::TaskName task;
     foundation::Value input;
     kernel::TraceId traceId;
+    std::optional<kernel::CorrelationId> correlationId;
     std::optional<kernel::ProjectId> projectId;
     std::optional<kernel::DocumentId> documentId;
     std::optional<state::RevisionSet> expectedRevisions;
+    std::optional<state::Revision> expectedProjectRevision;
     std::int32_t priority{0};
     std::vector<kernel::TaskId> dependencies;
     std::vector<ResourceClaim> resources;

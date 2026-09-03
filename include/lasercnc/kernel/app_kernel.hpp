@@ -88,13 +88,13 @@ private:
     messaging::EventBus events_;
     runtime::CommandRegistry commandRegistry_;
     runtime::QueryRegistry queryRegistry_;
-    runtime::CommandRuntime commands_;
-    runtime::QueryRuntime queries_;
     runtime::TaskRegistry taskRegistry_;
     runtime::ResourceManager resources_;
     std::unique_ptr<platform::ITaskExecutor> taskExecutor_;
     runtime::Scheduler scheduler_;
     runtime::TaskRuntime tasks_;
+    runtime::CommandRuntime commands_;
+    runtime::QueryRuntime queries_;
     AppKernelState state_{AppKernelState::Configuring};
 };
 

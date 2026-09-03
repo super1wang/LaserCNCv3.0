@@ -10,11 +10,16 @@ namespace lasercnc::kernel {
 AppKernel::AppKernel()
     : modules_(services_),
       transactions_(documents_),
-      commands_(
-          commandRegistry_, transactions_, capabilities_, events_, executionServices_),
-      queries_(queryRegistry_, documents_, capabilities_, executionServices_),
       scheduler_(resources_),
-      tasks_(taskRegistry_, scheduler_, executionServices_, documents_)
+      tasks_(taskRegistry_, scheduler_, executionServices_, documents_),
+      commands_(
+          commandRegistry_,
+          transactions_,
+          capabilities_,
+          events_,
+          executionServices_,
+          tasks_),
+      queries_(queryRegistry_, documents_, capabilities_, executionServices_)
 {
 }
 

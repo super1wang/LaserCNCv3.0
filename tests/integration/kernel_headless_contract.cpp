@@ -255,7 +255,7 @@ int runRoundTrip()
         return fail("command execute", command.error());
     }
     if(eventCount != 1U || command.value().replayed
-       || !command.value().postCommitErrors.empty()) {
+       || !command.value().postExecutionErrors.empty()) {
         std::cerr << "command execute: invalid commit or event result\n";
         return 1;
     }

@@ -7,6 +7,7 @@
 #include <lasercnc/kernel/identifiers.hpp>
 #include <lasercnc/state/revision.hpp>
 #include <lasercnc/runtime/transaction.hpp>
+#include <lasercnc/runtime/task.hpp>
 
 #include <cstdint>
 #include <optional>
@@ -68,10 +69,24 @@ public:
         ApplicationTransaction& transaction) = 0;
 };
 
+struct AsyncCommandPlan final {
+    TaskRequest task;
+    foundation::Value acceptance;
+};
+
+class IAsyncCommandHandler {
+public:
+    virtual ~IAsyncCommandHandler() = default;
+
+    [[nodiscard]] virtual foundation::Result<AsyncCommandPlan> prepare(
+        const CommandRequest& request) = 0;
+};
+
 struct CommandResponse final {
     foundation::Value result;
-    TransactionCommit commit;
-    std::vector<foundation::Error> postCommitErrors;
+    std::optional<TransactionCommit> commit;
+    std::optional<kernel::TaskId> taskId;
+    std::vector<foundation::Error> postExecutionErrors;
     bool replayed{false};
 };
 

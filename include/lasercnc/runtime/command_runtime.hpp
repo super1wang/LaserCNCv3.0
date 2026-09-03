@@ -20,6 +20,7 @@ class CapabilityService;
 class CommandRegistry;
 class ExecutionServices;
 class TransactionManager;
+class TaskRuntime;
 
 class CommandRuntime final {
 public:
@@ -29,6 +30,7 @@ public:
         CapabilityService& capabilities,
         messaging::EventBus& events,
         ExecutionServices& executionServices,
+        TaskRuntime& tasks,
         std::size_t idempotencyCapacity = 1024U);
     ~CommandRuntime();
 

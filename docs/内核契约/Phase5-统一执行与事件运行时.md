@@ -9,7 +9,7 @@ Phase 5 建立所有 Headless、CLI、未来 GUI/Script/AI 必须共用的 Comma
 - CommandName、QueryName、RequestId、SessionId、CorrelationId、TraceId、IdempotencyKey、SubscriptionId 均为独立 StrongId。
 - CommandRegistry 和 QueryRegistry 按稳定名称唯一注册，发现结果按名称确定性排序；后续由 AppKernel 在 Ready 边界冻结。
 - CommandDescriptor 公开版本、参数/结果 Schema、执行模式、副作用、Capability、Undo、确定性和幂等元数据。
-- Phase 5 只接受同步 `DocumentWrite` 命令；异步执行必须等待 Phase 6 TaskRuntime，Undo 必须等待 Phase 8 Journal，文件发布与硬件副作用不得伪装成已具备事务保障。
+- Phase 5 只接受同步 `DocumentWrite` 命令；Phase 6 已在同一 CommandRuntime 上增加只读异步任务接受路径。Undo 仍须等待 Phase 8 Journal，文件发布与硬件副作用不得伪装成已具备事务保障。
 - CapabilityService 对未知 Session 和未授予 Capability 默认拒绝，只支持显式精确授权；通配、角色继承和远端认证不在本阶段假设中。
 - ExecutionServices 只持有 Kernel 的 `ISchemaValidator` 与 `ILogService` 端口；具体 jsoncons/spdlog 实现由组合根注入，公共 API 不出现第三方类型。
 
@@ -20,7 +20,7 @@ Phase 5 建立所有 Headless、CLI、未来 GUI/Script/AI 必须共用的 Comma
 - 支持按事件类别/名称过滤、Immediate/Queued delivery、RAII Subscription lifetime、Trace/Correlation 传播。
 - Notification 可按订阅、事件名和 coalescing key 合并；Domain/System Event 不合并。
 - 发布先在锁内准备投递快照，回调始终在锁外执行；回调可以重入发布，单个订阅者异常被转换为 delivery failure，不阻断其他订阅者，也不改变已提交业务状态。
-- queued 事件由调用方显式 drain；Phase 6 之前 EventBus 不私建线程、不借用三方线程池冒充 Scheduler。
+- queued 事件由调用方显式 drain；EventBus 不私建线程，也不把 Phase 6 的长任务 Scheduler 冒充 Host 事件循环。
 
 ## 已建立的 CommandRuntime
 
@@ -31,7 +31,7 @@ Phase 5 建立所有 Headless、CLI、未来 GUI/Script/AI 必须共用的 Comma
 - CommandRuntime 只在 AppKernel Ready 状态接受请求，关闭后拒绝新执行；
 - Request 的 ProjectId 必须与 Document 所属项目一致，`expectedRevision` 映射为 ProjectRevision 前置条件；
 - Handler 异常转换为 Kernel Error，Handler failure 或结果 Schema failure 会 rollback staging state；
-- commit 成功后，EventBus 或日志失败只进入 `postCommitErrors`，不得把已提交命令反转成失败，防止无幂等键调用方误重试；
+- commit 成功后，EventBus 或日志失败只进入 `postExecutionErrors`，不得把已提交命令反转成失败，防止无幂等键调用方误重试；字段在 Phase 6 扩展为同步提交与异步接受共用的后置集成诊断容器；
 - 幂等记录在内存中并发安全且容量有限。相同 key 与相同业务签名共享一个 in-flight 执行，重试返回原 commit 并标记 replayed，不重新执行、不重复发事件；不同业务签名绑定同一 key 会冲突；
 - 业务签名包含 Session、Project、Document、Command、Arguments 和 ExpectedRevision，不包含每次传输可变化的 RequestId、CorrelationId、TraceId；
 - 当前幂等记录不是持久化 exactly-once 保证，进程重启后的恢复与淘汰策略持久化属于 Phase 8。
@@ -66,7 +66,7 @@ Phase 5 建立所有 Headless、CLI、未来 GUI/Script/AI 必须共用的 Comma
 
 ## 阶段边界
 
-- 异步 Command、TaskRuntime、Scheduler、Cancellation 和资源仲裁属于 Phase 6；
+- 异步 Command、TaskRuntime、Scheduler、Cancellation 和资源仲裁已由 Phase 6 契约承接；
 - Trace 目前只传播 TraceId，Trace/Metrics/Diagnostics 实现属于 Phase 7；
 - 幂等持久化、Event Journal、Snapshot 和 Crash Recovery 属于 Phase 8；
 - Workflow/Script 属于 Phase 9；
