@@ -1,0 +1,289 @@
+#include <lasercnc/state/object_type_registry.hpp>
+#include <lasercnc/foundation/error.hpp>
+
+#include <catch2/catch_test_macros.hpp>
+
+#include <atomic>
+#include <functional>
+#include <future>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
+
+using namespace lasercnc::foundation;
+using namespace lasercnc::kernel;
+using namespace lasercnc::state;
+
+namespace {
+
+template <typename Id>
+Id id(const char* text)
+{
+    auto result = Id::create(text);
+    if(!result) {
+        throw std::logic_error("Invalid object type test identity");
+    }
+    return std::move(result).value();
+}
+
+class Validator final : public IObjectTypeValidator {
+public:
+    using Function = std::function<Result<void>(const Value&)>;
+    explicit Validator(Function function) : function_(std::move(function)) {}
+    Result<void> validate(const Value& data) const override { return function_(data); }
+private:
+    Function function_;
+};
+
+class References final : public IObjectReferenceEnumerator {
+public:
+    using Function = std::function<Result<std::vector<ObjectId>>(const Value&)>;
+    explicit References(Function function) : function_(std::move(function)) {}
+    Result<std::vector<ObjectId>> enumerate(const Value& data) const override
+    {
+        return function_(data);
+    }
+private:
+    Function function_;
+};
+
+class Migration final : public IObjectMigration {
+public:
+    using Function = std::function<Result<Value>(const Value&)>;
+    explicit Migration(Function function) : function_(std::move(function)) {}
+    Result<Value> migrate(const Value& data) const override { return function_(data); }
+private:
+    Function function_;
+};
+
+std::shared_ptr<const Validator> numberValidator(std::int64_t expected)
+{
+    return std::make_shared<Validator>([expected](const Value& data) {
+        if(data == Value {expected}) {
+            return Result<void>::success();
+        }
+        return Result<void>::failure(makeError(
+            "Test.ObjectDataInvalid", ErrorCategory::Validation,
+            "Unexpected versioned object data"));
+    });
+}
+
+std::shared_ptr<const References> noReferences()
+{
+    return std::make_shared<References>([](const Value&) {
+        return Result<std::vector<ObjectId>>::success({});
+    });
+}
+
+std::shared_ptr<const Migration> incrementMigration()
+{
+    return std::make_shared<Migration>([](const Value& data) {
+        return Result<Value>::success(Value {*data.getIf<std::int64_t>() + 1});
+    });
+}
+
+ObjectTypeDefinition definition(const char* name = "type.test.versioned")
+{
+    return ObjectTypeDefinition {
+        ObjectTypeDescriptor {
+            id<ObjectTypeId>(name), Version {3U, 0U, 0U}, ObjectPersistencePolicy::Durable},
+        {
+            {Version {3U, 0U, 0U}, numberValidator(3), noReferences()},
+            {Version {1U, 0U, 0U}, numberValidator(1), noReferences()},
+            {Version {2U, 0U, 0U}, numberValidator(2), noReferences()},
+        },
+        {
+            {Version {2U, 0U, 0U}, Version {3U, 0U, 0U}, incrementMigration()},
+            {Version {1U, 0U, 0U}, Version {2U, 0U, 0U}, incrementMigration()},
+        }};
+}
+
+} // namespace
+
+TEST_CASE("ObjectTypeRegistry freezes deterministic versioned contracts", "[state][object-type]")
+{
+    ObjectTypeRegistry registry;
+    const auto type = id<ObjectTypeId>("type.test.versioned");
+    REQUIRE(registry.registerType(definition()).hasValue());
+    CHECK(registry.size() == 1U);
+    REQUIRE(registry.descriptor(type).hasValue());
+    CHECK(registry.descriptor(type).value().currentVersion == Version {3U, 0U, 0U});
+    CHECK(registry.descriptor(type).value().persistencePolicy == ObjectPersistencePolicy::Durable);
+    auto versions = registry.versions(type);
+    REQUIRE(versions.hasValue());
+    CHECK(versions.value() == std::vector<Version> {
+        Version {1U, 0U, 0U}, Version {2U, 0U, 0U}, Version {3U, 0U, 0U}});
+    CHECK_FALSE(registry.registerType(definition()).hasValue());
+    CHECK_FALSE(registry.descriptor(id<ObjectTypeId>("type.unknown")).hasValue());
+    CHECK_FALSE(registry.validate(type, Version {4U, 0U, 0U}, Value {std::int64_t {4}}).hasValue());
+    CHECK(registry.validate(type, Version {1U, 0U, 0U}, Value {std::int64_t {1}}).hasValue());
+    CHECK_FALSE(registry.validate(type, Version {3U, 0U, 0U}, Value {std::int64_t {1}}).hasValue());
+    registry.freeze();
+    CHECK(registry.frozen());
+    auto late = registry.registerType(definition("type.late"));
+    REQUIRE_FALSE(late.hasValue());
+    CHECK(std::string(late.error().code.value()) == "ObjectType.RegistryFrozen");
+}
+
+TEST_CASE("ObjectTypeRegistry rejects ambiguous and incomplete migration contracts", "[state][object-type][migration]")
+{
+    auto candidate = definition();
+    SECTION("current version missing") { candidate.versions.erase(candidate.versions.begin()); }
+    SECTION("validator missing") { candidate.versions.front().validator.reset(); }
+    SECTION("reference enumerator missing") { candidate.versions.front().references.reset(); }
+    SECTION("duplicate version") { candidate.versions.push_back(candidate.versions.front()); }
+    SECTION("future version") { candidate.versions.front().version = Version {4U, 0U, 0U}; }
+    SECTION("unknown persistence policy") {
+        candidate.descriptor.persistencePolicy = static_cast<ObjectPersistencePolicy>(99U);
+    }
+    SECTION("migration path missing") { candidate.migrations.pop_back(); }
+    SECTION("migration callback missing") { candidate.migrations.front().migration.reset(); }
+    SECTION("backward edge") {
+        candidate.migrations.front().from = Version {3U, 0U, 0U};
+        candidate.migrations.front().to = Version {2U, 0U, 0U};
+    }
+    SECTION("unknown target") { candidate.migrations.front().to = Version {4U, 0U, 0U}; }
+    SECTION("ambiguous outgoing edge") { candidate.migrations.push_back(candidate.migrations.front()); }
+    ObjectTypeRegistry registry;
+    CHECK_FALSE(registry.registerType(std::move(candidate)).hasValue());
+    CHECK(registry.size() == 0U);
+}
+
+TEST_CASE("ObjectTypeRegistry migrates explicitly and leaves source values unchanged", "[state][object-type][migration]")
+{
+    ObjectTypeRegistry registry;
+    REQUIRE(registry.registerType(definition()).hasValue());
+    registry.freeze();
+    const auto type = id<ObjectTypeId>("type.test.versioned");
+    const Value original {std::int64_t {1}};
+    auto migrated = registry.migrate(type, Version {1U, 0U, 0U}, Version {3U, 0U, 0U}, original);
+    REQUIRE(migrated.hasValue());
+    CHECK(migrated.value() == Value {std::int64_t {3}});
+    CHECK(original == Value {std::int64_t {1}});
+    auto unchanged = registry.migrate(type, Version {1U, 0U, 0U}, Version {1U, 0U, 0U}, original);
+    REQUIRE(unchanged.hasValue());
+    CHECK(unchanged.value() == original);
+    CHECK_FALSE(registry.migrate(type, Version {3U, 0U, 0U}, Version {1U, 0U, 0U},
+                                Value {std::int64_t {3}}).hasValue());
+    CHECK_FALSE(registry.migrate(type, Version {1U, 0U, 0U}, Version {4U, 0U, 0U}, original).hasValue());
+    CHECK_FALSE(registry.migrate(type, Version {1U, 0U, 0U}, Version {3U, 0U, 0U},
+                                Value {"invalid"}).hasValue());
+
+    ObjectTypeRegistry skippedRegistry;
+    auto skipped = definition();
+    std::size_t migrationCalls = 0U;
+    skipped.migrations.back().to = Version {3U, 0U, 0U};
+    skipped.migrations.back().migration = std::make_shared<Migration>([&](const Value&) {
+        ++migrationCalls;
+        return Result<Value>::success(Value {std::int64_t {3}});
+    });
+    REQUIRE(skippedRegistry.registerType(std::move(skipped)).hasValue());
+    auto unreachable = skippedRegistry.migrate(
+        type, Version {1U, 0U, 0U}, Version {2U, 0U, 0U}, original);
+    REQUIRE_FALSE(unreachable.hasValue());
+    CHECK(std::string(unreachable.error().code.value()) == "ObjectType.MigrationPathMissing");
+    CHECK(migrationCalls == 0U);
+}
+
+TEST_CASE("ObjectTypeRegistry contains callback failures without partial migration", "[state][object-type][failure]")
+{
+    auto candidate = definition();
+    std::string expected;
+    SECTION("migration returns failure") {
+        expected = "ObjectType.MigrationFailed";
+        candidate.migrations.back().migration = std::make_shared<Migration>([](const Value&) {
+            return Result<Value>::failure(makeError("Test.MigrationFailed", ErrorCategory::Validation, "failure"));
+        });
+    }
+    SECTION("migration throws") {
+        expected = "ObjectType.MigrationException";
+        candidate.migrations.back().migration = std::make_shared<Migration>([](const Value&) -> Result<Value> {
+            throw std::runtime_error("migration failure");
+        });
+    }
+    SECTION("intermediate result violates next schema") {
+        expected = "ObjectType.ValidationFailed";
+        candidate.migrations.back().migration = std::make_shared<Migration>([](const Value&) {
+            return Result<Value>::success(Value {std::int64_t {99}});
+        });
+    }
+    SECTION("source validator throws") {
+        expected = "ObjectType.ValidatorException";
+        candidate.versions[1U].validator = std::make_shared<Validator>([](const Value&) -> Result<void> {
+            throw std::runtime_error("validator failure");
+        });
+    }
+    ObjectTypeRegistry registry;
+    REQUIRE(registry.registerType(std::move(candidate)).hasValue());
+    const Value original {std::int64_t {1}};
+    auto migrated = registry.migrate(id<ObjectTypeId>("type.test.versioned"),
+                                    Version {1U, 0U, 0U}, Version {3U, 0U, 0U}, original);
+    REQUIRE_FALSE(migrated.hasValue());
+    CHECK(std::string(migrated.error().code.value()) == expected);
+    CHECK(original == Value {std::int64_t {1}});
+}
+
+TEST_CASE("ObjectTypeRegistry normalizes references and runs callbacks outside locks", "[state][object-type][references][concurrency]")
+{
+    ObjectTypeRegistry registry;
+    auto candidate = definition();
+    std::atomic_size_t calls {0U};
+    std::atomic_bool callbacksValid {true};
+    candidate.versions[1U].validator = std::make_shared<Validator>([&](const Value&) {
+        if(!registry.frozen() || registry.descriptors().size() != 1U) {
+            callbacksValid.store(false);
+        }
+        return Result<void>::success();
+    });
+    candidate.versions[1U].references = std::make_shared<References>([&](const Value&) {
+        if(registry.size() != 1U) {
+            callbacksValid.store(false);
+        }
+        calls.fetch_add(1U);
+        return Result<std::vector<ObjectId>>::success({
+            id<ObjectId>("object.z"), id<ObjectId>("object.a"), id<ObjectId>("object.z")});
+    });
+    REQUIRE(registry.registerType(std::move(candidate)).hasValue());
+    registry.freeze();
+    std::vector<std::future<Result<std::vector<ObjectId>>>> futures;
+    for(std::size_t index = 0U; index < 16U; ++index) {
+        futures.push_back(std::async(std::launch::async, [&] {
+            return registry.references(id<ObjectTypeId>("type.test.versioned"),
+                                       Version {1U, 0U, 0U}, Value {std::int64_t {1}});
+        }));
+    }
+    for(auto& future : futures) {
+        auto result = future.get();
+        REQUIRE(result.hasValue());
+        CHECK(result.value() == std::vector<ObjectId> {id<ObjectId>("object.a"), id<ObjectId>("object.z")});
+    }
+    CHECK(calls.load() == 16U);
+    CHECK(callbacksValid.load());
+}
+
+TEST_CASE("ObjectTypeRegistry contains reference enumeration failures", "[state][object-type][references][failure]")
+{
+    auto candidate = definition();
+    std::string expected;
+    SECTION("returned error") {
+        expected = "ObjectType.ReferenceEnumerationFailed";
+        candidate.versions[1U].references = std::make_shared<References>([](const Value&) {
+            return Result<std::vector<ObjectId>>::failure(makeError(
+                "Test.ReferencesFailed", ErrorCategory::Validation, "failure"));
+        });
+    }
+    SECTION("exception") {
+        expected = "ObjectType.ReferenceEnumerationException";
+        candidate.versions[1U].references = std::make_shared<References>([](const Value&) -> Result<std::vector<ObjectId>> {
+            throw std::runtime_error("references failure");
+        });
+    }
+    ObjectTypeRegistry registry;
+    REQUIRE(registry.registerType(std::move(candidate)).hasValue());
+    auto references = registry.references(id<ObjectTypeId>("type.test.versioned"),
+                                          Version {1U, 0U, 0U}, Value {std::int64_t {1}});
+    REQUIRE_FALSE(references.hasValue());
+    CHECK(std::string(references.error().code.value()) == expected);
+}

@@ -23,6 +23,7 @@ catch_discover_tests(lasercnc_foundation_tests)
 add_executable(
     lasercnc_kernel_tests
     unit/kernel/document_state_tests.cpp
+    unit/kernel/object_type_registry_tests.cpp
     unit/kernel/service_registry_tests.cpp
     unit/kernel/transaction_tests.cpp
     unit/kernel/runtime_registry_tests.cpp
