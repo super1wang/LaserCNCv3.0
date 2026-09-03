@@ -98,7 +98,19 @@ AppKernel::AppKernel()
           metrics_,
           10000U,
           32U,
-          &documentRuntime_)
+          &documentRuntime_),
+      executionGateway_(
+          modules_,
+          commandRegistry_,
+          queryRegistry_,
+          taskRegistry_,
+          workflowRegistry_,
+          scriptRegistry_,
+          commands_,
+          queries_,
+          tasks_,
+          workflows_,
+          scripts_)
 {
     documentRuntime_.configureCloseBlockers(
         runtime::DocumentRuntime::CloseBlockers {
@@ -123,6 +135,16 @@ AppKernel::~AppKernel()
     if(state_ == AppKernelState::Ready || state_ == AppKernelState::Stopping) {
         static_cast<void>(shutdown());
     }
+}
+
+ExecutionGateway& AppKernel::execution() noexcept
+{
+    return executionGateway_;
+}
+
+const ExecutionGateway& AppKernel::execution() const noexcept
+{
+    return executionGateway_;
 }
 
 foundation::Result<void> AppKernel::addModule(std::unique_ptr<IModule> module)
@@ -553,19 +575,9 @@ foundation::Result<void> AppKernel::shutdown(std::chrono::milliseconds taskTimeo
     return foundation::Result<void>::success();
 }
 
-ServiceRegistry& AppKernel::services() noexcept
-{
-    return services_;
-}
-
 const ServiceRegistry& AppKernel::services() const noexcept
 {
     return services_;
-}
-
-ModuleRuntime& AppKernel::modules() noexcept
-{
-    return modules_;
 }
 
 const ModuleRuntime& AppKernel::modules() const noexcept
@@ -642,11 +654,6 @@ const messaging::EventBus& AppKernel::events() const noexcept
     return events_;
 }
 
-runtime::CommandRegistry& AppKernel::commandRegistry() noexcept
-{
-    return commandRegistry_;
-}
-
 const runtime::CommandRegistry& AppKernel::commandRegistry() const noexcept
 {
     return commandRegistry_;
@@ -662,19 +669,9 @@ const runtime::EffectGuardRegistry& AppKernel::effectGuards() const noexcept
     return effectGuards_;
 }
 
-runtime::QueryRegistry& AppKernel::queryRegistry() noexcept
-{
-    return queryRegistry_;
-}
-
 const runtime::QueryRegistry& AppKernel::queryRegistry() const noexcept
 {
     return queryRegistry_;
-}
-
-runtime::WorkflowRegistry& AppKernel::workflowRegistry() noexcept
-{
-    return workflowRegistry_;
 }
 
 const runtime::WorkflowRegistry& AppKernel::workflowRegistry() const noexcept
@@ -682,39 +679,9 @@ const runtime::WorkflowRegistry& AppKernel::workflowRegistry() const noexcept
     return workflowRegistry_;
 }
 
-runtime::ScriptRegistry& AppKernel::scriptRegistry() noexcept
-{
-    return scriptRegistry_;
-}
-
 const runtime::ScriptRegistry& AppKernel::scriptRegistry() const noexcept
 {
     return scriptRegistry_;
-}
-
-runtime::CommandRuntime& AppKernel::commands() noexcept
-{
-    return commands_;
-}
-
-const runtime::CommandRuntime& AppKernel::commands() const noexcept
-{
-    return commands_;
-}
-
-runtime::QueryRuntime& AppKernel::queries() noexcept
-{
-    return queries_;
-}
-
-const runtime::QueryRuntime& AppKernel::queries() const noexcept
-{
-    return queries_;
-}
-
-runtime::TaskRegistry& AppKernel::taskRegistry() noexcept
-{
-    return taskRegistry_;
 }
 
 const runtime::TaskRegistry& AppKernel::taskRegistry() const noexcept
@@ -740,36 +707,6 @@ runtime::Scheduler& AppKernel::scheduler() noexcept
 const runtime::Scheduler& AppKernel::scheduler() const noexcept
 {
     return scheduler_;
-}
-
-runtime::TaskRuntime& AppKernel::tasks() noexcept
-{
-    return tasks_;
-}
-
-const runtime::TaskRuntime& AppKernel::tasks() const noexcept
-{
-    return tasks_;
-}
-
-runtime::WorkflowRuntime& AppKernel::workflows() noexcept
-{
-    return workflows_;
-}
-
-const runtime::WorkflowRuntime& AppKernel::workflows() const noexcept
-{
-    return workflows_;
-}
-
-runtime::ScriptRuntime& AppKernel::scripts() noexcept
-{
-    return scripts_;
-}
-
-const runtime::ScriptRuntime& AppKernel::scripts() const noexcept
-{
-    return scripts_;
 }
 
 observability::LocalTraceService& AppKernel::traces() noexcept

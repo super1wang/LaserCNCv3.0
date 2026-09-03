@@ -29,17 +29,6 @@ std::vector<Id> normalized(std::vector<Id> values)
     return values;
 }
 
-template <typename Key, typename Id, typename Selector>
-std::vector<Id> contributionNames(const std::vector<Key>& keys, Selector selector)
-{
-    std::vector<Id> names;
-    names.reserve(keys.size());
-    for(const auto& key : keys) {
-        names.push_back(selector(key));
-    }
-    return normalized(std::move(names));
-}
-
 template <typename Id>
 bool matches(const std::vector<Id>& declared, const std::vector<Id>& registered)
 {
@@ -95,7 +84,7 @@ foundation::Result<void> ModuleRegistrar::registerCommand(
 {
     const runtime::CommandKey key {descriptor.name, descriptor.version};
     auto admitted = admit(
-        contains(descriptor_.commands, descriptor.name),
+        contains(descriptor_.commands, key),
         "command",
         descriptor.name.value());
     if(!admitted) {
@@ -115,7 +104,7 @@ foundation::Result<void> ModuleRegistrar::registerAsyncCommand(
 {
     const runtime::CommandKey key {descriptor.name, descriptor.version};
     auto admitted = admit(
-        contains(descriptor_.commands, descriptor.name),
+        contains(descriptor_.commands, key),
         "command",
         descriptor.name.value());
     if(!admitted) {
@@ -136,7 +125,7 @@ foundation::Result<void> ModuleRegistrar::registerReadOnlyCommand(
 {
     const runtime::CommandKey key {descriptor.name, descriptor.version};
     auto admitted = admit(
-        contains(descriptor_.commands, descriptor.name),
+        contains(descriptor_.commands, key),
         "command",
         descriptor.name.value());
     if(!admitted) {
@@ -157,7 +146,7 @@ foundation::Result<void> ModuleRegistrar::registerExternalEffectCommand(
 {
     const runtime::CommandKey key {descriptor.name, descriptor.version};
     auto admitted = admit(
-        contains(descriptor_.commands, descriptor.name),
+        contains(descriptor_.commands, key),
         "command",
         descriptor.name.value());
     if(!admitted) {
@@ -178,7 +167,7 @@ foundation::Result<void> ModuleRegistrar::registerQuery(
 {
     const runtime::QueryKey key {descriptor.name, descriptor.version};
     auto admitted = admit(
-        contains(descriptor_.queries, descriptor.name),
+        contains(descriptor_.queries, key),
         "query",
         descriptor.name.value());
     if(!admitted) {
@@ -287,15 +276,9 @@ foundation::Result<ModuleContributionSnapshot> ModuleRegistrar::finish()
     if(firstError_.has_value()) {
         return foundation::Result<ModuleContributionSnapshot>::failure(*firstError_);
     }
-    const auto commandNames = contributionNames<runtime::CommandKey, CommandName>(
-        contributions_.commands,
-        [](const runtime::CommandKey& key) { return key.name; });
-    const auto queryNames = contributionNames<runtime::QueryKey, QueryName>(
-        contributions_.queries,
-        [](const runtime::QueryKey& key) { return key.name; });
     const bool exact = matches(descriptor_.providedServices, contributions_.services)
-        && normalized(descriptor_.commands) == commandNames
-        && normalized(descriptor_.queries) == queryNames
+        && matches(descriptor_.commands, contributions_.commands)
+        && matches(descriptor_.queries, contributions_.queries)
         && matches(descriptor_.tasks, contributions_.tasks)
         && matches(descriptor_.workflows, contributions_.workflows)
         && matches(descriptor_.scripts, contributions_.scripts)

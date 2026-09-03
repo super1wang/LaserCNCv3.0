@@ -6,6 +6,7 @@
 #include <lasercnc/runtime/query_runtime.hpp>
 
 #include <catch2/catch_test_macros.hpp>
+#include "kernel_test_module.hpp"
 
 #include <algorithm>
 #include <array>
@@ -363,9 +364,9 @@ struct RuntimeFixture final {
     {
         create = std::make_shared<CreateObjectHandler>();
         query = std::make_shared<ObjectQueryHandler>();
-        REQUIRE(kernel.commandRegistry().registerHandler(
+        REQUIRE(lasercnc::test::registerCommand(kernel,
             commandDescriptor("kernel.object.create"), create).hasValue());
-        REQUIRE(kernel.queryRegistry().registerHandler(
+        REQUIRE(lasercnc::test::registerQuery(kernel,
             queryDescriptor("kernel.object.get"), query).hasValue());
     }
 
@@ -399,7 +400,7 @@ TEST_CASE("AppKernel runs one headless command and query chain", "[runtime][comm
         [&](const EventEnvelope& event) { events.push_back(event); });
     REQUIRE(subscription.hasValue());
 
-    auto beforeReady = fixture.kernel.commands().execute(commandRequest(
+    auto beforeReady = fixture.kernel.execution().executeCommand(commandRequest(
         "request.before-ready", fixture.project, fixture.document, fixture.session,
         "kernel.object.create", "object.before-ready"));
     REQUIRE_FALSE(beforeReady.hasValue());
@@ -414,16 +415,14 @@ TEST_CASE("AppKernel runs one headless command and query chain", "[runtime][comm
     CHECK(fixture.kernel.diagnostics().frozen());
     CHECK_FALSE(fixture.kernel.executionServices().configure(
         fixture.validator, fixture.log).hasValue());
-    CHECK(fixture.kernel.commands().accepting());
-    CHECK(fixture.kernel.queries().accepting());
-    CHECK_FALSE(fixture.kernel.commandRegistry().registerHandler(
+    CHECK_FALSE(lasercnc::test::registerCommand(fixture.kernel,
         commandDescriptor("kernel.late"), fixture.create).hasValue());
 
     auto createRequest = commandRequest(
         "request.create", fixture.project, fixture.document, fixture.session,
         "kernel.object.create", "object.runtime");
     createRequest.parentSpanId = validId<SpanId>("span.workflow.command-parent");
-    auto command = fixture.kernel.commands().execute(createRequest);
+    auto command = fixture.kernel.execution().executeCommand(createRequest);
     REQUIRE(command.hasValue());
     REQUIRE(command.value().commit.has_value());
     CHECK(command.value().commit->revisionsAfter.at(RevisionScope::Project) == Revision {1U});
@@ -436,7 +435,7 @@ TEST_CASE("AppKernel runs one headless command and query chain", "[runtime][comm
         fixture.project, fixture.document, fixture.session, "object.runtime");
     getRequest.traceId = validId<TraceId>("trace.runtime");
     getRequest.parentSpanId = validId<SpanId>("span.workflow.query-parent");
-    auto query = fixture.kernel.queries().execute(getRequest);
+    auto query = fixture.kernel.execution().executeQuery(getRequest);
     REQUIRE(query.hasValue());
     REQUIRE(query.value().revisions.has_value());
     CHECK(query.value().revisions->at(RevisionScope::Document) == Revision {1U});
@@ -480,8 +479,7 @@ TEST_CASE("AppKernel runs one headless command and query chain", "[runtime][comm
           == 6);
 
     REQUIRE(fixture.kernel.shutdown().hasValue());
-    CHECK_FALSE(fixture.kernel.commands().accepting());
-    CHECK_FALSE(fixture.kernel.queries().execute(queryRequest(
+    CHECK_FALSE(fixture.kernel.execution().executeQuery(queryRequest(
         fixture.project, fixture.document, fixture.session, "object.runtime")).hasValue());
 }
 
@@ -495,18 +493,18 @@ TEST_CASE("Command and query requests resolve compatible deprecated contracts ex
     auto commandOneTwo = commandOne;
     commandOneTwo.version = Version {1U, 2U, 0U};
     commandOneTwo.status = ContractStatus::Deprecated;
-    REQUIRE(fixture.kernel.commandRegistry().registerHandler(
+    REQUIRE(lasercnc::test::registerCommand(fixture.kernel,
         commandOne, fixture.create).hasValue());
-    REQUIRE(fixture.kernel.commandRegistry().registerHandler(
+    REQUIRE(lasercnc::test::registerCommand(fixture.kernel,
         commandOneTwo, fixture.create).hasValue());
 
     auto queryOne = queryDescriptor("kernel.versioned.get");
     auto queryOneOne = queryOne;
     queryOneOne.version = Version {1U, 1U, 0U};
     queryOneOne.status = ContractStatus::Deprecated;
-    REQUIRE(fixture.kernel.queryRegistry().registerHandler(
+    REQUIRE(lasercnc::test::registerQuery(fixture.kernel,
         queryOne, fixture.query).hasValue());
-    REQUIRE(fixture.kernel.queryRegistry().registerHandler(
+    REQUIRE(lasercnc::test::registerQuery(fixture.kernel,
         queryOneOne, fixture.query).hasValue());
     REQUIRE(fixture.kernel.bootstrap().hasValue());
 
@@ -518,7 +516,7 @@ TEST_CASE("Command and query requests resolve compatible deprecated contracts ex
         "kernel.versioned.create",
         "object.version.unsupported");
     unsupported.version = Version {1U, 3U, 0U};
-    auto unsupportedResult = fixture.kernel.commands().execute(unsupported);
+    auto unsupportedResult = fixture.kernel.execution().executeCommand(unsupported);
     REQUIRE_FALSE(unsupportedResult.hasValue());
     CHECK(std::string(unsupportedResult.error().code.value()) == "Command.UnsupportedVersion");
     CHECK(fixture.create->calls == 0U);
@@ -531,7 +529,7 @@ TEST_CASE("Command and query requests resolve compatible deprecated contracts ex
         "kernel.versioned.create",
         "object.versioned");
     compatible.versionResolution = VersionResolution::Compatible;
-    auto command = fixture.kernel.commands().execute(compatible);
+    auto command = fixture.kernel.execution().executeCommand(compatible);
     REQUIRE(command.hasValue());
     CHECK(command.value().resolvedVersion == Version {1U, 2U, 0U});
     CHECK(command.value().contractStatus == ContractStatus::Deprecated);
@@ -540,7 +538,7 @@ TEST_CASE("Command and query requests resolve compatible deprecated contracts ex
         fixture.project, fixture.document, fixture.session, "object.versioned");
     queryRequestValue.query = validId<QueryName>("kernel.versioned.get");
     queryRequestValue.versionResolution = VersionResolution::Compatible;
-    auto query = fixture.kernel.queries().execute(queryRequestValue);
+    auto query = fixture.kernel.execution().executeQuery(queryRequestValue);
     REQUIRE(query.hasValue());
     CHECK(query.value().resolvedVersion == Version {1U, 1U, 0U});
     CHECK(query.value().contractStatus == ContractStatus::Deprecated);
@@ -560,13 +558,13 @@ TEST_CASE("QueryRuntime enforces global session project and document scopes", "[
         std::pair {"kernel.scope.project", ExecutionScope::Project},
         std::pair {"kernel.scope.document", ExecutionScope::Document}};
     for(const auto& [name, scope] : scopes) {
-        REQUIRE(fixture.kernel.queryRegistry().registerHandler(
+        REQUIRE(lasercnc::test::registerQuery(fixture.kernel,
             queryDescriptor(name, scope), handler).hasValue());
     }
     REQUIRE(fixture.kernel.bootstrap().hasValue());
 
     auto execute = [&](const char* requestId, const char* query, ExecutionContext context) {
-        return fixture.kernel.queries().execute(QueryRequest {
+        return fixture.kernel.execution().executeQuery(QueryRequest {
             validId<RequestId>(requestId),
             std::move(context),
             validId<QueryName>(query),
@@ -620,13 +618,13 @@ TEST_CASE("Synchronous read-only commands preserve every execution scope", "[run
         descriptor.capability = validId<CapabilityId>("document.read");
         descriptor.idempotent = false;
         descriptor.scope = scope;
-        REQUIRE(fixture.kernel.commandRegistry().registerReadOnlyHandler(
+        REQUIRE(lasercnc::test::registerReadOnlyCommand(fixture.kernel,
             descriptor, handler).hasValue());
     }
     REQUIRE(fixture.kernel.bootstrap().hasValue());
 
     auto execute = [&](const char* requestId, const char* command, ExecutionContext context) {
-        return fixture.kernel.commands().execute(CommandRequest {
+        return fixture.kernel.execution().executeCommand(CommandRequest {
             validId<RequestId>(requestId),
             std::move(context),
             validId<CommandName>(command),
@@ -678,7 +676,7 @@ TEST_CASE("CommandRuntime enforces schema capability project and revision before
         "request.invalid-scope", fixture.project, fixture.document, fixture.session,
         "kernel.object.create", "object.invalid-scope");
     invalidScope.context.documentId.reset();
-    auto invalidScopeResult = fixture.kernel.commands().execute(invalidScope);
+    auto invalidScopeResult = fixture.kernel.execution().executeCommand(invalidScope);
     REQUIRE_FALSE(invalidScopeResult.hasValue());
     CHECK(std::string(invalidScopeResult.error().code.value()) == "Command.ScopeMismatch");
     CHECK(fixture.create->calls == 0U);
@@ -687,12 +685,12 @@ TEST_CASE("CommandRuntime enforces schema capability project and revision before
         "request.invalid-schema", fixture.project, fixture.document, fixture.session,
         "kernel.object.create", "object.invalid-schema");
     invalidSchema.arguments = Value {"not-an-object"};
-    CHECK_FALSE(fixture.kernel.commands().execute(invalidSchema).hasValue());
+    CHECK_FALSE(fixture.kernel.execution().executeCommand(invalidSchema).hasValue());
     CHECK(fixture.create->calls == 0U);
 
     const std::array<CapabilityId, 0U> noCapabilities {};
     REQUIRE(fixture.kernel.capabilities().replace(fixture.session, noCapabilities).hasValue());
-    auto denied = fixture.kernel.commands().execute(commandRequest(
+    auto denied = fixture.kernel.execution().executeCommand(commandRequest(
         "request.denied", fixture.project, fixture.document, fixture.session,
         "kernel.object.create", "object.denied"));
     REQUIRE_FALSE(denied.hasValue());
@@ -701,17 +699,17 @@ TEST_CASE("CommandRuntime enforces schema capability project and revision before
 
     const std::array grants {validId<CapabilityId>("document.write")};
     REQUIRE(fixture.kernel.capabilities().replace(fixture.session, grants).hasValue());
-    auto wrongProject = fixture.kernel.commands().execute(commandRequest(
+    auto wrongProject = fixture.kernel.execution().executeCommand(commandRequest(
         "request.wrong-project", validId<ProjectId>("project.other"), fixture.document,
         fixture.session, "kernel.object.create", "object.wrong-project"));
     REQUIRE_FALSE(wrongProject.hasValue());
     CHECK(std::string(wrongProject.error().code.value()) == "Command.ProjectMismatch");
 
-    auto first = fixture.kernel.commands().execute(commandRequest(
+    auto first = fixture.kernel.execution().executeCommand(commandRequest(
         "request.first", fixture.project, fixture.document, fixture.session,
         "kernel.object.create", "object.first"));
     REQUIRE(first.hasValue());
-    auto stale = fixture.kernel.commands().execute(commandRequest(
+    auto stale = fixture.kernel.execution().executeCommand(commandRequest(
         "request.stale", fixture.project, fixture.document, fixture.session,
         "kernel.object.create", "object.stale", std::nullopt, Revision {0U}));
     REQUIRE_FALSE(stale.hasValue());
@@ -726,30 +724,30 @@ TEST_CASE("CommandRuntime rolls back handler failures exceptions and result sche
     RuntimeFixture fixture;
     auto failing = std::make_shared<FailingHandler>(false);
     auto throwing = std::make_shared<FailingHandler>(true);
-    REQUIRE(fixture.kernel.commandRegistry().registerHandler(
+    REQUIRE(lasercnc::test::registerCommand(fixture.kernel,
         commandDescriptor("kernel.fail"), failing).hasValue());
-    REQUIRE(fixture.kernel.commandRegistry().registerHandler(
+    REQUIRE(lasercnc::test::registerCommand(fixture.kernel,
         commandDescriptor("kernel.throw"), throwing).hasValue());
     auto badResult = std::make_shared<CreateObjectHandler>();
     auto badDescriptor = commandDescriptor("kernel.bad-result");
     badDescriptor.result = schema("schema.command.result.string", SchemaKind::String);
-    REQUIRE(fixture.kernel.commandRegistry().registerHandler(
+    REQUIRE(lasercnc::test::registerCommand(fixture.kernel,
         std::move(badDescriptor), badResult).hasValue());
     REQUIRE(fixture.kernel.bootstrap().hasValue());
 
-    auto failed = fixture.kernel.commands().execute(commandRequest(
+    auto failed = fixture.kernel.execution().executeCommand(commandRequest(
         "request.fail", fixture.project, fixture.document, fixture.session,
         "kernel.fail", "object.ignored"));
     REQUIRE_FALSE(failed.hasValue());
     CHECK(std::string(failed.error().code.value()) == "Test.HandlerRejected");
 
-    auto threw = fixture.kernel.commands().execute(commandRequest(
+    auto threw = fixture.kernel.execution().executeCommand(commandRequest(
         "request.throw", fixture.project, fixture.document, fixture.session,
         "kernel.throw", "object.ignored"));
     REQUIRE_FALSE(threw.hasValue());
     CHECK(std::string(threw.error().code.value()) == "Command.HandlerFailed");
 
-    auto invalidResult = fixture.kernel.commands().execute(commandRequest(
+    auto invalidResult = fixture.kernel.execution().executeCommand(commandRequest(
         "request.bad-result", fixture.project, fixture.document, fixture.session,
         "kernel.bad-result", "object.bad-result"));
     REQUIRE_FALSE(invalidResult.hasValue());
@@ -775,13 +773,13 @@ TEST_CASE("CommandRuntime idempotency replays one commit and rejects key rebindi
     REQUIRE(fixture.kernel.bootstrap().hasValue());
 
     const auto key = validId<IdempotencyKey>("idempotency.create-object");
-    auto first = fixture.kernel.commands().execute(commandRequest(
+    auto first = fixture.kernel.execution().executeCommand(commandRequest(
         "request.idempotency.first", fixture.project, fixture.document, fixture.session,
         "kernel.object.create", "object.idempotent", key));
     REQUIRE(first.hasValue());
     CHECK_FALSE(first.value().replayed);
 
-    auto replay = fixture.kernel.commands().execute(commandRequest(
+    auto replay = fixture.kernel.execution().executeCommand(commandRequest(
         "request.idempotency.retry", fixture.project, fixture.document, fixture.session,
         "kernel.object.create", "object.idempotent", key));
     REQUIRE(replay.hasValue());
@@ -791,7 +789,6 @@ TEST_CASE("CommandRuntime idempotency replays one commit and rejects key rebindi
     CHECK(replay.value().commit->transactionId == first.value().commit->transactionId);
     CHECK(fixture.create->calls == 1U);
     CHECK(eventCount == 1U);
-    CHECK(fixture.kernel.commands().idempotencyRecordCount() == 1U);
 
     auto resolutionChanged = commandRequest(
         "request.idempotency.resolution-conflict",
@@ -802,13 +799,13 @@ TEST_CASE("CommandRuntime idempotency replays one commit and rejects key rebindi
         "object.idempotent",
         key);
     resolutionChanged.versionResolution = VersionResolution::Compatible;
-    auto resolutionConflict = fixture.kernel.commands().execute(resolutionChanged);
+    auto resolutionConflict = fixture.kernel.execution().executeCommand(resolutionChanged);
     REQUIRE_FALSE(resolutionConflict.hasValue());
     CHECK(std::string(resolutionConflict.error().code.value())
           == "Command.IdempotencyKeyConflict");
     CHECK(fixture.create->calls == 1U);
 
-    auto rebound = fixture.kernel.commands().execute(commandRequest(
+    auto rebound = fixture.kernel.execution().executeCommand(commandRequest(
         "request.idempotency.conflict", fixture.project, fixture.document, fixture.session,
         "kernel.object.create", "object.different", key));
     REQUIRE_FALSE(rebound.hasValue());
@@ -822,13 +819,13 @@ TEST_CASE("Concurrent duplicate idempotency requests share one in-flight executi
     auto enteredFuture = entered.get_future();
     std::promise<void> release;
     auto handler = std::make_shared<SlowCreateHandler>(entered, release.get_future().share());
-    REQUIRE(fixture.kernel.commandRegistry().registerHandler(
+    REQUIRE(lasercnc::test::registerCommand(fixture.kernel,
         commandDescriptor("kernel.slow-create"), handler).hasValue());
     REQUIRE(fixture.kernel.bootstrap().hasValue());
     const auto key = validId<IdempotencyKey>("idempotency.concurrent");
 
     auto first = std::async(std::launch::async, [&]() {
-        return fixture.kernel.commands().execute(commandRequest(
+        return fixture.kernel.execution().executeCommand(commandRequest(
             "request.concurrent.first", fixture.project, fixture.document, fixture.session,
             "kernel.slow-create", "unused", key));
     });
@@ -838,7 +835,7 @@ TEST_CASE("Concurrent duplicate idempotency requests share one in-flight executi
     CHECK(std::string(refused.error().code.value()) == "Kernel.ActiveTransactions");
     CHECK(fixture.kernel.state() == lasercnc::kernel::AppKernelState::Ready);
     auto second = std::async(std::launch::async, [&]() {
-        return fixture.kernel.commands().execute(commandRequest(
+        return fixture.kernel.execution().executeCommand(commandRequest(
             "request.concurrent.second", fixture.project, fixture.document, fixture.session,
             "kernel.slow-create", "unused", key));
     });
@@ -866,7 +863,7 @@ TEST_CASE("Post-commit event and logging failures cannot invert command success"
     REQUIRE(fixture.kernel.bootstrap().hasValue());
     fixture.log->failWrites = true;
 
-    auto command = fixture.kernel.commands().execute(commandRequest(
+    auto command = fixture.kernel.execution().executeCommand(commandRequest(
         "request.post-commit", fixture.project, fixture.document, fixture.session,
         "kernel.object.create", "object.post-commit"));
     REQUIRE(command.hasValue());
@@ -888,13 +885,13 @@ TEST_CASE("QueryRuntime requires capability and an immutable owned document", "[
     auto missingDocument = queryRequest(
         fixture.project, fixture.document, fixture.session, "object.missing");
     missingDocument.context.documentId.reset();
-    auto missing = fixture.kernel.queries().execute(missingDocument);
+    auto missing = fixture.kernel.execution().executeQuery(missingDocument);
     REQUIRE_FALSE(missing.hasValue());
     CHECK(std::string(missing.error().code.value()) == "Query.ScopeMismatch");
 
     const std::array<CapabilityId, 0U> noCapabilities {};
     REQUIRE(fixture.kernel.capabilities().replace(fixture.session, noCapabilities).hasValue());
-    auto denied = fixture.kernel.queries().execute(queryRequest(
+    auto denied = fixture.kernel.execution().executeQuery(queryRequest(
         fixture.project, fixture.document, fixture.session, "object.missing"));
     REQUIRE_FALSE(denied.hasValue());
     CHECK(std::string(denied.error().code.value()) == "Capability.Denied");
@@ -904,7 +901,7 @@ TEST_CASE("QueryRuntime requires capability and an immutable owned document", "[
 TEST_CASE("AppKernel refuses registered runtimes without execution services", "[kernel][runtime]")
 {
     lasercnc::kernel::AppKernel kernel;
-    REQUIRE(kernel.commandRegistry().registerHandler(
+    REQUIRE(lasercnc::test::registerCommand(kernel,
         commandDescriptor("kernel.unconfigured"),
         std::make_shared<CreateObjectHandler>()).hasValue());
     auto bootstrapped = kernel.bootstrap();
@@ -912,7 +909,6 @@ TEST_CASE("AppKernel refuses registered runtimes without execution services", "[
     CHECK(std::string(bootstrapped.error().code.value())
           == "Runtime.ExecutionServicesNotConfigured");
     CHECK(kernel.state() == lasercnc::kernel::AppKernelState::Failed);
-    CHECK_FALSE(kernel.commands().accepting());
 }
 
 TEST_CASE("AppKernel refuses shutdown while a query execution is active", "[kernel][runtime][query]")
@@ -923,12 +919,12 @@ TEST_CASE("AppKernel refuses shutdown while a query execution is active", "[kern
     std::promise<void> release;
     auto handler = std::make_shared<BlockingQueryHandler>(
         entered, release.get_future().share());
-    REQUIRE(fixture.kernel.queryRegistry().registerHandler(
+    REQUIRE(lasercnc::test::registerQuery(fixture.kernel,
         queryDescriptor("kernel.blocking-query", ExecutionScope::Session), handler).hasValue());
     REQUIRE(fixture.kernel.bootstrap().hasValue());
 
     auto running = std::async(std::launch::async, [&]() {
-        return fixture.kernel.queries().execute(QueryRequest {
+        return fixture.kernel.execution().executeQuery(QueryRequest {
             validId<RequestId>("request.blocking-query"),
             ExecutionContext {fixture.session, std::nullopt, std::nullopt},
             validId<QueryName>("kernel.blocking-query"),
@@ -938,7 +934,6 @@ TEST_CASE("AppKernel refuses shutdown while a query execution is active", "[kern
             validId<TraceId>("trace.blocking-query")});
     });
     enteredFuture.wait();
-    CHECK(fixture.kernel.queries().activeExecutionCount() == 1U);
     auto refused = fixture.kernel.shutdown();
     REQUIRE_FALSE(refused.hasValue());
     CHECK(std::string(refused.error().code.value()) == "Kernel.ActiveExecutions");
@@ -958,13 +953,13 @@ TEST_CASE("DocumentRuntime blocks close while a document query is active",
     std::promise<void> release;
     auto handler = std::make_shared<BlockingQueryHandler>(
         entered, release.get_future().share());
-    REQUIRE(fixture.kernel.queryRegistry().registerHandler(
+    REQUIRE(lasercnc::test::registerQuery(fixture.kernel,
         queryDescriptor("kernel.blocking-document-query", ExecutionScope::Document),
         handler).hasValue());
     REQUIRE(fixture.kernel.bootstrap().hasValue());
 
     auto running = std::async(std::launch::async, [&]() {
-        return fixture.kernel.queries().execute(QueryRequest {
+        return fixture.kernel.execution().executeQuery(QueryRequest {
             validId<RequestId>("request.blocking-document-query"),
             ExecutionContext {fixture.session, fixture.project, fixture.document},
             validId<QueryName>("kernel.blocking-document-query"),

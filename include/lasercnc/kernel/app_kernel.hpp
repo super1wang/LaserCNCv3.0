@@ -2,6 +2,7 @@
 
 #include <lasercnc/foundation/result.hpp>
 #include <lasercnc/kernel/module_runtime.hpp>
+#include <lasercnc/kernel/execution_gateway.hpp>
 #include <lasercnc/kernel/service_registry.hpp>
 #include <lasercnc/runtime/transaction_manager.hpp>
 #include <lasercnc/messaging/event_bus.hpp>
@@ -58,9 +59,10 @@ public:
     [[nodiscard]] foundation::Result<void> shutdown(
         std::chrono::milliseconds taskTimeout = std::chrono::seconds(5));
 
-    [[nodiscard]] ServiceRegistry& services() noexcept;
+    [[nodiscard]] ExecutionGateway& execution() noexcept;
+    [[nodiscard]] const ExecutionGateway& execution() const noexcept;
+
     [[nodiscard]] const ServiceRegistry& services() const noexcept;
-    [[nodiscard]] ModuleRuntime& modules() noexcept;
     [[nodiscard]] const ModuleRuntime& modules() const noexcept;
     [[nodiscard]] foundation::Result<void> addDocument(
         ProjectId projectId,
@@ -76,32 +78,17 @@ public:
     [[nodiscard]] const runtime::CapabilityService& capabilities() const noexcept;
     [[nodiscard]] messaging::EventBus& events() noexcept;
     [[nodiscard]] const messaging::EventBus& events() const noexcept;
-    [[nodiscard]] runtime::CommandRegistry& commandRegistry() noexcept;
     [[nodiscard]] const runtime::CommandRegistry& commandRegistry() const noexcept;
     [[nodiscard]] runtime::EffectGuardRegistry& effectGuards() noexcept;
     [[nodiscard]] const runtime::EffectGuardRegistry& effectGuards() const noexcept;
-    [[nodiscard]] runtime::QueryRegistry& queryRegistry() noexcept;
     [[nodiscard]] const runtime::QueryRegistry& queryRegistry() const noexcept;
-    [[nodiscard]] runtime::WorkflowRegistry& workflowRegistry() noexcept;
     [[nodiscard]] const runtime::WorkflowRegistry& workflowRegistry() const noexcept;
-    [[nodiscard]] runtime::ScriptRegistry& scriptRegistry() noexcept;
     [[nodiscard]] const runtime::ScriptRegistry& scriptRegistry() const noexcept;
-    [[nodiscard]] runtime::CommandRuntime& commands() noexcept;
-    [[nodiscard]] const runtime::CommandRuntime& commands() const noexcept;
-    [[nodiscard]] runtime::QueryRuntime& queries() noexcept;
-    [[nodiscard]] const runtime::QueryRuntime& queries() const noexcept;
-    [[nodiscard]] runtime::TaskRegistry& taskRegistry() noexcept;
     [[nodiscard]] const runtime::TaskRegistry& taskRegistry() const noexcept;
     [[nodiscard]] runtime::ResourceManager& resources() noexcept;
     [[nodiscard]] const runtime::ResourceManager& resources() const noexcept;
     [[nodiscard]] runtime::Scheduler& scheduler() noexcept;
     [[nodiscard]] const runtime::Scheduler& scheduler() const noexcept;
-    [[nodiscard]] runtime::TaskRuntime& tasks() noexcept;
-    [[nodiscard]] const runtime::TaskRuntime& tasks() const noexcept;
-    [[nodiscard]] runtime::WorkflowRuntime& workflows() noexcept;
-    [[nodiscard]] const runtime::WorkflowRuntime& workflows() const noexcept;
-    [[nodiscard]] runtime::ScriptRuntime& scripts() noexcept;
-    [[nodiscard]] const runtime::ScriptRuntime& scripts() const noexcept;
     [[nodiscard]] observability::LocalTraceService& traces() noexcept;
     [[nodiscard]] const observability::LocalTraceService& traces() const noexcept;
     [[nodiscard]] observability::LocalMetricsService& metrics() noexcept;
@@ -141,6 +128,7 @@ private:
     runtime::QueryRuntime queries_;
     runtime::WorkflowRuntime workflows_;
     runtime::ScriptRuntime scripts_;
+    ExecutionGateway executionGateway_;
     AppKernelState state_{AppKernelState::Configuring};
 };
 

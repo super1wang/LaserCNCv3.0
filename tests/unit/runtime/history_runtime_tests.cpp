@@ -5,6 +5,7 @@
 #include <lasercnc/observability/log_service.hpp>
 
 #include <catch2/catch_test_macros.hpp>
+#include "kernel_test_module.hpp"
 
 #include <array>
 #include <atomic>
@@ -284,31 +285,25 @@ void configureRuntime(
         validId<CapabilityId>("kernel.history.edit")};
     REQUIRE(kernel.capabilities().replace(session, grants).hasValue());
     auto handler = std::make_shared<CreateHandler>();
-    REQUIRE(kernel.commandRegistry()
-                .registerHandler(
+    REQUIRE(lasercnc::test::registerCommand(kernel,
                     createDescriptor("kernel.history.create", true), handler)
                 .hasValue());
-    REQUIRE(kernel.commandRegistry()
-                .registerHandler(
+    REQUIRE(lasercnc::test::registerCommand(kernel,
                     createDescriptor("kernel.history.replace", true),
                     std::make_shared<ReplaceHandler>())
                 .hasValue());
-    REQUIRE(kernel.commandRegistry()
-                .registerHandler(
+    REQUIRE(lasercnc::test::registerCommand(kernel,
                     createDescriptor("kernel.history.remove", true),
                     std::make_shared<RemoveHandler>())
                 .hasValue());
-    REQUIRE(kernel.commandRegistry()
-                .registerHandler(
+    REQUIRE(lasercnc::test::registerCommand(kernel,
                     createDescriptor("kernel.history.barrier", false), handler)
                 .hasValue());
-    REQUIRE(kernel.commandRegistry()
-                .registerHandler(
+    REQUIRE(lasercnc::test::registerCommand(kernel,
                     createDescriptor("kernel.history.no-op", true),
                     std::make_shared<NoOpHandler>())
                 .hasValue());
-    REQUIRE(kernel.commandRegistry()
-                .registerHandler(
+    REQUIRE(lasercnc::test::registerCommand(kernel,
                     createDescriptor("kernel.history.no-op-barrier", false),
                     std::make_shared<NoOpHandler>())
                 .hasValue());
@@ -389,13 +384,13 @@ TEST_CASE("HistoryRuntime executes undo redo branch replacement and barriers", "
     configureRuntime(kernel, project, document, session, true);
     REQUIRE(kernel.bootstrap().hasValue());
 
-    auto undoableNoOp = kernel.commands().execute(request(
+    auto undoableNoOp = kernel.execution().executeCommand(request(
         "request.history.no-op", "kernel.history.no-op", project, document,
         session));
     REQUIRE_FALSE(undoableNoOp.hasValue());
     CHECK(std::string(undoableNoOp.error().code.value())
           == "Transaction.EmptyCommitDenied");
-    auto barrierNoOp = kernel.commands().execute(request(
+    auto barrierNoOp = kernel.execution().executeCommand(request(
         "request.history.no-op-barrier", "kernel.history.no-op-barrier", project,
         document, session));
     REQUIRE_FALSE(barrierNoOp.hasValue());
@@ -407,10 +402,10 @@ TEST_CASE("HistoryRuntime executes undo redo branch replacement and barriers", "
     CHECK(empty.value().entries.empty());
     CHECK_FALSE(empty.value().barrier.has_value());
 
-    REQUIRE(kernel.commands().execute(request(
+    REQUIRE(kernel.execution().executeCommand(request(
         "request.history.a", "kernel.history.create", project, document, session,
         "object.history.a")).hasValue());
-    REQUIRE(kernel.commands().execute(request(
+    REQUIRE(kernel.execution().executeCommand(request(
         "request.history.b", "kernel.history.create", project, document, session,
         "object.history.b")).hasValue());
     auto initial = kernel.history().snapshot(document);
@@ -418,19 +413,19 @@ TEST_CASE("HistoryRuntime executes undo redo branch replacement and barriers", "
     CHECK(initial.value().cursor == HistoryCursor {2U, 2U});
     CHECK_FALSE(initial.value().barrier.has_value());
 
-    REQUIRE(kernel.commands().execute(request(
+    REQUIRE(kernel.execution().executeCommand(request(
         "request.history.undo-b", "edit.undo", project, document, session)).hasValue());
     CHECK_FALSE(hasObject(kernel, document, "object.history.b"));
     auto undone = kernel.history().snapshot(document);
     REQUIRE(undone.hasValue());
     CHECK(undone.value().cursor == HistoryCursor {1U, 2U});
 
-    REQUIRE(kernel.commands().execute(request(
+    REQUIRE(kernel.execution().executeCommand(request(
         "request.history.redo-b", "edit.redo", project, document, session)).hasValue());
     CHECK(hasObject(kernel, document, "object.history.b"));
-    REQUIRE(kernel.commands().execute(request(
+    REQUIRE(kernel.execution().executeCommand(request(
         "request.history.undo-b-again", "edit.undo", project, document, session)).hasValue());
-    REQUIRE(kernel.commands().execute(request(
+    REQUIRE(kernel.execution().executeCommand(request(
         "request.history.c", "kernel.history.create", project, document, session,
         "object.history.c")).hasValue());
     auto branched = kernel.history().snapshot(document);
@@ -438,12 +433,12 @@ TEST_CASE("HistoryRuntime executes undo redo branch replacement and barriers", "
     CHECK(branched.value().cursor == HistoryCursor {2U, 2U});
     CHECK(branched.value().entries[1U].transactionId
           == validId<TransactionId>("transaction.request.history.c"));
-    auto noRedo = kernel.commands().execute(request(
+    auto noRedo = kernel.execution().executeCommand(request(
         "request.history.no-redo", "edit.redo", project, document, session));
     REQUIRE_FALSE(noRedo.hasValue());
     CHECK(std::string(noRedo.error().code.value()) == "History.RedoUnavailable");
 
-    REQUIRE(kernel.commands().execute(request(
+    REQUIRE(kernel.execution().executeCommand(request(
         "request.history.barrier", "kernel.history.barrier", project, document, session,
         "object.history.barrier")).hasValue());
     auto barrier = kernel.history().snapshot(document);
@@ -453,7 +448,7 @@ TEST_CASE("HistoryRuntime executes undo redo branch replacement and barriers", "
     REQUIRE(barrier.value().barrier.has_value());
     CHECK(barrier.value().barrier->transactionId
           == validId<TransactionId>("transaction.request.history.barrier"));
-    auto blocked = kernel.commands().execute(request(
+    auto blocked = kernel.execution().executeCommand(request(
         "request.history.blocked", "edit.undo", project, document, session));
     REQUIRE_FALSE(blocked.hasValue());
     CHECK(std::string(blocked.error().code.value()) == "History.UndoUnavailable");
@@ -474,32 +469,32 @@ TEST_CASE("HistoryRuntime reverses create update and remove change shapes", "[hi
     configureRuntime(kernel, project, document, session, true);
     REQUIRE(kernel.bootstrap().hasValue());
 
-    REQUIRE(kernel.commands().execute(request(
+    REQUIRE(kernel.execution().executeCommand(request(
         "request.history.changes-create", "kernel.history.create", project, document,
         session, "object.history.changes", "original")).hasValue());
-    REQUIRE(kernel.commands().execute(request(
+    REQUIRE(kernel.execution().executeCommand(request(
         "request.history.changes-update", "kernel.history.replace", project, document,
         session, "object.history.changes", "updated")).hasValue());
     CHECK(objectData(kernel, document, "object.history.changes") == "updated");
 
-    REQUIRE(kernel.commands().execute(request(
+    REQUIRE(kernel.execution().executeCommand(request(
         "request.history.changes-undo-update", "edit.undo", project, document, session))
                 .hasValue());
     CHECK(objectData(kernel, document, "object.history.changes") == "original");
-    REQUIRE(kernel.commands().execute(request(
+    REQUIRE(kernel.execution().executeCommand(request(
         "request.history.changes-redo-update", "edit.redo", project, document, session))
                 .hasValue());
     CHECK(objectData(kernel, document, "object.history.changes") == "updated");
 
-    REQUIRE(kernel.commands().execute(request(
+    REQUIRE(kernel.execution().executeCommand(request(
         "request.history.changes-remove", "kernel.history.remove", project, document,
         session, "object.history.changes")).hasValue());
     CHECK_FALSE(hasObject(kernel, document, "object.history.changes"));
-    REQUIRE(kernel.commands().execute(request(
+    REQUIRE(kernel.execution().executeCommand(request(
         "request.history.changes-undo-remove", "edit.undo", project, document, session))
                 .hasValue());
     CHECK(objectData(kernel, document, "object.history.changes") == "updated");
-    REQUIRE(kernel.commands().execute(request(
+    REQUIRE(kernel.execution().executeCommand(request(
         "request.history.changes-redo-remove", "edit.redo", project, document, session))
                 .hasValue());
     CHECK_FALSE(hasObject(kernel, document, "object.history.changes"));
@@ -526,11 +521,11 @@ TEST_CASE("History cursor and redo material survive a normal restart", "[history
             "request.history.restart-a", "kernel.history.create", project, document,
             session, "object.history.restart-a");
         first.idempotencyKey = validId<IdempotencyKey>("idempotency.history.restart-a");
-        REQUIRE(kernel.commands().execute(first).hasValue());
-        REQUIRE(kernel.commands().execute(request(
+        REQUIRE(kernel.execution().executeCommand(first).hasValue());
+        REQUIRE(kernel.execution().executeCommand(request(
             "request.history.restart-b", "kernel.history.create", project, document,
             session, "object.history.restart-b")).hasValue());
-        REQUIRE(kernel.commands().execute(request(
+        REQUIRE(kernel.execution().executeCommand(request(
             "request.history.restart-undo", "edit.undo", project, document, session))
                     .hasValue());
         REQUIRE(kernel.shutdown().hasValue());
@@ -550,7 +545,7 @@ TEST_CASE("History cursor and redo material survive a normal restart", "[history
             session, "object.history.restart-a");
         replayRequest.idempotencyKey = validId<IdempotencyKey>(
             "idempotency.history.restart-a");
-        auto replay = kernel.commands().execute(replayRequest);
+        auto replay = kernel.execution().executeCommand(replayRequest);
         REQUIRE(replay.hasValue());
         CHECK(replay.value().replayed);
         REQUIRE(replay.value().commit.has_value());
@@ -558,7 +553,7 @@ TEST_CASE("History cursor and redo material survive a normal restart", "[history
         auto afterReplay = kernel.history().snapshot(document);
         REQUIRE(afterReplay.hasValue());
         CHECK(afterReplay.value().cursor == HistoryCursor {1U, 2U});
-        REQUIRE(kernel.commands().execute(request(
+        REQUIRE(kernel.execution().executeCommand(request(
             "request.history.restart-redo", "edit.redo", project, document, session))
                     .hasValue());
         CHECK(hasObject(kernel, document, "object.history.restart-b"));
@@ -589,7 +584,7 @@ TEST_CASE("Journal failure changes neither document nor history", "[history][per
         REQUIRE(kernel.bootstrap().hasValue());
         control->failJournal.store(true, std::memory_order_release);
 
-        auto failed = kernel.commands().execute(request(
+        auto failed = kernel.execution().executeCommand(request(
             "request.history.failure", "kernel.history.create", project, document,
             session, "object.history.failure"));
         REQUIRE_FALSE(failed.hasValue());
@@ -618,7 +613,7 @@ TEST_CASE("History recovery fails closed on semantically invalid journal metadat
         configurePersistence(kernel, path);
         configureRuntime(kernel, project, document, session, true);
         REQUIRE(kernel.bootstrap().hasValue());
-        REQUIRE(kernel.commands().execute(request(
+        REQUIRE(kernel.execution().executeCommand(request(
             "request.history.tamper", "kernel.history.create", project, document,
             session, "object.history.tamper")).hasValue());
         REQUIRE(kernel.shutdown().hasValue());
@@ -655,7 +650,7 @@ TEST_CASE("History recovery rejects unknown fields with a valid digest", "[histo
         configurePersistence(kernel, path);
         configureRuntime(kernel, project, document, session, true);
         REQUIRE(kernel.bootstrap().hasValue());
-        REQUIRE(kernel.commands().execute(request(
+        REQUIRE(kernel.execution().executeCommand(request(
             "request.history.unknown", "kernel.history.create", project, document,
             session, "object.history.unknown")).hasValue());
         REQUIRE(kernel.shutdown().hasValue());
@@ -692,7 +687,7 @@ TEST_CASE("Version one journal writes become an undo barrier", "[history][persis
         configurePersistence(kernel, path);
         configureRuntime(kernel, project, document, session, true);
         REQUIRE(kernel.bootstrap().hasValue());
-        REQUIRE(kernel.commands().execute(request(
+        REQUIRE(kernel.execution().executeCommand(request(
             "request.history.v1", "kernel.history.create", project, document,
             session, "object.history.v1")).hasValue());
         REQUIRE(kernel.shutdown().hasValue());

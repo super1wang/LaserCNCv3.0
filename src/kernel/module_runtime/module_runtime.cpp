@@ -103,6 +103,22 @@ foundation::Error combineBootstrapAndRollbackErrors(
         std::make_shared<const foundation::Error>(std::move(bootstrapError)));
 }
 
+template <typename Id>
+std::string contributionIdentity(const Id& identity)
+{
+    return std::string(identity.value());
+}
+
+std::string contributionIdentity(const runtime::CommandKey& key)
+{
+    return std::string(key.name.value()) + '@' + key.version.toString();
+}
+
+std::string contributionIdentity(const runtime::QueryKey& key)
+{
+    return std::string(key.name.value()) + '@' + key.version.toString();
+}
+
 } // namespace
 
 ModuleRuntime::ModuleRuntime(
@@ -255,8 +271,8 @@ foundation::Result<std::vector<std::size_t>> ModuleRuntime::buildStartupOrder() 
 foundation::Result<void> ModuleRuntime::validateContributionDeclarations() const
 {
     std::map<ServiceId, ModuleId> providers;
-    std::map<CommandName, ModuleId> commandOwners;
-    std::map<QueryName, ModuleId> queryOwners;
+    std::map<runtime::CommandKey, ModuleId> commandOwners;
+    std::map<runtime::QueryKey, ModuleId> queryOwners;
     std::map<TaskName, ModuleId> taskOwners;
     std::map<WorkflowName, ModuleId> workflowOwners;
     std::map<ScriptName, ModuleId> scriptOwners;
@@ -289,7 +305,8 @@ foundation::Result<void> ModuleRuntime::validateContributionDeclarations() const
                         ? "A module contribution is declared more than once"
                         : "Multiple modules declare ownership of the same contribution",
                     foundation::Value {foundation::Value::Object {
-                        {"contribution", foundation::Value {std::string(identity.value())}},
+                        {"contribution", foundation::Value {
+                            contributionIdentity(identity)}},
                         {"firstModule", foundation::Value {std::string(found->second.value())}},
                         {"kind", foundation::Value {kind}},
                         {"secondModule", foundation::Value {

@@ -3,6 +3,7 @@
 #include <lasercnc/foundation/result.hpp>
 #include <lasercnc/foundation/version.hpp>
 #include <lasercnc/kernel/identifiers.hpp>
+#include <lasercnc/runtime/execution_contract.hpp>
 #include <string>
 #include <vector>
 
@@ -23,8 +24,8 @@ struct ModuleDescriptor final {
     std::vector<ModuleDependency> dependencies;
     std::vector<ServiceId> requiredServices;
     std::vector<ServiceId> providedServices;
-    std::vector<CommandName> commands;
-    std::vector<QueryName> queries;
+    std::vector<runtime::CommandKey> commands;
+    std::vector<runtime::QueryKey> queries;
     std::vector<TaskName> tasks;
     std::vector<WorkflowName> workflows;
     std::vector<ScriptName> scripts;

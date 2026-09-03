@@ -5,6 +5,7 @@ target_sources(
     lasercnc_kernel
     PRIVATE
         app_kernel/app_kernel.cpp
+        execution_gateway/execution_gateway.cpp
         module_runtime/module.cpp
         module_runtime/module_registrar.cpp
         module_runtime/module_runtime.cpp
@@ -14,6 +15,7 @@ target_sources(
         BASE_DIRS "${PROJECT_SOURCE_DIR}/include"
         FILES
             "${PROJECT_SOURCE_DIR}/include/lasercnc/kernel/app_kernel.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/kernel/execution_gateway.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/kernel/identifiers.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/kernel/module.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/kernel/module_registrar.hpp"

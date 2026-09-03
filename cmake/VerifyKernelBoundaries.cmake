@@ -34,6 +34,30 @@ endforeach()
 list(LENGTH kernel_public_headers public_header_count)
 message(STATUS "Kernel 公共 API 边界检查通过，共检查 ${public_header_count} 个头文件")
 
+set(app_kernel_header "${LCNC_SOURCE_ROOT}/include/lasercnc/kernel/app_kernel.hpp")
+file(READ "${app_kernel_header}" app_kernel_content)
+set(forbidden_app_kernel_bypasses
+    "ServiceRegistry& services() noexcept"
+    "ModuleRuntime& modules() noexcept"
+    "CommandRegistry& commandRegistry() noexcept"
+    "QueryRegistry& queryRegistry() noexcept"
+    "TaskRegistry& taskRegistry() noexcept"
+    "WorkflowRegistry& workflowRegistry() noexcept"
+    "ScriptRegistry& scriptRegistry() noexcept"
+    "CommandRuntime& commands("
+    "QueryRuntime& queries("
+    "TaskRuntime& tasks("
+    "WorkflowRuntime& workflows("
+    "ScriptRuntime& scripts("
+)
+foreach(pattern IN LISTS forbidden_app_kernel_bypasses)
+    string(FIND "${app_kernel_content}" "${pattern}" match_position)
+    if(NOT match_position EQUAL -1)
+        message(FATAL_ERROR "AppKernel 暴露了可绕过模块治理或执行网关的入口：${pattern}")
+    endif()
+endforeach()
+message(STATUS "AppKernel 模块治理与执行网关旁路检查通过")
+
 file(
     GLOB_RECURSE production_sources
     LIST_DIRECTORIES FALSE

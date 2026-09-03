@@ -2,11 +2,13 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <memory>
 #include <functional>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -15,6 +17,28 @@ using namespace lasercnc::kernel;
 using namespace lasercnc::observability;
 using namespace lasercnc::platform;
 using namespace lasercnc::runtime;
+
+static_assert(std::is_same_v<
+              decltype(std::declval<AppKernel&>().services()),
+              const ServiceRegistry&>);
+static_assert(std::is_same_v<
+              decltype(std::declval<AppKernel&>().modules()),
+              const ModuleRuntime&>);
+static_assert(std::is_same_v<
+              decltype(std::declval<AppKernel&>().commandRegistry()),
+              const CommandRegistry&>);
+static_assert(std::is_same_v<
+              decltype(std::declval<AppKernel&>().queryRegistry()),
+              const QueryRegistry&>);
+static_assert(std::is_same_v<
+              decltype(std::declval<AppKernel&>().taskRegistry()),
+              const TaskRegistry&>);
+static_assert(std::is_same_v<
+              decltype(std::declval<AppKernel&>().workflowRegistry()),
+              const WorkflowRegistry&>);
+static_assert(std::is_same_v<
+              decltype(std::declval<AppKernel&>().scriptRegistry()),
+              const ScriptRegistry&>);
 
 namespace {
 
@@ -361,8 +385,10 @@ ModuleDescriptor governedDescriptor(const char* id)
         {},
         {},
         {makeServiceId("service.module.governed")});
-    descriptor.commands = {makeId<CommandName>("command.module.governed")};
-    descriptor.queries = {makeId<QueryName>("query.module.governed")};
+    descriptor.commands = {CommandKey {
+        makeId<CommandName>("command.module.governed"), Version {1U, 0U, 0U}}};
+    descriptor.queries = {QueryKey {
+        makeId<QueryName>("query.module.governed"), Version {1U, 0U, 0U}}};
     descriptor.tasks = {makeId<TaskName>("task.module.governed")};
     descriptor.workflows = {makeId<WorkflowName>("workflow.module.governed")};
     descriptor.scripts = {makeId<ScriptName>("script.module.governed")};
@@ -755,11 +781,45 @@ TEST_CASE("ModuleRegistrar matches every declared contribution kind", "[kernel][
         makeId<WorkflowName>("workflow.module.governed")).hasValue());
     CHECK(kernel.scriptRegistry().descriptor(
         makeId<ScriptName>("script.module.governed")).hasValue());
+    const auto catalog = kernel.execution().catalog();
+    CHECK(catalog.modules.size() == 1U);
+    CHECK(catalog.queries.size() == 1U);
+    CHECK(catalog.tasks.size() == 1U);
+    CHECK(catalog.workflows.size() == 1U);
+    CHECK(catalog.scripts.size() == 1U);
+    CHECK(std::ranges::any_of(
+        catalog.commands,
+        [](const CommandDescriptor& descriptor) {
+            return descriptor.name == makeId<CommandName>("command.module.governed");
+        }));
     REQUIRE(kernel.shutdown().hasValue());
 }
 
 TEST_CASE("ModuleRegistrar rejects undeclared and missing contributions", "[kernel][modules][registrar]")
 {
+    SECTION("a declared command name does not authorize another version")
+    {
+        AppKernel kernel;
+        auto descriptor = makeDescriptor("module.undeclared-version");
+        descriptor.commands = {CommandKey {
+            makeId<CommandName>("command.module.versioned"), Version {1U, 0U, 0U}}};
+        auto registration = [](ModuleRegistrar& registrar) {
+            auto command = governedCommand("command.module.versioned");
+            command.version = Version {1U, 1U, 0U};
+            return registrar.registerReadOnlyCommand(
+                std::move(command), std::make_shared<NullReadOnlyCommandHandler>());
+        };
+        REQUIRE(kernel.addModule(std::make_unique<RegistrarModule>(
+            std::move(descriptor), registration)).hasValue());
+        auto started = kernel.bootstrap();
+        REQUIRE_FALSE(started.hasValue());
+        CHECK(std::string(started.error().code.value()) == "Kernel.ModuleLifecycleFailed");
+        REQUIRE(started.error().cause != nullptr);
+        CHECK(std::string(started.error().cause->code.value())
+              == "Kernel.ModuleContributionUndeclared");
+        CHECK(kernel.commandRegistry().size() == 0U);
+    }
+
     SECTION("undeclared registration is remembered even when the module ignores it")
     {
         AppKernel kernel;
@@ -831,7 +891,8 @@ TEST_CASE("ModuleRuntime rejects cross-module contribution ownership before call
     AppKernel kernel;
     auto first = makeDescriptor("module.owner-first");
     auto second = makeDescriptor("module.owner-second");
-    const auto shared = makeId<CommandName>("command.module.shared");
+    const auto shared = CommandKey {
+        makeId<CommandName>("command.module.shared"), Version {1U, 0U, 0U}};
     first.commands = {shared};
     second.commands = {shared};
     auto callbackInvoked = std::make_shared<bool>(false);

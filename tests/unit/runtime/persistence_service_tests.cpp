@@ -10,6 +10,7 @@
 #include <lasercnc/runtime/transaction_manager.hpp>
 
 #include <catch2/catch_test_macros.hpp>
+#include "kernel_test_module.hpp"
 
 #include <array>
 #include <atomic>
@@ -761,8 +762,7 @@ void configureRuntimeKernel(
                 .hasValue());
     const std::array capabilities {validId<CapabilityId>("document.write")};
     REQUIRE(kernel.capabilities().replace(sessionId, capabilities).hasValue());
-    REQUIRE(kernel.commandRegistry()
-                .registerHandler(persistentCommandDescriptor(), std::move(handler))
+    REQUIRE(lasercnc::test::registerCommand(kernel, persistentCommandDescriptor(), std::move(handler))
                 .hasValue());
     auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {database});
     REQUIRE(backend.hasValue());
@@ -791,12 +791,10 @@ void configureAsyncRuntimeKernel(
                 .hasValue());
     const std::array capabilities {validId<CapabilityId>("task.submit")};
     REQUIRE(kernel.capabilities().replace(sessionId, capabilities).hasValue());
-    REQUIRE(kernel.commandRegistry()
-                .registerAsyncHandler(
+    REQUIRE(lasercnc::test::registerAsyncCommand(kernel,
                     persistentAsyncCommandDescriptor(), std::move(commandHandler))
                 .hasValue());
-    REQUIRE(kernel.taskRegistry()
-                .registerHandler(persistentTaskDescriptor(), std::move(taskHandler))
+    REQUIRE(lasercnc::test::registerTask(kernel, persistentTaskDescriptor(), std::move(taskHandler))
                 .hasValue());
     auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {database});
     REQUIRE(backend.hasValue());
@@ -1368,7 +1366,7 @@ TEST_CASE("CommandRuntime replays durable idempotency after process restart", "[
         configureRuntimeKernel(
             kernel, path, snapshotDirectory, sessionId, handler);
         REQUIRE(kernel.bootstrap().hasValue());
-        auto first = kernel.commands().execute(persistentCommandRequest(
+        auto first = kernel.execution().executeCommand(persistentCommandRequest(
             "request.command-replay.first",
             projectId,
             documentId,
@@ -1397,7 +1395,7 @@ TEST_CASE("CommandRuntime replays durable idempotency after process restart", "[
             [&events](const lasercnc::messaging::EventEnvelope&) { ++events; });
         REQUIRE(subscription.hasValue());
         REQUIRE(kernel.bootstrap().hasValue());
-        auto replay = kernel.commands().execute(persistentCommandRequest(
+        auto replay = kernel.execution().executeCommand(persistentCommandRequest(
             "request.command-replay.retry",
             projectId,
             documentId,
@@ -1414,7 +1412,7 @@ TEST_CASE("CommandRuntime replays durable idempotency after process restart", "[
         CHECK(handler->calls == 0U);
         CHECK(events == 0U);
 
-        auto conflict = kernel.commands().execute(persistentCommandRequest(
+        auto conflict = kernel.execution().executeCommand(persistentCommandRequest(
             "request.command-replay.conflict",
             projectId,
             documentId,
@@ -1449,7 +1447,7 @@ TEST_CASE("Asynchronous command acceptance and task outcome survive restart", "[
         configureAsyncRuntimeKernel(
             kernel, path, sessionId, commandHandler, taskHandler);
         REQUIRE(kernel.bootstrap().hasValue());
-        auto accepted = kernel.commands().execute(persistentAsyncCommandRequest(
+        auto accepted = kernel.execution().executeCommand(persistentAsyncCommandRequest(
             "request.async-replay.first",
             projectId,
             documentId,
@@ -1459,7 +1457,7 @@ TEST_CASE("Asynchronous command acceptance and task outcome survive restart", "[
         CHECK_FALSE(accepted.value().replayed);
         REQUIRE(accepted.value().taskId.has_value());
         acceptedTaskId = *accepted.value().taskId;
-        auto terminal = kernel.tasks().wait(acceptedTaskId, std::chrono::seconds(2));
+        auto terminal = kernel.execution().waitTask(acceptedTaskId, std::chrono::seconds(2));
         REQUIRE(terminal.hasValue());
         CHECK(terminal.value().state == TaskState::Succeeded);
         REQUIRE(terminal.value().result.has_value());
@@ -1477,7 +1475,7 @@ TEST_CASE("Asynchronous command acceptance and task outcome survive restart", "[
         configureAsyncRuntimeKernel(
             kernel, path, sessionId, commandHandler, taskHandler);
         REQUIRE(kernel.bootstrap().hasValue());
-        auto replay = kernel.commands().execute(persistentAsyncCommandRequest(
+        auto replay = kernel.execution().executeCommand(persistentAsyncCommandRequest(
             "request.async-replay.retry",
             projectId,
             documentId,
@@ -1489,7 +1487,7 @@ TEST_CASE("Asynchronous command acceptance and task outcome survive restart", "[
         CHECK(commandHandler->calls.load() == 0U);
         CHECK(taskHandler->calls.load() == 0U);
 
-        auto terminal = kernel.tasks().snapshot(acceptedTaskId);
+        auto terminal = kernel.execution().task(acceptedTaskId);
         REQUIRE(terminal.hasValue());
         CHECK(terminal.value().state == TaskState::Succeeded);
         REQUIRE(terminal.value().result.has_value());
@@ -1505,13 +1503,27 @@ TEST_CASE("Task completion exposes persistence failure without changing task out
     const auto path = uniqueDatabasePath();
     removeDatabase(path);
     lasercnc::kernel::AppKernel kernel;
+    const auto session = validId<SessionId>("session.persistence-failure");
+    const auto submitCapability = validId<CapabilityId>("task.persistence.submit");
+    const std::array submitGrants {submitCapability};
+    REQUIRE(kernel.capabilities().replace(session, submitGrants).hasValue());
     auto adapter = std::make_shared<JsonconsAdapter>();
     REQUIRE(kernel.executionServices()
                 .configure(adapter, std::make_shared<NullLogService>())
                 .hasValue());
     auto taskHandler = std::make_shared<PersistentTaskHandler>();
-    REQUIRE(kernel.taskRegistry()
-                .registerHandler(persistentTaskDescriptor(), taskHandler)
+    REQUIRE(lasercnc::test::registerTask(kernel, persistentTaskDescriptor(), taskHandler)
+                .hasValue());
+    const auto request = TaskRequest {
+        validId<TaskId>("task.persistence-failure"),
+        validId<TaskName>("kernel.persistence.async-task"),
+        Value {Value::Object {{"input", Value {"durable"}}}},
+        validId<TraceId>("trace.persistence-failure")};
+    REQUIRE(lasercnc::test::registerAsyncCommand(
+                kernel,
+                lasercnc::test::taskSubmissionDescriptor(
+                    "command.persistence.task-submit", "task.persistence.submit"),
+                std::make_shared<lasercnc::test::FixedTaskCommandHandler>(request))
                 .hasValue());
     auto sqlite = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
     REQUIRE(sqlite.hasValue());
@@ -1530,13 +1542,15 @@ TEST_CASE("Task completion exposes persistence failure without changing task out
     REQUIRE(kernel.bootstrap().hasValue());
     observed->failTerminal.store(true, std::memory_order_release);
 
-    const auto request = TaskRequest {
-        validId<TaskId>("task.persistence-failure"),
-        validId<TaskName>("kernel.persistence.async-task"),
-        Value {Value::Object {{"input", Value {"durable"}}}},
-        validId<TraceId>("trace.persistence-failure")};
-    REQUIRE(kernel.tasks().submit(request).hasValue());
-    auto terminal = kernel.tasks().wait(request.taskId, std::chrono::seconds(2));
+    auto accepted = kernel.execution().executeCommand(
+        lasercnc::test::taskSubmissionRequest(
+            "request.persistence.task-submit",
+            "command.persistence.task-submit",
+            session,
+            "trace.persistence-failure"));
+    REQUIRE(accepted.hasValue());
+    CHECK(accepted.value().taskId == request.taskId);
+    auto terminal = kernel.execution().waitTask(request.taskId, std::chrono::seconds(2));
     REQUIRE(terminal.hasValue());
     CHECK(terminal.value().state == TaskState::Succeeded);
     REQUIRE(kernel.scheduler().persistenceFailures().size() == 1U);
@@ -1944,32 +1958,51 @@ TEST_CASE("DocumentRuntime blocks close while a document task remains active",
     std::promise<void> release;
 
     lasercnc::kernel::AppKernel kernel;
+    const auto session = validId<SessionId>("session.task-close");
+    const auto submitCapability = validId<CapabilityId>("task.document-close.submit");
+    const std::array submitGrants {submitCapability};
+    REQUIRE(kernel.capabilities().replace(session, submitGrants).hasValue());
     REQUIRE(kernel.addDocument(project, document).hasValue());
     auto adapter = std::make_shared<JsonconsAdapter>();
     REQUIRE(kernel.executionServices()
                 .configure(adapter, std::make_shared<NullLogService>())
                 .hasValue());
-    REQUIRE(kernel.taskRegistry()
-                .registerHandler(
+    REQUIRE(lasercnc::test::registerTask(kernel,
                     persistentTaskDescriptor(),
                     std::make_shared<BlockingDocumentTaskHandler>(
                         entered, release.get_future().share()))
+                .hasValue());
+    auto taskRequest = TaskRequest {
+        taskId,
+        validId<TaskName>("kernel.persistence.async-task"),
+        Value {Value::Object {{"input", Value {"blocking"}}}},
+        validId<TraceId>("trace.document-close-task"),
+        std::nullopt,
+        project,
+        document};
+    auto submitDescriptor = lasercnc::test::taskSubmissionDescriptor(
+        "command.document-close.task-submit", "task.document-close.submit");
+    submitDescriptor.scope = ExecutionScope::Document;
+    REQUIRE(lasercnc::test::registerAsyncCommand(
+                kernel,
+                std::move(submitDescriptor),
+                std::make_shared<lasercnc::test::FixedTaskCommandHandler>(taskRequest))
                 .hasValue());
     auto executor = BsThreadPoolExecutor::create(BsThreadPoolExecutorOptions {1U});
     REQUIRE(executor.hasValue());
     REQUIRE(kernel.configureTaskExecutor(std::move(executor).value()).hasValue());
     REQUIRE(kernel.bootstrap().hasValue());
 
-    REQUIRE(kernel.tasks()
-                .submit(TaskRequest {
-                    taskId,
-                    validId<TaskName>("kernel.persistence.async-task"),
-                    Value {Value::Object {{"input", Value {"blocking"}}}},
-                    validId<TraceId>("trace.document-close-task"),
-                    std::nullopt,
-                    project,
-                    document})
-                .hasValue());
+    auto submitRequest = lasercnc::test::taskSubmissionRequest(
+        "request.document-close.task-submit",
+        "command.document-close.task-submit",
+        session,
+        "trace.document-close-task");
+    submitRequest.context.projectId = project;
+    submitRequest.context.documentId = document;
+    auto accepted = kernel.execution().executeCommand(std::move(submitRequest));
+    REQUIRE(accepted.hasValue());
+    CHECK(accepted.value().taskId == taskId);
     enteredFuture.wait();
 
     auto refused = kernel.documentRuntime().close(document);
@@ -1980,7 +2013,7 @@ TEST_CASE("DocumentRuntime blocks close while a document task remains active",
     CHECK(lifecycle.value().state == DocumentLifecycleState::Open);
 
     release.set_value();
-    auto terminal = kernel.tasks().wait(taskId, std::chrono::seconds(2));
+    auto terminal = kernel.execution().waitTask(taskId, std::chrono::seconds(2));
     REQUIRE(terminal.hasValue());
     CHECK(terminal.value().state == TaskState::Succeeded);
     REQUIRE(kernel.documentRuntime().close(document).hasValue());
@@ -2204,10 +2237,10 @@ TEST_CASE("AppKernel restores a running workflow at the same idempotent attempt"
             request.sessionId,
             handler);
         REQUIRE(kernel.addDocument(request.projectId, request.documentId).hasValue());
-        REQUIRE(kernel.workflowRegistry().registerDefinition(definition).hasValue());
+        REQUIRE(lasercnc::test::registerWorkflow(kernel, definition).hasValue());
         REQUIRE(kernel.bootstrap().hasValue());
 
-        auto recovered = kernel.workflows().snapshot(request.workflowId);
+        auto recovered = kernel.execution().workflow(request.workflowId);
         REQUIRE(recovered.hasValue());
         CHECK(recovered.value().state == WorkflowState::Waiting);
         REQUIRE(recovered.value().steps.size() == 1U);
@@ -2215,7 +2248,7 @@ TEST_CASE("AppKernel restores a running workflow at the same idempotent attempt"
         CHECK(recovered.value().steps[0].attempt == 1U);
         CHECK(recovered.value().steps[0].replayCurrentAttempt);
 
-        auto completed = kernel.workflows().advance(request.workflowId);
+        auto completed = kernel.execution().advanceWorkflow(request.workflowId);
         REQUIRE(completed.hasValue());
         CHECK(completed.value().state == WorkflowState::Succeeded);
         CHECK(completed.value().steps[0].attempt == 1U);
@@ -2232,9 +2265,9 @@ TEST_CASE("AppKernel restores a running workflow at the same idempotent attempt"
             request.sessionId,
             handler);
         REQUIRE(kernel.addDocument(request.projectId, request.documentId).hasValue());
-        REQUIRE(kernel.workflowRegistry().registerDefinition(definition).hasValue());
+        REQUIRE(lasercnc::test::registerWorkflow(kernel, definition).hasValue());
         REQUIRE(kernel.bootstrap().hasValue());
-        auto recovered = kernel.workflows().snapshot(request.workflowId);
+        auto recovered = kernel.execution().workflow(request.workflowId);
         REQUIRE(recovered.hasValue());
         CHECK(recovered.value().state == WorkflowState::Succeeded);
         CHECK(handler->calls == 0U);
@@ -2262,10 +2295,9 @@ TEST_CASE("Workflow checkpoint failure prevents handler execution", "[persistenc
                         std::array {validId<CapabilityId>("document.write")})
                     .hasValue());
         auto handler = std::make_shared<PersistentCreateHandler>();
-        REQUIRE(kernel.commandRegistry()
-                    .registerHandler(persistentCommandDescriptor(), handler)
+        REQUIRE(lasercnc::test::registerCommand(kernel, persistentCommandDescriptor(), handler)
                     .hasValue());
-        REQUIRE(kernel.workflowRegistry().registerDefinition(definition).hasValue());
+        REQUIRE(lasercnc::test::registerWorkflow(kernel, definition).hasValue());
         REQUIRE(kernel.addDocument(request.projectId, request.documentId).hasValue());
         auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
         REQUIRE(backend.hasValue());
@@ -2279,21 +2311,21 @@ TEST_CASE("Workflow checkpoint failure prevents handler execution", "[persistenc
                         std::make_shared<Sha256HashService>())
                     .hasValue());
         REQUIRE(kernel.bootstrap().hasValue());
-        REQUIRE(kernel.workflows().startWorkflow(request).hasValue());
+        REQUIRE(kernel.execution().startWorkflow(request).hasValue());
 
         observed->failCheckpoint.store(true, std::memory_order_release);
-        auto failed = kernel.workflows().advance(request.workflowId);
+        auto failed = kernel.execution().advanceWorkflow(request.workflowId);
         REQUIRE_FALSE(failed.hasValue());
         CHECK(std::string(failed.error().code.value())
               == "Test.WorkflowCheckpointFailed");
         CHECK(handler->calls == 0U);
-        auto unchanged = kernel.workflows().snapshot(request.workflowId);
+        auto unchanged = kernel.execution().workflow(request.workflowId);
         REQUIRE(unchanged.hasValue());
         CHECK(unchanged.value().steps[0].state == WorkflowStepState::Pending);
         CHECK(unchanged.value().steps[0].attempt == 0U);
 
         observed->failCheckpoint.store(false, std::memory_order_release);
-        auto completed = kernel.workflows().advance(request.workflowId);
+        auto completed = kernel.execution().advanceWorkflow(request.workflowId);
         REQUIRE(completed.hasValue());
         CHECK(completed.value().state == WorkflowState::Succeeded);
         CHECK(handler->calls == 1U);
@@ -2330,7 +2362,7 @@ TEST_CASE("AppKernel rejects durable workflow definition drift", "[persistence][
                     .hasValue());
         auto changed = persistentWorkflowDefinition(false);
         changed.steps[0].valueTemplate = Value {Value::Object {{"checkpoint", Value {false}}}};
-        REQUIRE(kernel.workflowRegistry().registerDefinition(std::move(changed)).hasValue());
+        REQUIRE(lasercnc::test::registerWorkflow(kernel, std::move(changed)).hasValue());
         auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
         REQUIRE(backend.hasValue());
         REQUIRE(kernel.persistence()
@@ -2464,7 +2496,7 @@ TEST_CASE("CommandRuntime persists and replays completed external effects", "[ru
         auto guard = std::make_shared<TestEffectGuard>();
         REQUIRE(kernel.effectGuards().registerGuard(
             validId<EffectGuardId>("guard.effect.publish"), guard).hasValue());
-        REQUIRE(kernel.commandRegistry().registerExternalEffectHandler(
+        REQUIRE(lasercnc::test::registerExternalEffectCommand(kernel,
             externalEffectDescriptor(command, ReplayPolicy::Idempotent), handler).hasValue());
         const std::array grants {validId<CapabilityId>("effect.publish")};
         REQUIRE(kernel.capabilities().replace(session, grants).hasValue());
@@ -2480,14 +2512,14 @@ TEST_CASE("CommandRuntime persists and replays completed external effects", "[ru
             std::make_shared<Sha256HashService>()).hasValue());
         REQUIRE(kernel.bootstrap().hasValue());
 
-        auto first = kernel.commands().execute(
+        auto first = kernel.execution().executeCommand(
             externalEffectRequest("request.effect.first", command, session, key));
         REQUIRE(first.hasValue());
         CHECK_FALSE(first.value().replayed);
         REQUIRE(first.value().recoveryDisposition.has_value());
         CHECK(*first.value().recoveryDisposition == RecoveryDisposition::Completed);
         CHECK(handler->calls == 1U);
-        auto replay = kernel.commands().execute(
+        auto replay = kernel.execution().executeCommand(
             externalEffectRequest("request.effect.replay", command, session, key));
         REQUIRE(replay.hasValue());
         CHECK(replay.value().replayed);
@@ -2509,7 +2541,7 @@ TEST_CASE("CommandRuntime persists and replays completed external effects", "[ru
         REQUIRE(kernel.effectGuards().registerGuard(
             validId<EffectGuardId>("guard.effect.publish"),
             std::make_shared<TestEffectGuard>()).hasValue());
-        REQUIRE(kernel.commandRegistry().registerExternalEffectHandler(
+        REQUIRE(lasercnc::test::registerExternalEffectCommand(kernel,
             externalEffectDescriptor(command, ReplayPolicy::Idempotent), handler).hasValue());
         const std::array grants {validId<CapabilityId>("effect.publish")};
         REQUIRE(kernel.capabilities().replace(session, grants).hasValue());
@@ -2520,7 +2552,7 @@ TEST_CASE("CommandRuntime persists and replays completed external effects", "[ru
             adapter,
             std::make_shared<Sha256HashService>()).hasValue());
         REQUIRE(kernel.bootstrap().hasValue());
-        auto replay = kernel.commands().execute(
+        auto replay = kernel.execution().executeCommand(
             externalEffectRequest("request.effect.restart", command, session, key));
         REQUIRE(replay.hasValue());
         CHECK(replay.value().replayed);
@@ -2547,7 +2579,7 @@ TEST_CASE("Safe external effects require explicit same-key retry after failure",
     auto guard = std::make_shared<TestEffectGuard>();
     REQUIRE(kernel.effectGuards().registerGuard(
         validId<EffectGuardId>("guard.effect.publish"), guard).hasValue());
-    REQUIRE(kernel.commandRegistry().registerExternalEffectHandler(
+    REQUIRE(lasercnc::test::registerExternalEffectCommand(kernel,
         externalEffectDescriptor(command, ReplayPolicy::Safe), handler).hasValue());
     const std::array grants {validId<CapabilityId>("effect.publish")};
     REQUIRE(kernel.capabilities().replace(session, grants).hasValue());
@@ -2559,7 +2591,7 @@ TEST_CASE("Safe external effects require explicit same-key retry after failure",
         std::make_shared<Sha256HashService>()).hasValue());
     REQUIRE(kernel.bootstrap().hasValue());
 
-    auto failed = kernel.commands().execute(
+    auto failed = kernel.execution().executeCommand(
         externalEffectRequest("request.effect.failed", command, session, key));
     REQUIRE_FALSE(failed.hasValue());
     CHECK(std::string(failed.error().code.value()) == "Effect.ExecutionInterrupted");
@@ -2570,7 +2602,7 @@ TEST_CASE("Safe external effects require explicit same-key retry after failure",
           == ExternalEffectState::Interrupted);
 
     handler->fail.store(false, std::memory_order_release);
-    auto retried = kernel.commands().execute(
+    auto retried = kernel.execution().executeCommand(
         externalEffectRequest("request.effect.retry", command, session, key));
     REQUIRE(retried.hasValue());
     CHECK_FALSE(retried.value().replayed);
@@ -2601,7 +2633,7 @@ TEST_CASE("Effect guards fail before durable claim and handler execution", "[run
     guard->allow.store(false, std::memory_order_release);
     REQUIRE(kernel.effectGuards().registerGuard(
         validId<EffectGuardId>("guard.effect.publish"), guard).hasValue());
-    REQUIRE(kernel.commandRegistry().registerExternalEffectHandler(
+    REQUIRE(lasercnc::test::registerExternalEffectCommand(kernel,
         externalEffectDescriptor(command, ReplayPolicy::Never), handler).hasValue());
     const std::array grants {validId<CapabilityId>("effect.publish")};
     REQUIRE(kernel.capabilities().replace(session, grants).hasValue());
@@ -2613,14 +2645,14 @@ TEST_CASE("Effect guards fail before durable claim and handler execution", "[run
         std::make_shared<Sha256HashService>()).hasValue());
     REQUIRE(kernel.bootstrap().hasValue());
 
-    auto unauthorized = kernel.commands().execute(externalEffectRequest(
+    auto unauthorized = kernel.execution().executeCommand(externalEffectRequest(
         "request.effect.unauthorized", command, deniedSession, deniedKey));
     REQUIRE_FALSE(unauthorized.hasValue());
     CHECK(std::string(unauthorized.error().code.value()) == "Capability.Denied");
     CHECK(guard->calls == 0U);
     CHECK_FALSE(kernel.persistence().externalEffect(deniedKey).value().has_value());
 
-    auto denied = kernel.commands().execute(
+    auto denied = kernel.execution().executeCommand(
         externalEffectRequest("request.effect.denied", command, session, key));
     REQUIRE_FALSE(denied.hasValue());
     CHECK(std::string(denied.error().code.value()) == "Test.EffectGuardDenied");
@@ -2652,10 +2684,10 @@ TEST_CASE("Unsafe external-effect failures become reconcile or indeterminate", "
     REQUIRE(kernel.effectGuards().registerGuard(
         validId<EffectGuardId>("guard.effect.publish"),
         std::make_shared<TestEffectGuard>()).hasValue());
-    REQUIRE(kernel.commandRegistry().registerExternalEffectHandler(
+    REQUIRE(lasercnc::test::registerExternalEffectCommand(kernel,
         externalEffectDescriptor(reconcileCommand, ReplayPolicy::ReconcileOnly),
         handler).hasValue());
-    REQUIRE(kernel.commandRegistry().registerExternalEffectHandler(
+    REQUIRE(lasercnc::test::registerExternalEffectCommand(kernel,
         externalEffectDescriptor(neverCommand, ReplayPolicy::Never), handler).hasValue());
     const std::array grants {validId<CapabilityId>("effect.publish")};
     REQUIRE(kernel.capabilities().replace(session, grants).hasValue());
@@ -2667,13 +2699,13 @@ TEST_CASE("Unsafe external-effect failures become reconcile or indeterminate", "
         std::make_shared<Sha256HashService>()).hasValue());
     REQUIRE(kernel.bootstrap().hasValue());
 
-    auto reconcile = kernel.commands().execute(externalEffectRequest(
+    auto reconcile = kernel.execution().executeCommand(externalEffectRequest(
         "request.effect.reconcile", reconcileCommand, session, reconcileKey));
     REQUIRE_FALSE(reconcile.hasValue());
     CHECK(std::string(reconcile.error().code.value()) == "Effect.ReconcileRequired");
     CHECK(kernel.persistence().externalEffect(reconcileKey).value()->state
           == ExternalEffectState::ReconcileRequired);
-    auto reconcileRetry = kernel.commands().execute(externalEffectRequest(
+    auto reconcileRetry = kernel.execution().executeCommand(externalEffectRequest(
         "request.effect.reconcile-retry", reconcileCommand, session, reconcileKey));
     REQUIRE_FALSE(reconcileRetry.hasValue());
     CHECK(std::string(reconcileRetry.error().code.value()) == "Effect.DurableClaimFailed");
@@ -2681,13 +2713,13 @@ TEST_CASE("Unsafe external-effect failures become reconcile or indeterminate", "
     CHECK(std::string(reconcileRetry.error().cause->code.value())
           == "Persistence.ExternalEffectReconcileRequired");
 
-    auto never = kernel.commands().execute(externalEffectRequest(
+    auto never = kernel.execution().executeCommand(externalEffectRequest(
         "request.effect.never", neverCommand, session, neverKey));
     REQUIRE_FALSE(never.hasValue());
     CHECK(std::string(never.error().code.value()) == "Effect.Indeterminate");
     CHECK(kernel.persistence().externalEffect(neverKey).value()->state
           == ExternalEffectState::Indeterminate);
-    auto neverRetry = kernel.commands().execute(externalEffectRequest(
+    auto neverRetry = kernel.execution().executeCommand(externalEffectRequest(
         "request.effect.never-retry", neverCommand, session, neverKey));
     REQUIRE_FALSE(neverRetry.hasValue());
     CHECK(std::string(neverRetry.error().code.value()) == "Effect.DurableClaimFailed");
@@ -2710,7 +2742,7 @@ TEST_CASE("External effects require registered guards and durable persistence at
         REQUIRE(kernel.executionServices()
                     .configure(adapter, std::make_shared<NullLogService>())
                     .hasValue());
-        REQUIRE(kernel.commandRegistry().registerExternalEffectHandler(
+        REQUIRE(lasercnc::test::registerExternalEffectCommand(kernel,
             externalEffectDescriptor(command, ReplayPolicy::Never),
             std::make_shared<TestEffectHandler>()).hasValue());
         auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
@@ -2737,7 +2769,7 @@ TEST_CASE("External effects require registered guards and durable persistence at
         REQUIRE(kernel.effectGuards().registerGuard(
             validId<EffectGuardId>("guard.effect.publish"),
             std::make_shared<TestEffectGuard>()).hasValue());
-        REQUIRE(kernel.commandRegistry().registerExternalEffectHandler(
+        REQUIRE(lasercnc::test::registerExternalEffectCommand(kernel,
             externalEffectDescriptor(command, ReplayPolicy::Never),
             std::make_shared<TestEffectHandler>()).hasValue());
         auto bootstrapped = kernel.bootstrap();
@@ -2767,7 +2799,7 @@ TEST_CASE("External effects acquire guards before exclusive resources and durabl
     auto guard = std::make_shared<TestEffectGuard>();
     REQUIRE(kernel.effectGuards().registerGuard(
         validId<EffectGuardId>("guard.effect.publish"), guard).hasValue());
-    REQUIRE(kernel.commandRegistry().registerExternalEffectHandler(
+    REQUIRE(lasercnc::test::registerExternalEffectCommand(kernel,
         externalEffectDescriptor(command, ReplayPolicy::Idempotent), handler).hasValue());
     const std::array grants {validId<CapabilityId>("effect.publish")};
     REQUIRE(kernel.capabilities().replace(session, grants).hasValue());
@@ -2785,11 +2817,11 @@ TEST_CASE("External effects acquire guards before exclusive resources and durabl
 
     std::optional<Result<CommandResponse>> firstResult;
     std::thread first([&]() {
-        firstResult = kernel.commands().execute(externalEffectRequest(
+        firstResult = kernel.execution().executeCommand(externalEffectRequest(
             "request.effect.resource-first", command, session, firstKey));
     });
     handler->waitUntilEntered();
-    auto second = kernel.commands().execute(externalEffectRequest(
+    auto second = kernel.execution().executeCommand(externalEffectRequest(
         "request.effect.resource-second", command, session, secondKey));
     handler->release();
     first.join();

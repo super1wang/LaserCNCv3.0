@@ -6,6 +6,7 @@
 #include <lasercnc/infrastructure/sqlite_persistence_backend.hpp>
 #include <lasercnc/kernel/app_kernel.hpp>
 #include <lasercnc/observability/log_observability_exporter.hpp>
+#include "kernel_test_module.hpp"
 
 #include <algorithm>
 #include <array>
@@ -325,7 +326,7 @@ Result<void> configurePersistenceContract(
             ErrorCategory::Internal,
             "The persistence contract schemas could not be created"));
     }
-    auto command = kernel.commandRegistry().registerHandler(
+    auto command = lasercnc::test::registerCommand(kernel,
         CommandDescriptor {
             requiredId<CommandName>("kernel.persistence.object.put"),
             Version {1U, 0U, 0U},
@@ -341,7 +342,7 @@ Result<void> configurePersistenceContract(
     if(!command) {
         return command;
     }
-    auto query = kernel.queryRegistry().registerHandler(
+    auto query = lasercnc::test::registerQuery(kernel,
         QueryDescriptor {
             requiredId<QueryName>("kernel.persistence.object.get"),
             Version {1U, 0U, 0U},
@@ -354,7 +355,7 @@ Result<void> configurePersistenceContract(
     if(!query) {
         return query;
     }
-    auto workflow = kernel.workflowRegistry().registerDefinition(
+    auto workflow = lasercnc::test::registerWorkflow(kernel,
         persistenceWorkflowDefinition());
     if(!workflow) {
         return workflow;
@@ -410,7 +411,7 @@ Result<Value> queryPersistentObject(
     const char* requestId,
     const char* objectId)
 {
-    auto queried = kernel.queries().execute(QueryRequest {
+    auto queried = kernel.execution().executeQuery(QueryRequest {
         requiredId<RequestId>(requestId),
         ExecutionContext {
             requiredId<SessionId>("session.persistence-contract"),
@@ -478,7 +479,7 @@ int runRoundTrip()
         std::cerr << "schema: contract schema creation failed\n";
         return 1;
     }
-    auto registeredCommand = kernel.commandRegistry().registerHandler(
+    auto registeredCommand = lasercnc::test::registerCommand(kernel,
         CommandDescriptor {
             requiredId<CommandName>("kernel.contract.object.put"),
             Version {1U, 0U, 0U},
@@ -494,7 +495,7 @@ int runRoundTrip()
     if(!registeredCommand.hasValue()) {
         return fail("command registration", registeredCommand.error());
     }
-    auto registeredQuery = kernel.queryRegistry().registerHandler(
+    auto registeredQuery = lasercnc::test::registerQuery(kernel,
         QueryDescriptor {
             requiredId<QueryName>("kernel.contract.object.get"),
             Version {1U, 0U, 0U},
@@ -507,17 +508,6 @@ int runRoundTrip()
     if(!registeredQuery.hasValue()) {
         return fail("query registration", registeredQuery.error());
     }
-    const auto commandDescriptors = kernel.commandRegistry().descriptors();
-    const auto queryDescriptors = kernel.queryRegistry().descriptors();
-    if(commandDescriptors.size() != 1U || queryDescriptors.size() != 1U
-       || commandDescriptors.front().name
-           != requiredId<CommandName>("kernel.contract.object.put")
-       || queryDescriptors.front().name
-           != requiredId<QueryName>("kernel.contract.object.get")) {
-        std::cerr << "discovery: deterministic descriptors are missing\n";
-        return 1;
-    }
-
     std::size_t eventCount = 0U;
     auto subscription = kernel.events().subscribe(
         requiredId<SubscriptionId>("subscription.headless-contract"),
@@ -531,12 +521,29 @@ int runRoundTrip()
     if(!bootstrapped.hasValue()) {
         return fail("bootstrap", bootstrapped.error());
     }
+    const auto catalog = kernel.execution().catalog();
+    const auto commandFound = std::ranges::any_of(
+        catalog.commands,
+        [](const CommandDescriptor& descriptor) {
+            return descriptor.name
+                == requiredId<CommandName>("kernel.contract.object.put");
+        });
+    const auto queryFound = std::ranges::any_of(
+        catalog.queries,
+        [](const QueryDescriptor& descriptor) {
+            return descriptor.name
+                == requiredId<QueryName>("kernel.contract.object.get");
+        });
+    if(!commandFound || !queryFound) {
+        std::cerr << "discovery: deterministic descriptors are missing\n";
+        return 1;
+    }
 
     auto parsedArguments = validator->deserialize(R"({"id":"object.cli","data":"verified"})");
     if(!parsedArguments.hasValue()) {
         return fail("argument parse", parsedArguments.error());
     }
-    auto command = kernel.commands().execute(CommandRequest {
+    auto command = kernel.execution().executeCommand(CommandRequest {
         requiredId<RequestId>("request.cli.command"),
         ExecutionContext {session, project, document},
         requiredId<CommandName>("kernel.contract.object.put"),
@@ -559,7 +566,7 @@ int runRoundTrip()
     if(!queryArguments.hasValue()) {
         return fail("query parse", queryArguments.error());
     }
-    auto query = kernel.queries().execute(QueryRequest {
+    auto query = kernel.execution().executeQuery(QueryRequest {
         requiredId<RequestId>("request.cli.query"),
         ExecutionContext {session, project, document},
         requiredId<QueryName>("kernel.contract.object.get"),
@@ -638,7 +645,7 @@ int runTaskRoundTrip()
         std::cerr << "schema: task contract schema creation failed\n";
         return 1;
     }
-    auto taskRegistered = kernel.taskRegistry().registerHandler(
+    auto taskRegistered = lasercnc::test::registerTask(kernel,
         TaskDescriptor {
             requiredId<TaskName>("kernel.contract.compute"),
             Version {1U, 0U, 0U},
@@ -648,7 +655,7 @@ int runTaskRoundTrip()
     if(!taskRegistered) {
         return fail("task registration", taskRegistered.error());
     }
-    auto commandRegistered = kernel.commandRegistry().registerAsyncHandler(
+    auto commandRegistered = lasercnc::test::registerAsyncCommand(kernel,
         CommandDescriptor {
             requiredId<CommandName>("kernel.contract.compute.accept"),
             Version {1U, 0U, 0U},
@@ -681,7 +688,7 @@ int runTaskRoundTrip()
     if(!parsed) {
         return fail("argument parse", parsed.error());
     }
-    auto accepted = kernel.commands().execute(CommandRequest {
+    auto accepted = kernel.execution().executeCommand(CommandRequest {
         requiredId<RequestId>("request.cli.task"),
         ExecutionContext {session, project, document},
         requiredId<CommandName>("kernel.contract.compute.accept"),
@@ -699,7 +706,7 @@ int runTaskRoundTrip()
         std::cerr << "async command execute: invalid acceptance\n";
         return 1;
     }
-    auto completed = kernel.tasks().wait(*accepted.value().taskId, std::chrono::seconds(2));
+    auto completed = kernel.execution().waitTask(*accepted.value().taskId, std::chrono::seconds(2));
     if(!completed) {
         return fail("task wait", completed.error());
     }
@@ -762,7 +769,7 @@ int seedPersistence(const std::filesystem::path& stateRoot)
     if(!bootstrapped) {
         return fail("persistence bootstrap", bootstrapped.error());
     }
-    auto first = kernel.commands().execute(persistenceCommand(
+    auto first = kernel.execution().executeCommand(persistenceCommand(
         "request.persistence.first",
         "object.persistence.snapshot",
         "snapshot",
@@ -780,7 +787,7 @@ int seedPersistence(const std::filesystem::path& stateRoot)
     if(!captured) {
         return fail("persistence snapshot", captured.error());
     }
-    auto second = kernel.commands().execute(persistenceCommand(
+    auto second = kernel.execution().executeCommand(persistenceCommand(
         "request.persistence.second",
         "object.persistence.tail",
         "journal-tail",
@@ -847,7 +854,7 @@ int recoverPersistence(const std::filesystem::path& stateRoot)
             ? fail("recovery snapshot object", snapshotObject.error())
             : fail("recovery tail object", tailObject.error());
     }
-    auto replay = kernel.commands().execute(persistenceCommand(
+    auto replay = kernel.execution().executeCommand(persistenceCommand(
         "request.persistence.first-retry",
         "object.persistence.snapshot",
         "snapshot",
@@ -916,7 +923,7 @@ int seedWorkflowRecovery(const std::filesystem::path& stateRoot)
     }
 
     const auto request = persistenceWorkflowRequest();
-    auto started = kernel.workflows().startWorkflow(request);
+    auto started = kernel.execution().startWorkflow(request);
     if(!started) {
         return fail("workflow seed start", started.error());
     }
@@ -961,7 +968,7 @@ int recoverWorkflow(const std::filesystem::path& stateRoot)
         return fail("workflow recovery bootstrap", bootstrapped.error());
     }
     const auto request = persistenceWorkflowRequest();
-    auto restored = kernel.workflows().snapshot(request.workflowId);
+    auto restored = kernel.execution().workflow(request.workflowId);
     if(!restored) {
         return fail("workflow recovery snapshot", restored.error());
     }
@@ -976,7 +983,7 @@ int recoverWorkflow(const std::filesystem::path& stateRoot)
                   << " calls=" << handler->calls.load() << '\n';
         return 1;
     }
-    auto completed = kernel.workflows().advance(request.workflowId);
+    auto completed = kernel.execution().advanceWorkflow(request.workflowId);
     if(!completed) {
         return fail("workflow recovery advance", completed.error());
     }
@@ -991,7 +998,7 @@ int recoverWorkflow(const std::filesystem::path& stateRoot)
     if(!object) {
         return fail("workflow recovery object", object.error());
     }
-    auto replay = kernel.workflows().advance(request.workflowId);
+    auto replay = kernel.execution().advanceWorkflow(request.workflowId);
     if(!replay || replay.value().state != WorkflowState::Succeeded
        || handler->calls.load() != 1U || eventCount != 1U) {
         std::cerr << "workflow recovery: terminal advance replayed a side effect\n";

@@ -6,6 +6,7 @@
 #include <lasercnc/runtime/workflow_registry.hpp>
 
 #include <catch2/catch_test_macros.hpp>
+#include "kernel_test_module.hpp"
 
 #include <algorithm>
 #include <array>
@@ -438,18 +439,15 @@ struct WorkflowRuntimeFixture final {
                             validId<CapabilityId>("document.read"),
                             validId<CapabilityId>("document.write")})
                     .hasValue());
-        REQUIRE(kernel.commandRegistry()
-                    .registerHandler(commandDescriptor("command.action"), command)
+        REQUIRE(lasercnc::test::registerCommand(kernel, commandDescriptor("command.action"), command)
                     .hasValue());
-        REQUIRE(kernel.queryRegistry()
-                    .registerHandler(queryDescriptor("query.echo"), query)
+        REQUIRE(lasercnc::test::registerQuery(kernel, queryDescriptor("query.echo"), query)
                     .hasValue());
     }
 
     void bootstrap(WorkflowDefinition definition)
     {
-        REQUIRE(kernel.workflowRegistry()
-                    .registerDefinition(std::move(definition))
+        REQUIRE(lasercnc::test::registerWorkflow(kernel, std::move(definition))
                     .hasValue());
         REQUIRE(kernel.bootstrap().hasValue());
     }
@@ -459,13 +457,11 @@ struct WorkflowRuntimeFixture final {
         auto executor = std::make_unique<ManualExecutor>();
         auto* result = executor.get();
         REQUIRE(kernel.configureTaskExecutor(std::move(executor)).hasValue());
-        REQUIRE(kernel.taskRegistry()
-                    .registerHandler(
+        REQUIRE(lasercnc::test::registerTask(kernel,
                         taskDescriptor("task.workflow.echo"),
                         std::make_shared<EchoTaskHandler>())
                     .hasValue());
-        REQUIRE(kernel.commandRegistry()
-                    .registerAsyncHandler(
+        REQUIRE(lasercnc::test::registerAsyncCommand(kernel,
                         asyncCommandDescriptor("command.async"),
                         std::make_shared<AsyncPlanHandler>())
                     .hasValue());
@@ -589,17 +585,14 @@ TEST_CASE("AppKernel freezes only workflows with exact idempotent operations", "
 {
     AppKernel kernel;
     configureServices(kernel);
-    REQUIRE(kernel.commandRegistry()
-                .registerHandler(
+    REQUIRE(lasercnc::test::registerCommand(kernel,
                     commandDescriptor("command.create"),
                     std::make_shared<CommandHandler>())
                 .hasValue());
-    REQUIRE(kernel.queryRegistry()
-                .registerHandler(
+    REQUIRE(lasercnc::test::registerQuery(kernel,
                     queryDescriptor("query.read"), std::make_shared<QueryHandler>())
                 .hasValue());
-    REQUIRE(kernel.workflowRegistry()
-                .registerDefinition(workflowDefinition({
+    REQUIRE(lasercnc::test::registerWorkflow(kernel, workflowDefinition({
                     commandStep("step.command", "command.create"),
                     queryStep("step.query", "query.read"),
                 }))
@@ -607,9 +600,9 @@ TEST_CASE("AppKernel freezes only workflows with exact idempotent operations", "
 
     REQUIRE(kernel.bootstrap().hasValue());
     CHECK(kernel.workflowRegistry().frozen());
-    auto closed = kernel.workflowRegistry().registerDefinition(workflowDefinition({}));
+    auto closed = lasercnc::test::registerWorkflow(kernel, workflowDefinition({}));
     REQUIRE_FALSE(closed.hasValue());
-    CHECK(std::string(closed.error().code.value()) == "Workflow.RegistryFrozen");
+    CHECK(std::string(closed.error().code.value()) == "Kernel.AppKernelNotConfiguring");
     REQUIRE(kernel.shutdown().hasValue());
 }
 
@@ -617,13 +610,11 @@ TEST_CASE("AppKernel rejects workflow operation drift before Ready", "[workflow]
 {
     AppKernel kernel;
     configureServices(kernel);
-    REQUIRE(kernel.commandRegistry()
-                .registerHandler(
+    REQUIRE(lasercnc::test::registerCommand(kernel,
                     commandDescriptor("command.non-idempotent", false),
                     std::make_shared<CommandHandler>())
                 .hasValue());
-    REQUIRE(kernel.workflowRegistry()
-                .registerDefinition(workflowDefinition(
+    REQUIRE(lasercnc::test::registerWorkflow(kernel, workflowDefinition(
                     {commandStep("step.command", "command.non-idempotent")}))
                 .hasValue());
 
@@ -643,7 +634,7 @@ TEST_CASE("DocumentRuntime blocks close while a workflow remains active",
     WorkflowRuntimeFixture fixture;
     fixture.bootstrap(workflowDefinition({barrierStep("step.barrier", {})}));
     const auto request = workflowRequest("workflow.document-close-blocker");
-    auto started = fixture.kernel.workflows().startWorkflow(request);
+    auto started = fixture.kernel.execution().startWorkflow(request);
     REQUIRE(started.hasValue());
     CHECK_FALSE(isTerminal(started.value().state));
 
@@ -654,7 +645,7 @@ TEST_CASE("DocumentRuntime blocks close while a workflow remains active",
     REQUIRE(lifecycle.hasValue());
     CHECK(lifecycle.value().state == DocumentLifecycleState::Open);
 
-    auto cancelled = fixture.kernel.workflows().cancel(request.workflowId);
+    auto cancelled = fixture.kernel.execution().cancelWorkflow(request.workflowId);
     REQUIRE(cancelled.hasValue());
     CHECK(isTerminal(cancelled.value().state));
     REQUIRE(fixture.kernel.documentRuntime().close(request.documentId).hasValue());
@@ -703,8 +694,8 @@ TEST_CASE("WorkflowRuntime binds variables and skips false branches", "[workflow
     fixture.bootstrap(std::move(definition));
 
     auto request = workflowRequest("workflow.variables");
-    REQUIRE(fixture.kernel.workflows().startWorkflow(request).hasValue());
-    auto result = fixture.kernel.workflows().advance(request.workflowId);
+    REQUIRE(fixture.kernel.execution().startWorkflow(request).hasValue());
+    auto result = fixture.kernel.execution().advanceWorkflow(request.workflowId);
     REQUIRE(result.hasValue());
     INFO(
         "workflow error: "
@@ -747,14 +738,14 @@ TEST_CASE("WorkflowRuntime retries only allowlisted command errors", "[workflow]
     fixture.bootstrap(std::move(definition));
 
     auto request = workflowRequest("workflow.retry");
-    REQUIRE(fixture.kernel.workflows().startWorkflow(request).hasValue());
-    auto first = fixture.kernel.workflows().advance(request.workflowId);
+    REQUIRE(fixture.kernel.execution().startWorkflow(request).hasValue());
+    auto first = fixture.kernel.execution().advanceWorkflow(request.workflowId);
     REQUIRE(first.hasValue());
     CHECK(first.value().state == WorkflowState::Waiting);
     REQUIRE(first.value().steps.size() == 1U);
     CHECK(first.value().steps[0].attempt == 1U);
 
-    auto second = fixture.kernel.workflows().advance(request.workflowId);
+    auto second = fixture.kernel.execution().advanceWorkflow(request.workflowId);
     REQUIRE(second.hasValue());
     CHECK(second.value().state == WorkflowState::Succeeded);
     CHECK(second.value().steps[0].attempt == 2U);
@@ -788,8 +779,8 @@ TEST_CASE("WorkflowRuntime compensates successful steps in reverse order", "[wor
         {std::move(first), std::move(second), std::move(failing)}));
 
     auto request = workflowRequest("workflow.compensation");
-    REQUIRE(fixture.kernel.workflows().startWorkflow(request).hasValue());
-    auto result = fixture.kernel.workflows().advance(request.workflowId);
+    REQUIRE(fixture.kernel.execution().startWorkflow(request).hasValue());
+    auto result = fixture.kernel.execution().advanceWorkflow(request.workflowId);
     REQUIRE(result.hasValue());
     CHECK(result.value().state == WorkflowState::Compensated);
     REQUIRE(result.value().error.has_value());
@@ -805,9 +796,9 @@ TEST_CASE("WorkflowRuntime cancellation is explicit and terminal", "[workflow][r
     fixture.bootstrap(workflowDefinition(
         {assignStep("step.pending", "value", Value {true})}));
     auto request = workflowRequest("workflow.cancel");
-    REQUIRE(fixture.kernel.workflows().startWorkflow(request).hasValue());
+    REQUIRE(fixture.kernel.execution().startWorkflow(request).hasValue());
 
-    auto cancelled = fixture.kernel.workflows().cancel(request.workflowId);
+    auto cancelled = fixture.kernel.execution().cancelWorkflow(request.workflowId);
     REQUIRE(cancelled.hasValue());
     CHECK(cancelled.value().state == WorkflowState::Cancelled);
     REQUIRE(cancelled.value().error.has_value());
@@ -847,14 +838,14 @@ TEST_CASE("WorkflowRuntime launches independent tasks and resumes wait steps", "
     fixture.bootstrap(std::move(definition));
 
     auto request = workflowRequest("workflow.parallel-tasks");
-    REQUIRE(fixture.kernel.workflows().startWorkflow(request).hasValue());
-    auto waiting = fixture.kernel.workflows().advance(request.workflowId);
+    REQUIRE(fixture.kernel.execution().startWorkflow(request).hasValue());
+    auto waiting = fixture.kernel.execution().advanceWorkflow(request.workflowId);
     REQUIRE(waiting.hasValue());
     CHECK(waiting.value().state == WorkflowState::Waiting);
     CHECK(executor.queued() == 2U);
 
     executor.runAll();
-    auto completed = fixture.kernel.workflows().advance(request.workflowId);
+    auto completed = fixture.kernel.execution().advanceWorkflow(request.workflowId);
     REQUIRE(completed.hasValue());
     CHECK(completed.value().state == WorkflowState::Succeeded);
     REQUIRE(completed.value().result.has_value());
@@ -889,8 +880,8 @@ TEST_CASE("WorkflowRuntime enforces assertions and deadlines", "[workflow][runti
             std::move(assertion),
         }));
         auto request = workflowRequest("workflow.assertion");
-        REQUIRE(fixture.kernel.workflows().startWorkflow(request).hasValue());
-        auto result = fixture.kernel.workflows().advance(request.workflowId);
+        REQUIRE(fixture.kernel.execution().startWorkflow(request).hasValue());
+        auto result = fixture.kernel.execution().advanceWorkflow(request.workflowId);
         REQUIRE(result.hasValue());
         CHECK(result.value().state == WorkflowState::Failed);
         REQUIRE(result.value().error.has_value());
@@ -904,8 +895,8 @@ TEST_CASE("WorkflowRuntime enforces assertions and deadlines", "[workflow][runti
             {assignStep("step.value", "accepted", Value {true})}));
         auto request = workflowRequest("workflow.deadline");
         request.deadline = std::chrono::system_clock::now() - std::chrono::milliseconds {1};
-        REQUIRE(fixture.kernel.workflows().startWorkflow(request).hasValue());
-        auto result = fixture.kernel.workflows().advance(request.workflowId);
+        REQUIRE(fixture.kernel.execution().startWorkflow(request).hasValue());
+        auto result = fixture.kernel.execution().advanceWorkflow(request.workflowId);
         REQUIRE(result.hasValue());
         CHECK(result.value().state == WorkflowState::Failed);
         REQUIRE(result.value().error.has_value());
@@ -932,8 +923,8 @@ TEST_CASE("WorkflowRuntime exposes compensation failure without erasing the orig
     fixture.bootstrap(workflowDefinition({std::move(successful), std::move(failing)}));
 
     auto request = workflowRequest("workflow.compensation-failure");
-    REQUIRE(fixture.kernel.workflows().startWorkflow(request).hasValue());
-    auto result = fixture.kernel.workflows().advance(request.workflowId);
+    REQUIRE(fixture.kernel.execution().startWorkflow(request).hasValue());
+    auto result = fixture.kernel.execution().advanceWorkflow(request.workflowId);
     REQUIRE(result.hasValue());
     CHECK(result.value().state == WorkflowState::CompensationFailed);
     REQUIRE(result.value().error.has_value());
@@ -948,8 +939,7 @@ TEST_CASE("ScriptRegistry validates exact references and rejects include cycles"
     SECTION("exact command reference") {
         AppKernel kernel;
         configureServices(kernel);
-        REQUIRE(kernel.commandRegistry()
-                    .registerHandler(
+        REQUIRE(lasercnc::test::registerCommand(kernel,
                         commandDescriptor("command.script", false),
                         std::make_shared<CommandHandler>())
                     .hasValue());
@@ -962,8 +952,7 @@ TEST_CASE("ScriptRegistry validates exact references and rejects include cycles"
             {},
             {},
             {}};
-        REQUIRE(kernel.scriptRegistry()
-                    .registerDefinition(scriptDefinition("script.invalid", {command}))
+        REQUIRE(lasercnc::test::registerScript(kernel, scriptDefinition("script.invalid", {command}))
                     .hasValue());
         auto bootstrapped = kernel.bootstrap();
         REQUIRE_FALSE(bootstrapped.hasValue());
@@ -977,12 +966,10 @@ TEST_CASE("ScriptRegistry validates exact references and rejects include cycles"
     SECTION("include cycle") {
         AppKernel kernel;
         configureServices(kernel);
-        REQUIRE(kernel.scriptRegistry()
-                    .registerDefinition(scriptDefinition(
+        REQUIRE(lasercnc::test::registerScript(kernel, scriptDefinition(
                         "script.a", {scriptInclude("node.include-b", "script.b")}))
                     .hasValue());
-        REQUIRE(kernel.scriptRegistry()
-                    .registerDefinition(scriptDefinition(
+        REQUIRE(lasercnc::test::registerScript(kernel, scriptDefinition(
                         "script.b", {scriptInclude("node.include-a", "script.a")}))
                     .hasValue());
         auto bootstrapped = kernel.bootstrap();
@@ -999,8 +986,7 @@ TEST_CASE("DocumentRuntime blocks close while a script remains active",
           "[script][runtime][document][lifecycle]")
 {
     WorkflowRuntimeFixture fixture;
-    REQUIRE(fixture.kernel.scriptRegistry()
-                .registerDefinition(scriptDefinition(
+    REQUIRE(lasercnc::test::registerScript(fixture.kernel, scriptDefinition(
                     "script.document-close",
                     {scriptAssign("node.pending", "value", Value {true})}))
                 .hasValue());
@@ -1008,14 +994,14 @@ TEST_CASE("DocumentRuntime blocks close while a script remains active",
 
     auto request = scriptRequest(
         "script-execution.document-close", "script.document-close");
-    auto started = fixture.kernel.scripts().startScript(request);
+    auto started = fixture.kernel.execution().executeScript(request);
     REQUIRE(started.hasValue());
     CHECK_FALSE(isTerminal(started.value().state));
 
     auto refused = fixture.kernel.documentRuntime().close(request.documentId);
     REQUIRE_FALSE(refused.hasValue());
     CHECK(std::string(refused.error().code.value()) == "Document.CloseBlocked");
-    auto cancelled = fixture.kernel.scripts().cancel(request.executionId);
+    auto cancelled = fixture.kernel.execution().cancelScript(request.executionId);
     REQUIRE(cancelled.hasValue());
     CHECK(isTerminal(cancelled.value().state));
     REQUIRE(fixture.kernel.documentRuntime().close(request.documentId).hasValue());
@@ -1059,13 +1045,11 @@ TEST_CASE("ScriptRuntime evaluates structured control flow through registered po
         {},
         {}};
 
-    REQUIRE(fixture.kernel.scriptRegistry()
-                .registerDefinition(scriptDefinition(
+    REQUIRE(lasercnc::test::registerScript(fixture.kernel, scriptDefinition(
                     "script.child",
                     {scriptAssign("node.child", "included", Value {true})}))
                 .hasValue());
-    REQUIRE(fixture.kernel.scriptRegistry()
-                .registerDefinition(scriptDefinition(
+    REQUIRE(lasercnc::test::registerScript(fixture.kernel, scriptDefinition(
                     "script.main",
                     {
                         scriptAssign("node.flag", "flag", Value {true}),
@@ -1083,8 +1067,8 @@ TEST_CASE("ScriptRuntime evaluates structured control flow through registered po
     REQUIRE(fixture.kernel.bootstrap().hasValue());
 
     auto request = scriptRequest("script-execution.main", "script.main");
-    REQUIRE(fixture.kernel.scripts().startScript(request).hasValue());
-    auto completed = fixture.kernel.scripts().advance(request.executionId);
+    REQUIRE(fixture.kernel.execution().executeScript(request).hasValue());
+    auto completed = fixture.kernel.execution().advanceScript(request.executionId);
     REQUIRE(completed.hasValue());
     CHECK(completed.value().state == ScriptState::Succeeded);
     CHECK(completed.value().executedNodeCount == 9U);
@@ -1151,8 +1135,7 @@ TEST_CASE("ScriptRuntime waits for asynchronous commands and propagates cancella
             {}};
         auto wait = scriptNode("node.wait", ScriptNodeKind::Wait);
         wait.wait = ScriptWait {ScriptWaitTarget::Task, "taskId", "taskResult"};
-        REQUIRE(fixture.kernel.scriptRegistry()
-                    .registerDefinition(scriptDefinition(
+        REQUIRE(lasercnc::test::registerScript(fixture.kernel, scriptDefinition(
                         "script.async",
                         {std::move(command), std::move(wait)},
                         Value {Value::Object {{"$ref", Value {"taskResult.label"}}}}))
@@ -1160,15 +1143,15 @@ TEST_CASE("ScriptRuntime waits for asynchronous commands and propagates cancella
         REQUIRE(fixture.kernel.bootstrap().hasValue());
 
         auto request = scriptRequest("script-execution.async", "script.async");
-        REQUIRE(fixture.kernel.scripts().startScript(request).hasValue());
-        auto waiting = fixture.kernel.scripts().advance(request.executionId);
+        REQUIRE(fixture.kernel.execution().executeScript(request).hasValue());
+        auto waiting = fixture.kernel.execution().advanceScript(request.executionId);
         REQUIRE(waiting.hasValue());
         CHECK(waiting.value().state == ScriptState::Waiting);
         CHECK(waiting.value().waitingTaskId.has_value());
         CHECK(executor.queued() == 1U);
 
         executor.runAll();
-        auto completed = fixture.kernel.scripts().advance(request.executionId);
+        auto completed = fixture.kernel.execution().advanceScript(request.executionId);
         REQUIRE(completed.hasValue());
         CHECK(completed.value().state == ScriptState::Succeeded);
         REQUIRE(completed.value().result.has_value());
@@ -1187,15 +1170,14 @@ TEST_CASE("ScriptRuntime waits for asynchronous commands and propagates cancella
             {},
             {},
             {}};
-        REQUIRE(fixture.kernel.scriptRegistry()
-                    .registerDefinition(scriptDefinition("script.cancel", {std::move(command)}))
+        REQUIRE(lasercnc::test::registerScript(fixture.kernel, scriptDefinition("script.cancel", {std::move(command)}))
                     .hasValue());
         REQUIRE(fixture.kernel.bootstrap().hasValue());
 
         auto request = scriptRequest("script-execution.cancel", "script.cancel");
-        REQUIRE(fixture.kernel.scripts().startScript(request).hasValue());
-        REQUIRE(fixture.kernel.scripts().advance(request.executionId).hasValue());
-        auto cancelled = fixture.kernel.scripts().cancel(request.executionId);
+        REQUIRE(fixture.kernel.execution().executeScript(request).hasValue());
+        REQUIRE(fixture.kernel.execution().advanceScript(request.executionId).hasValue());
+        auto cancelled = fixture.kernel.execution().cancelScript(request.executionId);
         REQUIRE(cancelled.hasValue());
         CHECK(cancelled.value().state == ScriptState::Cancelled);
         REQUIRE(cancelled.value().error.has_value());
@@ -1210,7 +1192,7 @@ TEST_CASE("ScriptRuntime invokes workflows through the workflow boundary", "[scr
     auto definition = workflowDefinition(
         {assignStep("step.answer", "answer", Value {"workflow"})});
     definition.resultTemplate = Value {Value::Object {{"$ref", Value {"answer"}}}};
-    REQUIRE(fixture.kernel.workflowRegistry().registerDefinition(std::move(definition)).hasValue());
+    REQUIRE(lasercnc::test::registerWorkflow(fixture.kernel, std::move(definition)).hasValue());
 
     auto workflow = scriptNode("node.workflow", ScriptNodeKind::Workflow);
     workflow.workflow = ScriptWorkflowCall {
@@ -1220,8 +1202,7 @@ TEST_CASE("ScriptRuntime invokes workflows through the workflow boundary", "[scr
         true,
         "workflowId",
         "workflowResult"};
-    REQUIRE(fixture.kernel.scriptRegistry()
-                .registerDefinition(scriptDefinition(
+    REQUIRE(lasercnc::test::registerScript(fixture.kernel, scriptDefinition(
                     "script.workflow",
                     {std::move(workflow)},
                     Value {Value::Object {{"$ref", Value {"workflowResult"}}}}))
@@ -1229,8 +1210,8 @@ TEST_CASE("ScriptRuntime invokes workflows through the workflow boundary", "[scr
     REQUIRE(fixture.kernel.bootstrap().hasValue());
 
     auto request = scriptRequest("script-execution.workflow", "script.workflow");
-    REQUIRE(fixture.kernel.scripts().startScript(request).hasValue());
-    auto completed = fixture.kernel.scripts().advance(request.executionId);
+    REQUIRE(fixture.kernel.execution().executeScript(request).hasValue());
+    auto completed = fixture.kernel.execution().advanceScript(request.executionId);
     REQUIRE(completed.hasValue());
     CHECK(completed.value().state == ScriptState::Succeeded);
     REQUIRE(completed.value().result.has_value());
@@ -1276,14 +1257,13 @@ TEST_CASE("ScriptRuntime fails closed at the total execution node limit", "[scri
     loop.maxIterations = 10000U;
     loop.body.push_back(scriptAssign(
         "node.body", "last", Value {Value::Object {{"$ref", Value {"item"}}}}));
-    REQUIRE(fixture.kernel.scriptRegistry()
-                .registerDefinition(scriptDefinition("script.limit", {std::move(loop)}))
+    REQUIRE(lasercnc::test::registerScript(fixture.kernel, scriptDefinition("script.limit", {std::move(loop)}))
                 .hasValue());
     REQUIRE(fixture.kernel.bootstrap().hasValue());
 
     auto request = scriptRequest("script-execution.limit", "script.limit");
-    REQUIRE(fixture.kernel.scripts().startScript(request).hasValue());
-    auto failed = fixture.kernel.scripts().advance(request.executionId);
+    REQUIRE(fixture.kernel.execution().executeScript(request).hasValue());
+    auto failed = fixture.kernel.execution().advanceScript(request.executionId);
     REQUIRE(failed.hasValue());
     CHECK(failed.value().state == ScriptState::Failed);
     REQUIRE(failed.value().error.has_value());

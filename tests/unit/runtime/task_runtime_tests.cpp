@@ -10,6 +10,7 @@
 #include <lasercnc/runtime/transaction_manager.hpp>
 
 #include <catch2/catch_test_macros.hpp>
+#include "kernel_test_module.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -543,11 +544,21 @@ TEST_CASE("Scheduler bounded shutdown reports non-cooperative work", "[runtime][
 TEST_CASE("AppKernel owns freezes and stops the task stack", "[kernel][runtime][task]")
 {
     lasercnc::kernel::AppKernel kernel;
+    const auto session = validId<SessionId>("session.kernel-owned");
+    const auto capability = validId<CapabilityId>("task.kernel-owned.submit");
+    const std::array grants {capability};
+    REQUIRE(kernel.capabilities().replace(session, grants).hasValue());
     REQUIRE(kernel.executionServices()
                 .configure(std::make_shared<PassValidator>(), std::make_shared<NullLog>())
                 .hasValue());
-    REQUIRE(kernel.taskRegistry()
-                .registerHandler(
+    auto task = request("kernel-owned", "task.kernel-owned");
+    REQUIRE(lasercnc::test::registerAsyncCommand(
+                kernel,
+                lasercnc::test::taskSubmissionDescriptor(
+                    "command.kernel-owned.submit", "task.kernel-owned.submit"),
+                std::make_shared<lasercnc::test::FixedTaskCommandHandler>(task))
+                .hasValue());
+    REQUIRE(lasercnc::test::registerTask(kernel,
                     descriptor("task.kernel-owned"),
                     std::make_shared<LambdaHandler>(
                         [](const TaskRequest&, const TaskContext&) {
@@ -565,25 +576,46 @@ TEST_CASE("AppKernel owns freezes and stops the task stack", "[kernel][runtime][
     CHECK(kernel.diagnostics().frozen());
     CHECK(kernel.persistence().frozen());
 
-    auto task = request("kernel-owned", "task.kernel-owned");
-    REQUIRE(kernel.tasks().submit(task).hasValue());
-    auto completed = kernel.tasks().wait(task.taskId, 2s);
+    auto accepted = kernel.execution().executeCommand(
+        lasercnc::test::taskSubmissionRequest(
+            "request.kernel-owned.submit",
+            "command.kernel-owned.submit",
+            session,
+            "trace.kernel-owned.submit"));
+    REQUIRE(accepted.hasValue());
+    CHECK(accepted.value().taskId == task.taskId);
+    auto completed = kernel.execution().waitTask(task.taskId, 2s);
     REQUIRE(completed.hasValue());
     CHECK(completed.value().state == TaskState::Succeeded);
     REQUIRE(kernel.shutdown().hasValue());
     CHECK(kernel.state() == lasercnc::kernel::AppKernelState::Stopped);
-    CHECK_FALSE(kernel.tasks().submit(request("late", "task.kernel-owned")).hasValue());
+    CHECK_FALSE(kernel.execution().executeCommand(
+        lasercnc::test::taskSubmissionRequest(
+            "request.kernel-owned.late",
+            "command.kernel-owned.submit",
+            session,
+            "trace.kernel-owned.late")).hasValue());
 }
 
 TEST_CASE("AppKernel preserves stopping state after bounded task shutdown timeout", "[kernel][runtime][task][shutdown]")
 {
     lasercnc::kernel::AppKernel kernel;
+    const auto session = validId<SessionId>("session.kernel-slow");
+    const auto capability = validId<CapabilityId>("task.kernel-slow.submit");
+    const std::array grants {capability};
+    REQUIRE(kernel.capabilities().replace(session, grants).hasValue());
     REQUIRE(kernel.executionServices()
                 .configure(std::make_shared<PassValidator>(), std::make_shared<NullLog>())
                 .hasValue());
+    auto slow = request("kernel-slow", "task.kernel-slow");
+    REQUIRE(lasercnc::test::registerAsyncCommand(
+                kernel,
+                lasercnc::test::taskSubmissionDescriptor(
+                    "command.kernel-slow.submit", "task.kernel-slow.submit"),
+                std::make_shared<lasercnc::test::FixedTaskCommandHandler>(slow))
+                .hasValue());
     auto entered = std::make_shared<std::promise<void>>();
-    REQUIRE(kernel.taskRegistry()
-                .registerHandler(
+    REQUIRE(lasercnc::test::registerTask(kernel,
                     descriptor("task.kernel-slow"),
                     std::make_shared<LambdaHandler>(
                         [entered](const TaskRequest&, const TaskContext&) {
@@ -596,15 +628,21 @@ TEST_CASE("AppKernel preserves stopping state after bounded task shutdown timeou
     REQUIRE(executor.hasValue());
     REQUIRE(kernel.configureTaskExecutor(std::move(executor).value()).hasValue());
     REQUIRE(kernel.bootstrap().hasValue());
-    auto slow = request("kernel-slow", "task.kernel-slow");
-    REQUIRE(kernel.tasks().submit(slow).hasValue());
+    auto accepted = kernel.execution().executeCommand(
+        lasercnc::test::taskSubmissionRequest(
+            "request.kernel-slow.submit",
+            "command.kernel-slow.submit",
+            session,
+            "trace.kernel-slow.submit"));
+    REQUIRE(accepted.hasValue());
+    CHECK(accepted.value().taskId == slow.taskId);
     entered->get_future().wait();
 
     auto timedOut = kernel.shutdown(5ms);
     REQUIRE_FALSE(timedOut.hasValue());
     CHECK(std::string(timedOut.error().code.value()) == "Task.ShutdownTimeout");
     CHECK(kernel.state() == lasercnc::kernel::AppKernelState::Stopping);
-    auto completed = kernel.tasks().wait(slow.taskId, 2s);
+    auto completed = kernel.execution().waitTask(slow.taskId, 2s);
     REQUIRE(completed.hasValue());
     CHECK(completed.value().state == TaskState::Cancelled);
     REQUIRE(kernel.shutdown(2s).hasValue());
@@ -628,8 +666,7 @@ TEST_CASE("Asynchronous commands use CommandRuntime to accept one read-only task
     REQUIRE(kernel.capabilities().replace(session, grants).hasValue());
 
     std::atomic_bool receivedCommandContext {false};
-    REQUIRE(kernel.taskRegistry()
-                .registerHandler(
+    REQUIRE(lasercnc::test::registerTask(kernel,
                     descriptor("task.async-compute"),
                     std::make_shared<LambdaHandler>(
                         [&receivedCommandContext, project, document](
@@ -657,13 +694,13 @@ TEST_CASE("Asynchronous commands use CommandRuntime to accept one read-only task
         false,
         true,
         true};
-    REQUIRE(kernel.commandRegistry()
-                .registerAsyncHandler(asyncDescriptor, asyncHandler)
+    REQUIRE(lasercnc::test::registerAsyncCommand(kernel, asyncDescriptor, asyncHandler)
                 .hasValue());
     auto unsafeDescriptor = asyncDescriptor;
     unsafeDescriptor.name = validId<CommandName>("command.async-write");
     unsafeDescriptor.sideEffect = SideEffectLevel::DocumentWrite;
-    auto unsafe = kernel.commandRegistry().registerAsyncHandler(unsafeDescriptor, asyncHandler);
+    CommandRegistry isolatedRegistry;
+    auto unsafe = isolatedRegistry.registerAsyncHandler(unsafeDescriptor, asyncHandler);
     REQUIRE_FALSE(unsafe.hasValue());
     CHECK(std::string(unsafe.error().code.value()) == "Command.AsyncSideEffectUnsupported");
 
@@ -684,12 +721,12 @@ TEST_CASE("Asynchronous commands use CommandRuntime to accept one read-only task
         validId<TraceId>("trace.async-command"),
         key,
         validId<SpanId>("span.external-parent")};
-    auto accepted = kernel.commands().execute(command);
+    auto accepted = kernel.execution().executeCommand(command);
     REQUIRE(accepted.hasValue());
     CHECK_FALSE(accepted.value().commit.has_value());
     REQUIRE(accepted.value().taskId.has_value());
     CHECK(accepted.value().postExecutionErrors.empty());
-    auto completed = kernel.tasks().wait(*accepted.value().taskId, 2s);
+    auto completed = kernel.execution().waitTask(*accepted.value().taskId, 2s);
     REQUIRE(completed.hasValue());
     CHECK(completed.value().state == TaskState::Succeeded);
     CHECK(receivedCommandContext.load());
@@ -722,7 +759,7 @@ TEST_CASE("Asynchronous commands use CommandRuntime to accept one read-only task
           == 4);
 
     command.requestId = validId<RequestId>("request.async-retry");
-    auto replayed = kernel.commands().execute(command);
+    auto replayed = kernel.execution().executeCommand(command);
     REQUIRE(replayed.hasValue());
     CHECK(replayed.value().replayed);
     CHECK(replayed.value().taskId == accepted.value().taskId);
@@ -744,8 +781,7 @@ TEST_CASE("Asynchronous read-only commands preserve global execution scope", "[r
     REQUIRE(kernel.capabilities().replace(session, std::array {capability}).hasValue());
 
     std::atomic_bool receivedGlobalContext {false};
-    REQUIRE(kernel.taskRegistry()
-                .registerHandler(
+    REQUIRE(lasercnc::test::registerTask(kernel,
                     descriptor("task.async-compute"),
                     std::make_shared<LambdaHandler>(
                         [&receivedGlobalContext](
@@ -771,8 +807,7 @@ TEST_CASE("Asynchronous read-only commands preserve global execution scope", "[r
         true,
         true};
     commandDescriptor.scope = ExecutionScope::Global;
-    REQUIRE(kernel.commandRegistry()
-                .registerAsyncHandler(commandDescriptor, handler)
+    REQUIRE(lasercnc::test::registerAsyncCommand(kernel, commandDescriptor, handler)
                 .hasValue());
 
     auto executor = BsThreadPoolExecutor::create(BsThreadPoolExecutorOptions {1U});
@@ -780,7 +815,7 @@ TEST_CASE("Asynchronous read-only commands preserve global execution scope", "[r
     REQUIRE(kernel.configureTaskExecutor(std::move(executor).value()).hasValue());
     REQUIRE(kernel.bootstrap().hasValue());
 
-    auto accepted = kernel.commands().execute(CommandRequest {
+    auto accepted = kernel.execution().executeCommand(CommandRequest {
         validId<RequestId>("request.async-global"),
         ExecutionContext {session, std::nullopt, std::nullopt},
         validId<CommandName>("command.async-global"),
@@ -791,7 +826,7 @@ TEST_CASE("Asynchronous read-only commands preserve global execution scope", "[r
         validId<TraceId>("trace.async-global")});
     REQUIRE(accepted.hasValue());
     REQUIRE(accepted.value().taskId.has_value());
-    auto completed = kernel.tasks().wait(*accepted.value().taskId, 2s);
+    auto completed = kernel.execution().waitTask(*accepted.value().taskId, 2s);
     REQUIRE(completed.hasValue());
     CHECK(completed.value().state == TaskState::Succeeded);
     CHECK(receivedGlobalContext.load());
