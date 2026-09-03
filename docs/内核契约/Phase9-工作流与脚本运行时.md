@@ -2,11 +2,11 @@
 
 ## 阶段状态
 
-Phase 9 正在建设。本阶段只实现 Application Kernel 自有的 Workflow Runtime 与 Script Runtime，不实现 CAD/CAM/Machine/Process、Qt GUI、产品 CLI/RPC、AI Planner、控制器或任何上层领域模块。
+Phase 9 已验收。本阶段只实现 Application Kernel 自有的 Workflow Runtime 与 Script Runtime，不实现 CAD/CAM/Machine/Process、Qt GUI、产品 CLI/RPC、AI Planner、控制器或任何上层领域模块。
 
 蓝图要求 Workflow 支持 Variables、Dependency、Condition、Parallel、Wait、Timeout、Retry、Cancellation、Checkpoint 与 Compensation；Script 第一阶段支持 Command、Query、Variables、Result Binding、Wait、Assert、If、ForEach 与 Include。上述语义必须通过已有 CommandRuntime、QueryRuntime、TaskRuntime 和 PersistenceService 组合，不能引入新的业务状态写入入口。
 
-当前已完成 Workflow 类型/Registry、有界推进器、Task 等待、重试/取消/补偿，以及 SQLite v6 检查点和 AppKernel 恢复；Script Runtime、Workflow 观测和独立进程恢复门禁尚未完成，因此 Phase 9 尚未验收。
+当前已完成 Workflow 类型/Registry、有界推进器、Task 等待、重试/取消/补偿、SQLite v6 检查点、AppKernel 恢复、结构化 Script Runtime、全链路观测和独立进程恢复门禁。Debug、Release、重复性、Production-only 与架构扫描均已通过，Phase 9 可以作为上层模块建设前的内核基线。
 
 ## 总体边界
 
@@ -98,7 +98,7 @@ Pending -> Running -> Waiting -> Running -> Succeeded
 - 崩溃时处于 Running 的 Command 依靠稳定 IdempotencyKey 重放同一尝试；无法证明可恢复的步骤必须进入明确 Failed/Compensating，不能猜测成功。
 - 恢复不会自动执行。AppKernel Ready 后由 Host 或调用方显式 `advance()`，保持启动过程无业务副作用。
 
-当前实现由 SQLite v6 `workflow_instances` 与 `workflow_steps` 在同一事务中更新。实例 payload 和每个步骤 payload 均单独计算 SHA-256，读取时同时核对控制面状态、Workflow/Step 身份、Version、定义摘要和完整步骤集合。步骤进入 Running 的检查点必须先成功，才能调用 Command/Query/Task；写入失败会恢复内存中的执行前状态，handler 调用次数保持为零。崩溃留下的 Running 步骤在恢复后重用原 attempt，不能生成新的幂等键。
+当前实现由 SQLite v6 `workflow_instances` 与 `workflow_steps` 在同一事务中更新。实例 payload 和每个步骤 payload 均单独计算 SHA-256，读取时同时核对控制面状态、Workflow/Step 身份、Version、定义摘要和完整步骤集合。步骤进入 Running 的检查点必须先成功，才能调用 Command/Query/Task；写入失败会恢复内存中的执行前状态，handler 调用次数保持为零。崩溃留下的 Running 主步骤在恢复后归一为 Waiting，设置同一 attempt 的重放标记；补偿步骤同理保留 compensation attempt，均不能生成新的幂等键。
 
 ## Compensation
 
@@ -123,14 +123,15 @@ ScriptDefinition 是版本化结构化 AST，由 ScriptRegistry 在 Freeze 前�
 
 脚本变量具有词法作用域：Include/If 继承父作用域，ForEach 创建迭代局部作用域；只有显式 Result Binding 写回父作用域。最大 include 深度、循环次数和总执行节点数必须有界，防止无界展开。
 
-Script Runtime 第一阶段是同步、有界的结构化解释器；遇到未完成 Task/Workflow 时返回可继续的执行游标，而不是阻塞线程。游标只包含 Kernel Value 和稳定身份，可由 Workflow 检查点承载；脚本不得自行建立第二套数据库表或状态写入链。
+Script Runtime 第一阶段是同步、有界的结构化解释器；遇到未完成 Task/Workflow 时返回可继续的进程内游标，而不是阻塞线程。Script 不建立第二套数据库表或状态写入链，也不宣称跨进程恢复；需要跨进程恢复的编排必须建模为 WorkflowDefinition。未来若要持久化 Script，必须复用 Workflow 的检查点与幂等契约，不能旁路另建持久化语义。
 
 ## 生命周期、观测与权限
 
 - WorkflowRegistry/ScriptRegistry 只在 AppKernel Configuring 期注册，Ready 时 Freeze。
 - Workflow/Script 请求沿用 SessionId、ProjectId、DocumentId、TraceId、CorrelationId 和调用者 Capability；子调用创建父子 Span，但不得改变安全主体。
 - Runtime 停止接受新实例后，必须先完成已有 `advance()` 临界区；等待中的 Task 走协作取消和已有 Scheduler 有界关闭。
-- 工作流状态、步骤结果、重试、等待、补偿与脚本节点应产生低基数 Trace/Metric；观测失败不得改变业务状态机。
+- 观测链为 `script.advance -> script.node -> workflow.advance -> workflow.step -> command/query/task`，沿用同一 TraceId 并建立父子 Span；步骤/节点 Metric 只使用 kind、outcome、compensation 等低基数标签。
+- 每个 Workflow/Script 实例最多保留 256 个步骤/节点 Span，避免长循环挤占 LocalTraceService 的有界缓存；低基数聚合 Metric 仍覆盖全部执行。观测失败或达到 Span 预算不得改变业务状态机。
 
 ## 阶段验收门槛
 
@@ -142,3 +143,16 @@ Script Runtime 第一阶段是同步、有界的结构化解释器；遇到未�
 - 统一入口：脚本/工作流不得直接得到 Transaction、Document 可变引用、Persistence backend 或 handler；
 - Debug/Release 全量、Debug 重复、Production-only、架构扫描与独立进程门禁；
 - 中文契约、路线图与阶段交付文档同步更新。
+
+## 验收结论
+
+最终代码快照在 Windows、Visual Studio 2022、x64、MSVC 19.44.35216 与 Windows SDK 10.0.26100.0 下完成以下门禁：
+
+- Debug：130/130 CTest；
+- Release：130/130 CTest；
+- Debug 全集连续 20 轮：2,600 次测试执行全部通过，141.12 秒；
+- 独立进程 Workflow 恢复：Running 检查点后 `_Exit`，恢复后沿用 attempt 1，handler 与领域 Event 各发生一次，终态再次推进不重放；
+- Production-only Release：31 个 VS 工程，测试/contract/Catch 类目标为 0，Catch2 source 不存在；
+- 架构扫描：57 个 Kernel 公共头文件、108 个生产源文件通过。
+
+完整证据见 [`../阶段交付/2026-09-03-Phase9-Workflow-Script.md`](../阶段交付/2026-09-03-Phase9-Workflow-Script.md)。
