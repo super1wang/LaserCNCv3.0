@@ -66,7 +66,7 @@ QueryDescriptor queryDescriptor(
         schema("schema.query.arguments", SchemaKind::Object),
         schema("schema.query.result", SchemaKind::Object),
         validId<CapabilityId>("document.read"),
-        true,
+        ExecutionScope::Document,
         true,
         status};
 }
@@ -115,6 +115,29 @@ TEST_CASE("CapabilityService is deny by default and replaces exact grants", "[ru
     REQUIRE(capabilities.remove(session).hasValue());
     CHECK_FALSE(capabilities.authorize(session, read).hasValue());
     CHECK_FALSE(capabilities.remove(session).hasValue());
+}
+
+TEST_CASE("ExecutionContext matches only its declared scope shape", "[runtime][execution][scope]")
+{
+    const auto session = validId<SessionId>("session.scope");
+    const auto project = validId<ProjectId>("project.scope");
+    const auto document = validId<DocumentId>("document.scope");
+    const ExecutionContext sessionOnly {session, std::nullopt, std::nullopt};
+    const ExecutionContext projectOnly {session, project, std::nullopt};
+    const ExecutionContext documentContext {session, project, document};
+    const ExecutionContext danglingDocument {session, std::nullopt, document};
+
+    CHECK(contextMatchesScope(sessionOnly, ExecutionScope::Global));
+    CHECK(contextMatchesScope(sessionOnly, ExecutionScope::Session));
+    CHECK(contextMatchesScope(projectOnly, ExecutionScope::Project));
+    CHECK(contextMatchesScope(documentContext, ExecutionScope::Document));
+    CHECK_FALSE(contextMatchesScope(projectOnly, ExecutionScope::Session));
+    CHECK_FALSE(contextMatchesScope(documentContext, ExecutionScope::Project));
+    CHECK_FALSE(contextMatchesScope(danglingDocument, ExecutionScope::Document));
+    CHECK_FALSE(contextMatchesScope(
+        sessionOnly, static_cast<ExecutionScope>(255U)));
+    CHECK(std::string(executionScopeName(ExecutionScope::Document)) == "document");
+    CHECK(std::string(executionScopeName(static_cast<ExecutionScope>(255U))) == "unknown");
 }
 
 TEST_CASE("CommandRegistry resolves exact compatible and deprecated versions", "[runtime][command]")
@@ -169,6 +192,13 @@ TEST_CASE("CommandRegistry resolves exact compatible and deprecated versions", "
     unsafeSideEffect.sideEffect = SideEffectLevel::FileSystemWrite;
     CHECK_FALSE(registry.registerHandler(std::move(unsafeSideEffect), handler).hasValue());
 
+    auto invalidScope = commandDescriptor("kernel.command.project-write");
+    invalidScope.scope = ExecutionScope::Project;
+    auto invalidScopeResult = registry.registerHandler(std::move(invalidScope), handler);
+    REQUIRE_FALSE(invalidScopeResult.hasValue());
+    CHECK(std::string(invalidScopeResult.error().code.value())
+          == "Command.ScopeSideEffectMismatch");
+
     auto undoable = commandDescriptor("kernel.command.undoable");
     undoable.undoable = true;
     CHECK_FALSE(registry.registerHandler(std::move(undoable), handler).hasValue());
@@ -205,6 +235,11 @@ TEST_CASE("QueryRegistry resolves exact compatible and deprecated versions", "[r
     CHECK(std::string(duplicate.error().code.value()) == "Query.AlreadyRegistered");
     CHECK_FALSE(registry.registerHandler(
         queryDescriptor("kernel.query.null"), nullptr).hasValue());
+    auto invalidScope = queryDescriptor("kernel.query.invalid-scope");
+    invalidScope.scope = static_cast<ExecutionScope>(255U);
+    auto invalidScopeResult = registry.registerHandler(std::move(invalidScope), handler);
+    REQUIRE_FALSE(invalidScopeResult.hasValue());
+    CHECK(std::string(invalidScopeResult.error().code.value()) == "Query.InvalidScope");
     auto unsupported = registry.descriptor(QueryKey {
         validId<QueryName>("kernel.query.status"), Version {2U, 0U, 0U}},
         VersionResolution::Compatible);

@@ -568,9 +568,7 @@ CommandRequest persistentCommandRequest(
 {
     return CommandRequest {
         validId<RequestId>(requestId),
-        sessionId,
-        projectId,
-        documentId,
+        ExecutionContext {sessionId, projectId, documentId},
         validId<CommandName>("kernel.persistence.create"),
         Version {1U, 0U, 0U},
         Value {Value::Object {
@@ -654,9 +652,7 @@ CommandRequest persistentAsyncCommandRequest(
 {
     return CommandRequest {
         validId<RequestId>(requestId),
-        sessionId,
-        projectId,
-        documentId,
+        ExecutionContext {sessionId, projectId, documentId},
         validId<CommandName>("kernel.persistence.async-command"),
         Version {1U, 0U, 0U},
         Value {Value::Object {{"input", Value {"durable"}}}},

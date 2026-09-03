@@ -348,7 +348,7 @@ Result<void> configurePersistenceContract(
             std::move(getArguments).value(),
             std::move(getResult).value(),
             requiredId<CapabilityId>("document.read"),
-            true,
+            ExecutionScope::Document,
             true},
         std::make_shared<GetObjectHandler>());
     if(!query) {
@@ -391,9 +391,10 @@ CommandRequest persistenceCommand(
 {
     return CommandRequest {
         requiredId<RequestId>(requestId),
-        requiredId<SessionId>("session.persistence-contract"),
-        requiredId<ProjectId>("project.persistence-contract"),
-        requiredId<DocumentId>("document.persistence-contract"),
+        ExecutionContext {
+            requiredId<SessionId>("session.persistence-contract"),
+            requiredId<ProjectId>("project.persistence-contract"),
+            requiredId<DocumentId>("document.persistence-contract")},
         requiredId<CommandName>("kernel.persistence.object.put"),
         Version {1U, 0U, 0U},
         Value {Value::Object {
@@ -411,9 +412,10 @@ Result<Value> queryPersistentObject(
 {
     auto queried = kernel.queries().execute(QueryRequest {
         requiredId<RequestId>(requestId),
-        requiredId<SessionId>("session.persistence-contract"),
-        requiredId<ProjectId>("project.persistence-contract"),
-        requiredId<DocumentId>("document.persistence-contract"),
+        ExecutionContext {
+            requiredId<SessionId>("session.persistence-contract"),
+            requiredId<ProjectId>("project.persistence-contract"),
+            requiredId<DocumentId>("document.persistence-contract")},
         requiredId<QueryName>("kernel.persistence.object.get"),
         Version {1U, 0U, 0U},
         Value {Value::Object {{"id", Value {objectId}}}},
@@ -499,7 +501,7 @@ int runRoundTrip()
             std::move(getArguments).value(),
             std::move(getResult).value(),
             requiredId<CapabilityId>("document.read"),
-            true,
+            ExecutionScope::Document,
             true},
         std::make_shared<GetObjectHandler>());
     if(!registeredQuery.hasValue()) {
@@ -536,9 +538,7 @@ int runRoundTrip()
     }
     auto command = kernel.commands().execute(CommandRequest {
         requiredId<RequestId>("request.cli.command"),
-        session,
-        project,
-        document,
+        ExecutionContext {session, project, document},
         requiredId<CommandName>("kernel.contract.object.put"),
         Version {1U, 0U, 0U},
         std::move(parsedArguments).value(),
@@ -561,9 +561,7 @@ int runRoundTrip()
     }
     auto query = kernel.queries().execute(QueryRequest {
         requiredId<RequestId>("request.cli.query"),
-        session,
-        project,
-        document,
+        ExecutionContext {session, project, document},
         requiredId<QueryName>("kernel.contract.object.get"),
         Version {1U, 0U, 0U},
         std::move(queryArguments).value(),
@@ -685,9 +683,7 @@ int runTaskRoundTrip()
     }
     auto accepted = kernel.commands().execute(CommandRequest {
         requiredId<RequestId>("request.cli.task"),
-        session,
-        project,
-        document,
+        ExecutionContext {session, project, document},
         requiredId<CommandName>("kernel.contract.compute.accept"),
         Version {1U, 0U, 0U},
         std::move(parsed).value(),

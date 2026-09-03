@@ -6,6 +6,7 @@ target_sources(
         transaction/transaction_manager.cpp
         execution/capability_service.cpp
         execution/execution_services.cpp
+        execution/execution_contract.cpp
         execution/command_registry.cpp
         execution/query_registry.cpp
         messaging/event_bus.cpp

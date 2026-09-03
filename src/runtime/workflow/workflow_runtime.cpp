@@ -1414,9 +1414,10 @@ private:
             }
             auto response = commands_.execute(CommandRequest {
                 std::move(requestId).value(),
-                instance.request.sessionId,
-                instance.request.projectId,
-                instance.request.documentId,
+                ExecutionContext {
+                    instance.request.sessionId,
+                    instance.request.projectId,
+                    instance.request.documentId},
                 step.command->command,
                 step.command->version,
                 std::move(arguments).value(),
@@ -1466,9 +1467,10 @@ private:
             }
             auto response = queries_.execute(QueryRequest {
                 std::move(requestId).value(),
-                instance.request.sessionId,
-                instance.request.projectId,
-                instance.request.documentId,
+                ExecutionContext {
+                    instance.request.sessionId,
+                    instance.request.projectId,
+                    instance.request.documentId},
                 step.query->query,
                 step.query->version,
                 std::move(arguments).value(),
@@ -1661,9 +1663,10 @@ private:
         }
         auto response = commands_.execute(CommandRequest {
             std::move(requestId).value(),
-            instance.request.sessionId,
-            instance.request.projectId,
-            instance.request.documentId,
+            ExecutionContext {
+                instance.request.sessionId,
+                instance.request.projectId,
+                instance.request.documentId},
             call.command,
             call.version,
             std::move(arguments).value(),

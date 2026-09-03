@@ -1059,9 +1059,10 @@ private:
         }
         const CommandRequest request {
             std::move(requestId).value(),
-            instance.request.sessionId,
-            instance.request.projectId,
-            instance.request.documentId,
+            ExecutionContext {
+                instance.request.sessionId,
+                instance.request.projectId,
+                instance.request.documentId},
             node.command->command,
             node.command->version,
             std::move(arguments).value(),
@@ -1135,9 +1136,10 @@ private:
         }
         const QueryRequest request {
             std::move(requestId).value(),
-            instance.request.sessionId,
-            instance.request.projectId,
-            instance.request.documentId,
+            ExecutionContext {
+                instance.request.sessionId,
+                instance.request.projectId,
+                instance.request.documentId},
             node.query->query,
             node.query->version,
             std::move(arguments).value(),

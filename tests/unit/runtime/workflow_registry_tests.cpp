@@ -261,7 +261,7 @@ QueryDescriptor queryDescriptor(const char* name)
         schema("schema.workflow.query.arguments"),
         schema("schema.workflow.query.result"),
         validId<CapabilityId>("document.read"),
-        true,
+        ExecutionScope::Document,
         true};
 }
 

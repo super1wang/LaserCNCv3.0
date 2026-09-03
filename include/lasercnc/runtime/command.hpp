@@ -45,13 +45,12 @@ struct CommandDescriptor final {
     bool deterministic{false};
     bool idempotent{false};
     ContractStatus status{ContractStatus::Active};
+    ExecutionScope scope{ExecutionScope::Document};
 };
 
 struct CommandRequest final {
     kernel::RequestId requestId;
-    kernel::SessionId sessionId;
-    kernel::ProjectId projectId;
-    kernel::DocumentId documentId;
+    ExecutionContext context;
     kernel::CommandName command;
     foundation::Version version;
     foundation::Value arguments;

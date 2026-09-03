@@ -44,6 +44,13 @@ foundation::Result<void> QueryRegistry::registerHandler(
             "A query handler is required",
             key));
     }
+    if(!validExecutionScope(descriptor.scope)) {
+        return foundation::Result<void>::failure(queryError(
+            "Query.InvalidScope",
+            foundation::ErrorCategory::Validation,
+            "The query scope is invalid",
+            key));
+    }
     std::unique_lock lock(mutex_);
     if(frozen_) {
         return foundation::Result<void>::failure(queryError(

@@ -19,16 +19,14 @@ struct QueryDescriptor final {
     foundation::Schema arguments;
     foundation::Schema result;
     kernel::CapabilityId capability;
-    bool requiresDocument{true};
+    ExecutionScope scope{ExecutionScope::Document};
     bool deterministic{false};
     ContractStatus status{ContractStatus::Active};
 };
 
 struct QueryRequest final {
     kernel::RequestId requestId;
-    kernel::SessionId sessionId;
-    kernel::ProjectId projectId;
-    std::optional<kernel::DocumentId> documentId;
+    ExecutionContext context;
     kernel::QueryName query;
     foundation::Version version;
     foundation::Value arguments;

@@ -114,9 +114,7 @@ void recordCommandMetrics(
 }
 
 struct RequestSignature final {
-    kernel::SessionId sessionId;
-    kernel::ProjectId projectId;
-    kernel::DocumentId documentId;
+    ExecutionContext context;
     kernel::CommandName command;
     foundation::Version version;
     VersionResolution versionResolution{VersionResolution::Exact};
@@ -129,9 +127,7 @@ struct RequestSignature final {
 RequestSignature signatureOf(const CommandRequest& request)
 {
     return RequestSignature {
-        request.sessionId,
-        request.projectId,
-        request.documentId,
+        request.context,
         request.command,
         request.version,
         request.versionResolution,
@@ -146,13 +142,17 @@ foundation::Value persistentSignature(
     return foundation::Value {foundation::Value::Object {
         {"arguments", request.arguments},
         {"command", foundation::Value {std::string(request.command.value())}},
-        {"documentId", foundation::Value {std::string(request.documentId.value())}},
+        {"documentId", request.context.documentId.has_value()
+            ? foundation::Value {std::string(request.context.documentId->value())}
+            : foundation::Value {}},
         {"expectedProjectRevision", request.expectedRevision.has_value()
             ? foundation::Value {std::to_string(request.expectedRevision->value())}
             : foundation::Value {}},
         {"format", foundation::Value {"lasercnc.command-signature.v2"}},
-        {"projectId", foundation::Value {std::string(request.projectId.value())}},
-        {"sessionId", foundation::Value {std::string(request.sessionId.value())}},
+        {"projectId", request.context.projectId.has_value()
+            ? foundation::Value {std::string(request.context.projectId->value())}
+            : foundation::Value {}},
+        {"sessionId", foundation::Value {std::string(request.context.sessionId.value())}},
         {"requestedVersion", foundation::Value {request.version.toString()}},
         {"resolvedVersion", foundation::Value {descriptor.version.toString()}},
         {"versionResolution", foundation::Value {
@@ -216,8 +216,11 @@ observability::LogRecord commandLog(
         "command.execute",
         "Command execution completed",
         observability::LogContext {
-            std::string(request.sessionId.value()),
-            std::string(request.projectId.value()),
+            std::string(request.context.sessionId.value()),
+            request.context.projectId.has_value()
+                ? std::optional<std::string> {
+                    std::string(request.context.projectId->value())}
+                : std::nullopt,
             std::string(request.requestId.value()),
             std::nullopt,
             std::nullopt,
@@ -334,6 +337,14 @@ public:
         }
         const auto& descriptor = entry.value().descriptor;
 
+        if(!contextMatchesScope(request.context, descriptor.scope)) {
+            return foundation::Result<CommandResponse>::failure(commandError(
+                "Command.ScopeMismatch",
+                foundation::ErrorCategory::Validation,
+                "The execution context does not match the command scope",
+                request));
+        }
+
         auto argumentsValid = services.value().schemaValidator->validate(
             descriptor.arguments, request.arguments);
         if(!argumentsValid.hasValue()) {
@@ -349,7 +360,8 @@ public:
             logFailure(services.value(), request, &descriptor.version);
             return foundation::Result<CommandResponse>::failure(std::move(error));
         }
-        auto authorized = capabilities.authorize(request.sessionId, descriptor.capability);
+        auto authorized = capabilities.authorize(
+            request.context.sessionId, descriptor.capability);
         if(!authorized.hasValue()) {
             logFailure(services.value(), request, &descriptor.version);
             return foundation::Result<CommandResponse>::failure(std::move(authorized).error());
@@ -448,8 +460,8 @@ public:
             }
             plan.task.traceId = request.traceId;
             plan.task.correlationId = request.correlationId;
-            plan.task.projectId = request.projectId;
-            plan.task.documentId = request.documentId;
+            plan.task.projectId = request.context.projectId;
+            plan.task.documentId = request.context.documentId;
             plan.task.expectedProjectRevision = request.expectedRevision;
             plan.task.parentSpanId = activeSpanId.has_value()
                 ? activeSpanId
@@ -523,12 +535,12 @@ public:
             return foundation::Result<CommandResponse>::failure(std::move(transactionId).error());
         }
         auto transaction = transactions.begin(
-            std::move(transactionId).value(), request.documentId, preconditions);
+            std::move(transactionId).value(), *request.context.documentId, preconditions);
         if(!transaction.hasValue()) {
             logFailure(services.value(), request, &descriptor.version);
             return foundation::Result<CommandResponse>::failure(std::move(transaction).error());
         }
-        if(transaction.value()->projectId() != request.projectId) {
+        if(transaction.value()->projectId() != *request.context.projectId) {
             static_cast<void>(transaction.value()->rollback());
             auto error = commandError(
                 "Command.ProjectMismatch",

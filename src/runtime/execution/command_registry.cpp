@@ -51,11 +51,25 @@ foundation::Result<void> CommandRegistry::registerHandler(
             "A synchronous command requires an ICommandHandler",
             key));
     }
+    if(!validExecutionScope(descriptor.scope)) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.InvalidScope",
+            foundation::ErrorCategory::Validation,
+            "The command scope is invalid",
+            key));
+    }
     if(descriptor.sideEffect != SideEffectLevel::DocumentWrite) {
         return foundation::Result<void>::failure(commandError(
             "Command.SideEffectUnsupported",
             foundation::ErrorCategory::Validation,
             "Phase 5 command handlers must use the document transaction boundary",
+            key));
+    }
+    if(descriptor.scope != ExecutionScope::Document) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.ScopeSideEffectMismatch",
+            foundation::ErrorCategory::Validation,
+            "Document-write commands require document scope",
             key));
     }
     if(descriptor.undoable) {
@@ -104,6 +118,13 @@ foundation::Result<void> CommandRegistry::registerAsyncHandler(
             "Command.HandlerModeMismatch",
             foundation::ErrorCategory::Validation,
             "An asynchronous command requires an IAsyncCommandHandler",
+            key));
+    }
+    if(!validExecutionScope(descriptor.scope)) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.InvalidScope",
+            foundation::ErrorCategory::Validation,
+            "The command scope is invalid",
             key));
     }
     if(descriptor.sideEffect != SideEffectLevel::ReadOnly) {

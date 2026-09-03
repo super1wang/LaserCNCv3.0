@@ -675,9 +675,7 @@ TEST_CASE("Asynchronous commands use CommandRuntime to accept one read-only task
     const auto key = validId<IdempotencyKey>("idempotency.async-command");
     auto command = CommandRequest {
         validId<RequestId>("request.async-first"),
-        session,
-        project,
-        document,
+        ExecutionContext {session, project, document},
         validId<CommandName>("command.async-compute"),
         Version {1U, 0U, 0U},
         Value {Value::Object {}},
@@ -732,5 +730,71 @@ TEST_CASE("Asynchronous commands use CommandRuntime to accept one read-only task
     CHECK(kernel.traces().records().size() == 3U);
     CHECK(kernel.traces().exporterFailures().size() == 3U);
     CHECK(kernel.metrics().exporterFailures().size() == 6U);
+    REQUIRE(kernel.shutdown().hasValue());
+}
+
+TEST_CASE("Asynchronous read-only commands preserve global execution scope", "[runtime][command][task][scope]")
+{
+    lasercnc::kernel::AppKernel kernel;
+    const auto session = validId<SessionId>("session.async-global");
+    const auto capability = validId<CapabilityId>("system.compute");
+    REQUIRE(kernel.executionServices()
+                .configure(std::make_shared<PassValidator>(), std::make_shared<NullLog>())
+                .hasValue());
+    REQUIRE(kernel.capabilities().replace(session, std::array {capability}).hasValue());
+
+    std::atomic_bool receivedGlobalContext {false};
+    REQUIRE(kernel.taskRegistry()
+                .registerHandler(
+                    descriptor("task.async-compute"),
+                    std::make_shared<LambdaHandler>(
+                        [&receivedGlobalContext](
+                            const TaskRequest& task,
+                            const TaskContext& context) {
+                            receivedGlobalContext.store(
+                                !task.projectId.has_value()
+                                && !task.documentId.has_value()
+                                && !context.document.has_value());
+                            return Result<Value>::success(Value {"computed"});
+                        }))
+                .hasValue());
+    auto handler = std::make_shared<AsyncPlanHandler>();
+    auto commandDescriptor = CommandDescriptor {
+        validId<CommandName>("command.async-global"),
+        Version {1U, 0U, 0U},
+        schema("schema.async-global.arguments"),
+        schema("schema.async-global.acceptance"),
+        ExecutionMode::Asynchronous,
+        SideEffectLevel::ReadOnly,
+        capability,
+        false,
+        true,
+        true};
+    commandDescriptor.scope = ExecutionScope::Global;
+    REQUIRE(kernel.commandRegistry()
+                .registerAsyncHandler(commandDescriptor, handler)
+                .hasValue());
+
+    auto executor = BsThreadPoolExecutor::create(BsThreadPoolExecutorOptions {1U});
+    REQUIRE(executor.hasValue());
+    REQUIRE(kernel.configureTaskExecutor(std::move(executor).value()).hasValue());
+    REQUIRE(kernel.bootstrap().hasValue());
+
+    auto accepted = kernel.commands().execute(CommandRequest {
+        validId<RequestId>("request.async-global"),
+        ExecutionContext {session, std::nullopt, std::nullopt},
+        validId<CommandName>("command.async-global"),
+        Version {1U, 0U, 0U},
+        Value {Value::Object {}},
+        std::nullopt,
+        validId<CorrelationId>("correlation.async-global"),
+        validId<TraceId>("trace.async-global")});
+    REQUIRE(accepted.hasValue());
+    REQUIRE(accepted.value().taskId.has_value());
+    auto completed = kernel.tasks().wait(*accepted.value().taskId, 2s);
+    REQUIRE(completed.hasValue());
+    CHECK(completed.value().state == TaskState::Succeeded);
+    CHECK(receivedGlobalContext.load());
+
     REQUIRE(kernel.shutdown().hasValue());
 }

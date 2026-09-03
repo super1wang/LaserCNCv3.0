@@ -15,6 +15,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace lasercnc::foundation;
@@ -220,6 +221,18 @@ public:
     std::shared_future<void> release;
 };
 
+class ScopeQueryHandler final : public IQueryHandler {
+public:
+    Result<Value> execute(const QueryRequest&, const QueryContext& context) override
+    {
+        ++calls;
+        return Result<Value>::success(Value {Value::Object {
+            {"hasDocument", Value {context.document.has_value()}}}});
+    }
+
+    std::atomic_size_t calls{0U};
+};
+
 class FailingHandler final : public ICommandHandler {
 public:
     explicit FailingHandler(bool shouldThrow) : throws(shouldThrow) {}
@@ -260,7 +273,9 @@ CommandDescriptor commandDescriptor(
         true};
 }
 
-QueryDescriptor queryDescriptor(const char* name, bool requiresDocument = true)
+QueryDescriptor queryDescriptor(
+    const char* name,
+    ExecutionScope scope = ExecutionScope::Document)
 {
     return QueryDescriptor {
         validId<QueryName>(name),
@@ -268,7 +283,7 @@ QueryDescriptor queryDescriptor(const char* name, bool requiresDocument = true)
         schema("schema.query.arguments.object", SchemaKind::Object),
         schema("schema.query.result.object", SchemaKind::Object),
         validId<CapabilityId>("document.read"),
-        requiresDocument,
+        scope,
         true};
 }
 
@@ -284,9 +299,7 @@ CommandRequest commandRequest(
 {
     return CommandRequest {
         validId<RequestId>(requestId),
-        session,
-        project,
-        document,
+        ExecutionContext {session, project, document},
         validId<CommandName>(command),
         Version {1U, 0U, 0U},
         Value {Value::Object {
@@ -307,9 +320,7 @@ QueryRequest queryRequest(
 {
     return QueryRequest {
         validId<RequestId>("request.query"),
-        session,
-        project,
-        document,
+        ExecutionContext {session, project, document},
         validId<QueryName>("kernel.object.get"),
         Version {1U, 0U, 0U},
         Value {Value::Object {{"id", Value {objectId}}}},
@@ -524,11 +535,75 @@ TEST_CASE("Command and query requests resolve compatible deprecated contracts ex
     REQUIRE(fixture.kernel.shutdown().hasValue());
 }
 
+TEST_CASE("QueryRuntime enforces global session project and document scopes", "[runtime][query][scope]")
+{
+    RuntimeFixture fixture;
+    auto handler = std::make_shared<ScopeQueryHandler>();
+    const std::array scopes {
+        std::pair {"kernel.scope.global", ExecutionScope::Global},
+        std::pair {"kernel.scope.session", ExecutionScope::Session},
+        std::pair {"kernel.scope.project", ExecutionScope::Project},
+        std::pair {"kernel.scope.document", ExecutionScope::Document}};
+    for(const auto& [name, scope] : scopes) {
+        REQUIRE(fixture.kernel.queryRegistry().registerHandler(
+            queryDescriptor(name, scope), handler).hasValue());
+    }
+    REQUIRE(fixture.kernel.bootstrap().hasValue());
+
+    auto execute = [&](const char* requestId, const char* query, ExecutionContext context) {
+        return fixture.kernel.queries().execute(QueryRequest {
+            validId<RequestId>(requestId),
+            std::move(context),
+            validId<QueryName>(query),
+            Version {1U, 0U, 0U},
+            Value {Value::Object {}},
+            validId<CorrelationId>("correlation.scope"),
+            validId<TraceId>("trace.scope")});
+    };
+
+    CHECK(execute(
+        "request.scope.global",
+        "kernel.scope.global",
+        ExecutionContext {fixture.session, std::nullopt, std::nullopt}).hasValue());
+    CHECK(execute(
+        "request.scope.session",
+        "kernel.scope.session",
+        ExecutionContext {fixture.session, std::nullopt, std::nullopt}).hasValue());
+    CHECK(execute(
+        "request.scope.project",
+        "kernel.scope.project",
+        ExecutionContext {fixture.session, fixture.project, std::nullopt}).hasValue());
+    CHECK(execute(
+        "request.scope.document",
+        "kernel.scope.document",
+        ExecutionContext {fixture.session, fixture.project, fixture.document}).hasValue());
+    CHECK(handler->calls == 4U);
+
+    auto mismatched = execute(
+        "request.scope.mismatch",
+        "kernel.scope.global",
+        ExecutionContext {fixture.session, fixture.project, std::nullopt});
+    REQUIRE_FALSE(mismatched.hasValue());
+    CHECK(std::string(mismatched.error().code.value()) == "Query.ScopeMismatch");
+    CHECK(handler->calls == 4U);
+
+    REQUIRE(fixture.kernel.shutdown().hasValue());
+}
+
 TEST_CASE("CommandRuntime enforces schema capability project and revision before writes", "[runtime][command]")
 {
     RuntimeFixture fixture;
     fixture.registerStandardHandlers();
     REQUIRE(fixture.kernel.bootstrap().hasValue());
+
+    auto invalidScope = commandRequest(
+        "request.invalid-scope", fixture.project, fixture.document, fixture.session,
+        "kernel.object.create", "object.invalid-scope");
+    invalidScope.context.documentId.reset();
+    auto invalidScopeResult = fixture.kernel.commands().execute(invalidScope);
+    REQUIRE_FALSE(invalidScopeResult.hasValue());
+    CHECK(std::string(invalidScopeResult.error().code.value()) == "Command.ScopeMismatch");
+    CHECK(fixture.create->calls == 0U);
 
     auto invalidSchema = commandRequest(
         "request.invalid-schema", fixture.project, fixture.document, fixture.session,
@@ -734,10 +809,10 @@ TEST_CASE("QueryRuntime requires capability and an immutable owned document", "[
 
     auto missingDocument = queryRequest(
         fixture.project, fixture.document, fixture.session, "object.missing");
-    missingDocument.documentId.reset();
+    missingDocument.context.documentId.reset();
     auto missing = fixture.kernel.queries().execute(missingDocument);
     REQUIRE_FALSE(missing.hasValue());
-    CHECK(std::string(missing.error().code.value()) == "Query.DocumentRequired");
+    CHECK(std::string(missing.error().code.value()) == "Query.ScopeMismatch");
 
     const std::array<CapabilityId, 0U> noCapabilities {};
     REQUIRE(fixture.kernel.capabilities().replace(fixture.session, noCapabilities).hasValue());
@@ -771,15 +846,13 @@ TEST_CASE("AppKernel refuses shutdown while a query execution is active", "[kern
     auto handler = std::make_shared<BlockingQueryHandler>(
         entered, release.get_future().share());
     REQUIRE(fixture.kernel.queryRegistry().registerHandler(
-        queryDescriptor("kernel.blocking-query", false), handler).hasValue());
+        queryDescriptor("kernel.blocking-query", ExecutionScope::Session), handler).hasValue());
     REQUIRE(fixture.kernel.bootstrap().hasValue());
 
     auto running = std::async(std::launch::async, [&]() {
         return fixture.kernel.queries().execute(QueryRequest {
             validId<RequestId>("request.blocking-query"),
-            fixture.session,
-            fixture.project,
-            std::nullopt,
+            ExecutionContext {fixture.session, std::nullopt, std::nullopt},
             validId<QueryName>("kernel.blocking-query"),
             Version {1U, 0U, 0U},
             Value {Value::Object {}},

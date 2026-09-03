@@ -124,8 +124,11 @@ observability::LogRecord queryLog(
         "query.execute",
         "Query execution completed",
         observability::LogContext {
-            std::string(request.sessionId.value()),
-            std::string(request.projectId.value()),
+            std::string(request.context.sessionId.value()),
+            request.context.projectId.has_value()
+                ? std::optional<std::string> {
+                    std::string(request.context.projectId->value())}
+                : std::nullopt,
             std::string(request.requestId.value()),
             std::nullopt,
             std::nullopt,
@@ -191,35 +194,34 @@ public:
         }
         const auto& descriptor = entry.value().descriptor;
 
+        if(!contextMatchesScope(request.context, descriptor.scope)) {
+            return foundation::Result<QueryResponse>::failure(queryError(
+                "Query.ScopeMismatch",
+                foundation::ErrorCategory::Validation,
+                "The execution context does not match the query scope",
+                request));
+        }
+
         auto argumentsValid = services.value().schemaValidator->validate(
             descriptor.arguments, request.arguments);
         if(!argumentsValid.hasValue()) {
             logFailure(services.value(), request, &descriptor.version);
             return foundation::Result<QueryResponse>::failure(std::move(argumentsValid).error());
         }
-        auto authorized = capabilities.authorize(request.sessionId, descriptor.capability);
+        auto authorized = capabilities.authorize(
+            request.context.sessionId, descriptor.capability);
         if(!authorized.hasValue()) {
             logFailure(services.value(), request, &descriptor.version);
             return foundation::Result<QueryResponse>::failure(std::move(authorized).error());
         }
-        if(descriptor.requiresDocument && !request.documentId.has_value()) {
-            auto error = queryError(
-                "Query.DocumentRequired",
-                foundation::ErrorCategory::Validation,
-                "The query requires a document snapshot",
-                request);
-            logFailure(services.value(), request, &descriptor.version);
-            return foundation::Result<QueryResponse>::failure(std::move(error));
-        }
-
         QueryContext context;
-        if(request.documentId.has_value()) {
-            auto document = documents.snapshot(*request.documentId);
+        if(request.context.documentId.has_value()) {
+            auto document = documents.snapshot(*request.context.documentId);
             if(!document.hasValue()) {
                 logFailure(services.value(), request, &descriptor.version);
                 return foundation::Result<QueryResponse>::failure(std::move(document).error());
             }
-            if(document.value().projectId() != request.projectId) {
+            if(document.value().projectId() != *request.context.projectId) {
                 auto error = queryError(
                     "Query.ProjectMismatch",
                     foundation::ErrorCategory::Validation,

@@ -5,6 +5,8 @@
 
 #include <compare>
 #include <cstdint>
+#include <optional>
+#include <string_view>
 
 namespace lasercnc::runtime {
 
@@ -17,6 +19,27 @@ enum class ContractStatus : std::uint8_t {
     Active,
     Deprecated
 };
+
+enum class ExecutionScope : std::uint8_t {
+    Global,
+    Session,
+    Project,
+    Document
+};
+
+struct ExecutionContext final {
+    kernel::SessionId sessionId;
+    std::optional<kernel::ProjectId> projectId;
+    std::optional<kernel::DocumentId> documentId;
+
+    friend bool operator==(const ExecutionContext&, const ExecutionContext&) = default;
+};
+
+[[nodiscard]] std::string_view executionScopeName(ExecutionScope scope) noexcept;
+[[nodiscard]] bool validExecutionScope(ExecutionScope scope) noexcept;
+[[nodiscard]] bool contextMatchesScope(
+    const ExecutionContext& context,
+    ExecutionScope scope) noexcept;
 
 struct CommandKey final {
     kernel::CommandName name;
