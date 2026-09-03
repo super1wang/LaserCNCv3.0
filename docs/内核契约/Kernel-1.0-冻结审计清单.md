@@ -2,7 +2,7 @@
 
 ## 当前结论
 
-尚未冻结。本表逐项承接《Kernel 1.0 最终收口设计规划》第 5 节，列出待终审的实现与测试证据入口；入口存在或历史阶段已验收，不自动等于最终版本已满足条件。F5A 的 ASan 已通过修正后的 261/261，但普通双配置回归、连续重复矩阵和本表逐项签核尚未完成。
+尚未冻结。本表逐项承接《Kernel 1.0 最终收口设计规划》第 5 节，列出待终审的实现与测试证据入口；入口存在或历史阶段已验收，不自动等于最终版本已满足条件。F5A 固定版本已通过 ASan 262/262、Debug/Release 各 259/259、Production-only 与架构门禁，但 Host 状态写入口、独立项目生命周期范围、最终连续重复矩阵和本表逐项签核尚未闭合。
 
 ## 需要先明确的验收范围
 
@@ -13,6 +13,8 @@
 ## 第 5 节逐项证据索引
 
 以下表格为审计索引，不是最终通过声明。终审需同时核对源码/断言及最终版本的实际测试记录。
+
+补充发现：Host 仍能通过可变 History/Persistence 调用底层状态写接口。该问题与 Project 范围确认独立，须修复后再签核 TX3/ET4；具体可达路径和后续门禁见 [F5B Host 状态写入口审计](K10F-F5B-Host状态写入口审计.md)。
 
 | 编号 | 规划要求 | 当前实现与证据入口 | 终审注意点 |
 | --- | --- | --- | --- |
@@ -25,11 +27,11 @@
 | ST3 | Revision 冲突 fail-closed | RevisionManager、TransactionManager；版本冲突及八路竞争用例 | 唯一持久胜者，失败候选无状态残留 |
 | TX1 | DocumentWrite 唯一 Transaction 链 | AppKernel 私有 transactions_、CommandRuntime、Workflow/Script 调度 | AppKernel 不公开可变存储/事务管理器 |
 | TX2 | Undo/Redo 正式可用 | HistoryRuntime、内置 edit.undo/redo；history_runtime_tests | 覆盖变更形态、分支与 barrier，不仅单次返回值 |
-| TX3 | Journal/History/Revision 一致 | TransactionManager + PersistenceService；F1A/F2A/F3 | 提交前后故障及实际重启材料一致 |
+| TX3 | Journal/History/Revision 一致 | TransactionManager + PersistenceService；F1A/F2A/F3 | 合法执行链已覆盖；Host 可变 History.restore 旁路待封闭 |
 | ET1 | ModuleRegistrar | module_registrar.hpp/cpp；声明/实际贡献用例 | 首次被忽略的注册错误也必须使启动失败 |
 | ET2 | Registry ownership audit | ModuleRuntime、ModuleContributionSnapshot；九类模块贡献/回滚用例 | Event/Capability 是贡献审计事实；安全 Guard 是 Kernel 配置表，不冒充新增领域 Registry |
 | ET3 | Registry Ready 后冻结 | AppKernel bootstrap；各 Registry frozen 与配置拒绝用例 | 包括 ObjectType 与 EffectGuard；不同 Registry 的负责者须明确 |
-| ET4 | Host 无直接 Task/Transaction 旁路 | AppKernel、ExecutionGateway、Scheduler 私有 schedule；类型断言与架构扫描 | Gateway 只观察/取消 Task，不提供提交接口 |
+| ET4 | Host 无直接 Task/Transaction 旁路 | AppKernel、ExecutionGateway、Scheduler 私有 schedule；类型断言与架构扫描 | Gateway 无提交接口；Host 可变 Persistence 底层写入口仍待收紧 |
 | PE1 | Idempotency 跨重启 | PersistenceService、CommandRuntime；持久幂等与 F2A | 签名绑定版本、scope 与请求内容 |
 | PE2 | Snapshot/Journal crash-safe | SQLite/Snapshot 适配器、恢复链；F1/F2 独立进程 | 软件进程终止范围，不扩大为物理掉电证明 |
 | PE3 | Workflow recovery | workflow_persistence、WorkflowRuntime；F2B 三进程与 checkpoint 故障 | 固定 attempt，不自动重放不安全外部副作用 |
@@ -43,7 +45,7 @@
 | DA1 | ObjectType version/migration | ObjectTypeRegistry、版本化 ObjectRecord；迁移与恢复准入用例 | 显式迁移、完整候选/引用验证，失败无半迁移 |
 | DA2 | AssetRef/Data Plane | AssetRef、IAssetStore、资产状态测试和 F2C | 大资产在文件侧，历史前像引用也验证 |
 | DA3 | 第三方类型不进入 Kernel API | VerifyKernelBoundaries、OCCT 负例 | 正扫描与反例同跑，不能只看链接成功 |
-| RE1 | Debug/Release 全绿 | 最终源码对应双配置全集日志 | 修改测试预算后的版本必须重跑 |
+| RE1 | Debug/Release 全绿 | F5A 固定版本双配置各 259/259 | F5B 修改入口后必须重新固定版本并重跑 |
 | RE2 | 无 flaky test | 最终连续重复矩阵 | 只声明记录范围内零 flaky；保留开发期失败及修正 |
 | RE3 | 故障注入全绿 | F1A/F1B 矩阵及最终专项 | 检查组合状态，不能只断言 Error |
 | RE4 | 生命周期压力全绿 | F3 十二用例，固定参与者/轮次/同步序 | Workflow 批次持久化测试预算已改为 30 秒，其他默认 5 秒 |

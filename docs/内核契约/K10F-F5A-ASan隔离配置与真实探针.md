@@ -2,7 +2,7 @@
 
 ## 状态
 
-F5 进行中。已建立 Windows MSVC x64 RelWithDebInfo 隔离配置，三个真实探针、完整插桩构建及修正测试等待预算后的先行 ASan 全集 261/261 通过。随后审计发现并强化了进程退出码门禁，新增后的最终全集与重复矩阵仍须验证，不能宣布 F5 或 Kernel Frozen。未修改生产内核 API/实现，不增加上层模块。
+F5A 工程配置与测试门禁检查点通过，F5 整体仍进行中。已建立 Windows MSVC x64 RelWithDebInfo 隔离配置，修正压力测试等待预算并强化进程退出判定；固定代码版本的 ASan 262/262、Debug 259/259、Release 259/259、Production-only 与架构扫描均通过。连续重复认证及 Host 写入口收紧尚未完成，不能宣布 F5 或 Kernel Frozen。F5A 未修改生产内核 API/实现，不增加上层模块。
 
 ## 构建与边界
 
@@ -55,8 +55,32 @@ CTest 驱动 `tests/cmake/verify_asan_probe.cmake` 为每次执行保留独立 s
 
 移除所有该正向覆盖属性。直接运行的 Benchmark 与两个 headless roundtrip 改由 `RunVerifiedProgram.cmake` 同时检查零退出码、stdout 成功标志及无 ASan 错误报告；崩溃/恢复驱动保留内部退出码与成功标志双校验，改用严格字符串退出码比较，并显式拒绝 ASan 错误。故障生产者的预期退出码仍为 86，不将正常退出替代实际崩溃点。
 
-新增 `architecture.verified_program_exit_guards`，覆盖健康、输出标志后失败、缺少标志以及“退出 0 但出现合成 ASan 错误文本”四种驱动判定。最后一种只测试日志判定逻辑，真实 ASan 可用性仍由实际内存访问探针证明。新驱动的四个手动回归通过，更新后的 ASan 集成契约与退出防护专项 42/42 通过（40.97 秒），日志为 `build/k10f-f5-exit-guard-tests.log`。新增后普通 CTest 为 259 项、ASan 为 262 项，最终三个配置的全集仍须重跑。
+新增 `architecture.verified_program_exit_guards`，覆盖健康、输出标志后失败、缺少标志以及“退出 0 但出现合成 ASan 错误文本”四种驱动判定。最后一种只测试日志判定逻辑，真实 ASan 可用性仍由实际内存访问探针证明。新驱动的四个手动回归通过，更新后的 ASan 集成契约与退出防护专项 42/42 通过（40.97 秒），日志为 `build/k10f-f5-exit-guard-tests.log`。新增后普通 CTest 为 259 项、ASan 为 262 项，三个配置均已重新执行全集，见下节。
+
+## 固定版本检查点
+
+2026-09-04 在 `48f39a97fc2db5a046fa93af8edadd3987006326` 固定运行代码、测试和 CMake；完成后只更新本记录及相关中文审计文档。各配置顺序运行，不重叠执行普通与 ASan 全集，均为 `-j 4 --output-on-failure`。
+
+| 门禁 | 实际结果 | 日志 |
+| --- | --- | --- |
+| ASan RelWithDebInfo 全集 | 262/262；299.64 秒 | `build/k10f-f5-strict-asan-tests.log` |
+| Debug 全集 | 259/259；280.40 秒 | `build/k10f-f5-strict-debug-tests.log` |
+| Release 全集 | 259/259；282.28 秒 | `build/k10f-f5-strict-release-tests.log` |
+| Production-only Release | 通过；31 个生成工程，0 测试/contract/Catch2/Benchmark/ASan 工程，0 插桩开关，0 CTest 文件 | `build/k10f-f5-strict-production.log` |
+| 公共 API 与第三方目录边界 | 69 个公共头、133 个生产源文件通过；三个全集均含架构正例与负例 | 同上及三个全集日志 |
+
+普通 Debug/Release 的重新配置和构建日志分别为 `build/k10f-f5-strict-normal-configure.log`、`build/k10f-f5-strict-debug-build.log`、`build/k10f-f5-strict-release-build.log`；自有代码保持警告即错误。三个全集的逐项 Passed 行与不同测试编号数分别核对为 262、259、259，没有用 CTest 末尾汇总代替逐项计数。以下为三个日志的 SHA-256，日志保留在本机构建目录：
+
+- ASan：`1B4AFD09F396516698BBD4341AC975E6905251BBBB3F541F17C788FD78985126`
+- Debug：`124C4A5C55E54252761F6D42DA41917E796F02C2E627213DB2557D3BC17C0DFC`
+- Release：`FE1BBFFA68058EFBF0E0B4E518F89A18D1ACB135250BDD60071DD71D4EA93E0D`
+
+上述每个全集只执行一次，包含 F1/F2/F3 用例但不是专项连续重复认证。常规 Release 基准二进制在此节点与 F4 归档摘要相同；未来改变内核或基准实现后必须重新核对，不能沿用这一结论。
 
 ## 未完成门禁
 
-普通 Debug/Release 构建及 Production-only Release 构建已经通过，后者 31 个工程，无测试/contract/Catch2/Benchmark/ASan 工程、无插桩开关、无 CTest 文件；公共边界扫描 69 个头文件、133 个生产源文件通过。等待预算调整后的先行 Debug/Release 各 258/258 通过（297.27 / 283.63 秒），但退出码门禁调整后必须重新跑最终图，不把先行结果代替最终验证。连续重复及 F1/F2/F3 最终专项也未签核。ASan 只提供地址错误检测，不是数据竞争、断电或零泄漏证明；插桩下的内存不能作为 F4 无插桩性能基线。
+等待预算调整后的先行 Debug/Release 各 258/258 通过（297.27 / 283.63 秒），只保留为开发期记录，不替代上述新增退出码门禁后的结果。最终连续重复及 F1/F2/F3 专项尚未签核。
+
+冻结源码审计发现 Host 可变 History/Persistence 仍可调用底层状态写接口，见 [F5B 待修复审计](K10F-F5B-Host状态写入口审计.md)。现有架构扫描检查其声明的模式和依赖边界，不能证明所有可达写方法都已封闭；这一发现不能因扫描或全集全绿而忽略。先收紧入口，再固定新版本重新执行最终门禁和重复矩阵。Project 级生命周期的独立范围确认同样尚未闭合，见 [逐项冻结清单](Kernel-1.0-冻结审计清单.md)。
+
+ASan 只提供地址错误检测，不是数据竞争、断电或零泄漏证明；插桩下的内存不能作为 F4 无插桩性能基线。本检查点提交本地 Git，F5 整体达到准入后再推送远端大节点。

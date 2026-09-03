@@ -15,7 +15,7 @@ LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9 及 K10A–K10E 收�
 - Phase 9：Workflow Runtime 与结构化 Script Runtime
 - Kernel 1.0 Closure：K10A–K10E 已验收；K10F 的 F1–F4 已验收；F5 待闭合，不能宣布 Kernel Frozen
 
-F5 已建立隔离 ASan 配置和真实错误探针，正在完成退出码门禁强化后的最终回归与重复认证。冻结审计另外发现 Project 级生命周期表述与 K10B 的 DocumentRuntime 细则存在差异，已提请确认；见 [逐项审计清单](docs/内核契约/Kernel-1.0-冻结审计清单.md)，不得以测试全绿替代未闭合范围。
+F5A 已通过隔离 ASan 配置、真实错误探针及强化退出码门禁后的回归：ASan 262/262、Debug/Release 各 259/259，Production-only 和架构扫描通过，见 [F5A 记录](docs/内核契约/K10F-F5A-ASan隔离配置与真实探针.md)。冻结审计发现 Host 仍可通过 History/Persistence 调用底层写接口，下一节点将收紧这些入口，之后再做最终重复认证，见 [F5B 审计](docs/内核契约/K10F-F5B-Host状态写入口审计.md)。Project 级生命周期表述与 K10B 的 DocumentRuntime 细则也存在差异，已提请确认；见 [逐项审计清单](docs/内核契约/Kernel-1.0-冻结审计清单.md)，不得以测试全绿替代未闭合范围。
 - 标准：C++20
 - 测试：Catch2 + CTest
 
