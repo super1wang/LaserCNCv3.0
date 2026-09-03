@@ -5,6 +5,7 @@
 #include <lasercnc/observability/log_service.hpp>
 #include <lasercnc/observability/metrics_service.hpp>
 #include <lasercnc/observability/trace_service.hpp>
+#include <lasercnc/persistence/persistence_service.hpp>
 #include <lasercnc/runtime/capability_service.hpp>
 #include <lasercnc/runtime/command_registry.hpp>
 #include <lasercnc/runtime/execution_services.hpp>
@@ -127,6 +128,57 @@ RequestSignature signatureOf(const CommandRequest& request)
         request.expectedRevision};
 }
 
+foundation::Value persistentSignature(
+    const CommandRequest& request,
+    const CommandDescriptor& descriptor)
+{
+    return foundation::Value {foundation::Value::Object {
+        {"arguments", request.arguments},
+        {"command", foundation::Value {std::string(request.command.value())}},
+        {"documentId", foundation::Value {std::string(request.documentId.value())}},
+        {"expectedProjectRevision", request.expectedRevision.has_value()
+            ? foundation::Value {std::to_string(request.expectedRevision->value())}
+            : foundation::Value {}},
+        {"format", foundation::Value {"lasercnc.command-signature"}},
+        {"projectId", foundation::Value {std::string(request.projectId.value())}},
+        {"sessionId", foundation::Value {std::string(request.sessionId.value())}},
+        {"version", foundation::Value {descriptor.version.toString()}},
+    }};
+}
+
+class PersistentIdempotencyLease final {
+public:
+    PersistentIdempotencyLease(
+        persistence::PersistenceService& persistence,
+        kernel::IdempotencyKey key,
+        foundation::Value signature)
+        : persistence_(&persistence), key_(std::move(key)), signature_(std::move(signature))
+    {
+    }
+
+    ~PersistentIdempotencyLease()
+    {
+        if(active_) {
+            try {
+                static_cast<void>(persistence_->releaseCommandClaim(key_, signature_));
+            } catch(...) {
+            }
+        }
+    }
+
+    PersistentIdempotencyLease(const PersistentIdempotencyLease&) = delete;
+    PersistentIdempotencyLease& operator=(const PersistentIdempotencyLease&) = delete;
+
+    void complete() noexcept { active_ = false; }
+    [[nodiscard]] const foundation::Value& signature() const noexcept { return signature_; }
+
+private:
+    persistence::PersistenceService* persistence_;
+    kernel::IdempotencyKey key_;
+    foundation::Value signature_;
+    bool active_{true};
+};
+
 observability::LogRecord commandLog(
     const CommandRequest& request,
     observability::LogLevel level,
@@ -181,6 +233,7 @@ public:
         messaging::EventBus& eventBus,
         ExecutionServices& services,
         TaskRuntime& taskRuntime,
+        persistence::PersistenceService& persistenceService,
         observability::ITraceService& traceService,
         observability::IMetricsService& metricsService,
         std::size_t capacity)
@@ -190,6 +243,7 @@ public:
           events(eventBus),
           executionServices(services),
           tasks(taskRuntime),
+          persistence(persistenceService),
           traces(traceService),
           metrics(metricsService),
           idempotencyCapacity(capacity)
@@ -283,6 +337,61 @@ public:
             return foundation::Result<CommandResponse>::failure(std::move(authorized).error());
         }
 
+        std::unique_ptr<PersistentIdempotencyLease> durableLease;
+        if(request.idempotencyKey.has_value() && persistence.configured()) {
+            auto signature = persistentSignature(request, descriptor);
+            auto claim = persistence.claimCommand(*request.idempotencyKey, signature);
+            if(!claim) {
+                const auto code = std::string(claim.error().code.value());
+                if(code == "Persistence.IdempotencyKeyConflict") {
+                    return foundation::Result<CommandResponse>::failure(commandError(
+                        "Command.IdempotencyKeyConflict",
+                        foundation::ErrorCategory::Conflict,
+                        "The idempotency key is already bound to a different request",
+                        request,
+                        std::make_shared<const foundation::Error>(
+                            std::move(claim).error())));
+                }
+                return foundation::Result<CommandResponse>::failure(commandError(
+                    "Command.IdempotencyPersistenceFailed",
+                    foundation::ErrorCategory::Infrastructure,
+                    "The command could not acquire its durable idempotency record",
+                    request,
+                    std::make_shared<const foundation::Error>(
+                        std::move(claim).error())));
+            }
+            if(claim.value().disposition
+               == persistence::IdempotencyClaimDisposition::Replayed) {
+                if(!claim.value().replay.has_value()) {
+                    return foundation::Result<CommandResponse>::failure(commandError(
+                        "Command.IdempotencyRecordLost",
+                        foundation::ErrorCategory::Internal,
+                        "A durable replay did not contain an outcome",
+                        request));
+                }
+                auto replay = std::move(*claim.value().replay);
+                auto replayValid = services.value().schemaValidator->validate(
+                    descriptor.result, replay.result);
+                if(!replayValid) {
+                    return foundation::Result<CommandResponse>::failure(commandError(
+                        "Command.IdempotencyReplayInvalid",
+                        foundation::ErrorCategory::Infrastructure,
+                        "A durable replay no longer satisfies the command result schema",
+                        request,
+                        std::make_shared<const foundation::Error>(
+                            std::move(replayValid).error())));
+                }
+                return foundation::Result<CommandResponse>::success(CommandResponse {
+                    std::move(replay.result),
+                    std::move(replay.commit),
+                    std::move(replay.taskId),
+                    {},
+                    true});
+            }
+            durableLease = std::make_unique<PersistentIdempotencyLease>(
+                persistence, *request.idempotencyKey, std::move(signature));
+        }
+
         if(descriptor.executionMode == ExecutionMode::Asynchronous) {
             foundation::Result<AsyncCommandPlan> prepared = [&]() {
                 try {
@@ -326,12 +435,23 @@ public:
                 ? activeSpanId
                 : request.parentSpanId;
             const auto taskId = plan.task.taskId;
+            std::optional<TransactionIdempotency> durableIdempotency;
+            if(durableLease != nullptr) {
+                durableIdempotency = TransactionIdempotency {
+                    *request.idempotencyKey,
+                    durableLease->signature(),
+                    plan.acceptance};
+            }
             CommandResponse response {
                 std::move(plan.acceptance), std::nullopt, taskId, {}, false};
-            auto submitted = tasks.submit(std::move(plan.task));
+            auto submitted = tasks.submit(
+                std::move(plan.task), std::move(durableIdempotency));
             if(!submitted) {
                 logFailure(services.value(), request, &descriptor.version);
                 return foundation::Result<CommandResponse>::failure(std::move(submitted).error());
+            }
+            if(durableLease != nullptr) {
+                durableLease->complete();
             }
             try {
                 auto logged = services.value().logService->write(commandLog(
@@ -428,10 +548,25 @@ public:
             return foundation::Result<CommandResponse>::failure(std::move(resultValid).error());
         }
 
+        if(durableLease != nullptr) {
+            auto attached = transaction.value()->attachIdempotency(TransactionIdempotency {
+                *request.idempotencyKey,
+                durableLease->signature(),
+                handled.value()});
+            if(!attached) {
+                static_cast<void>(transaction.value()->rollback());
+                return foundation::Result<CommandResponse>::failure(
+                    std::move(attached).error());
+            }
+        }
+
         auto committed = transaction.value()->commit();
         if(!committed.hasValue()) {
             logFailure(services.value(), request, &descriptor.version);
             return foundation::Result<CommandResponse>::failure(std::move(committed).error());
+        }
+        if(durableLease != nullptr) {
+            durableLease->complete();
         }
 
         std::optional<CommandResponse> response;
@@ -494,6 +629,7 @@ public:
     messaging::EventBus& events;
     ExecutionServices& executionServices;
     TaskRuntime& tasks;
+    persistence::PersistenceService& persistence;
     observability::ITraceService& traces;
     observability::IMetricsService& metrics;
     const std::size_t idempotencyCapacity;
@@ -511,6 +647,7 @@ CommandRuntime::CommandRuntime(
     messaging::EventBus& events,
     ExecutionServices& executionServices,
     TaskRuntime& tasks,
+    persistence::PersistenceService& persistence,
     observability::ITraceService& traces,
     observability::IMetricsService& metrics,
     std::size_t idempotencyCapacity)
@@ -521,6 +658,7 @@ CommandRuntime::CommandRuntime(
           events,
           executionServices,
           tasks,
+          persistence,
           traces,
           metrics,
           idempotencyCapacity))

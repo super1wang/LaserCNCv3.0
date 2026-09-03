@@ -7,6 +7,8 @@
 #include <lasercnc/platform/persistence_backend.hpp>
 #include <lasercnc/platform/snapshot_store.hpp>
 #include <lasercnc/runtime/transaction.hpp>
+#include <lasercnc/runtime/task.hpp>
+#include <lasercnc/observability/diagnostics_service.hpp>
 #include <lasercnc/state/revision.hpp>
 
 #include <chrono>
@@ -53,6 +55,22 @@ struct RecoveryReport final {
     std::size_t journalRecordsReplayed{0U};
 };
 
+enum class IdempotencyClaimDisposition : std::uint8_t {
+    Acquired,
+    Replayed
+};
+
+struct IdempotencyReplay final {
+    foundation::Value result;
+    std::optional<runtime::TransactionCommit> commit;
+    std::optional<kernel::TaskId> taskId;
+};
+
+struct IdempotencyClaim final {
+    IdempotencyClaimDisposition disposition{IdempotencyClaimDisposition::Acquired};
+    std::optional<IdempotencyReplay> replay;
+};
+
 class PersistenceService final {
 public:
     [[nodiscard]] foundation::Result<void> configure(
@@ -62,7 +80,8 @@ public:
         std::unique_ptr<platform::ISnapshotStore> snapshotStore = nullptr);
     [[nodiscard]] foundation::Result<void> initialize();
     [[nodiscard]] foundation::Result<JournalRecord> append(
-        const runtime::TransactionCommit& commit);
+        const runtime::TransactionCommit& commit,
+        const std::optional<runtime::TransactionIdempotency>& idempotency = std::nullopt);
     [[nodiscard]] foundation::Result<std::vector<JournalRecord>> journalAfter(
         const kernel::DocumentId& documentId,
         std::uint64_t sequence) const;
@@ -72,6 +91,25 @@ public:
     [[nodiscard]] foundation::Result<std::optional<SnapshotRecord>> latestSnapshot(
         const kernel::DocumentId& documentId) const;
     [[nodiscard]] foundation::Result<RecoveryReport> recover() const;
+    [[nodiscard]] foundation::Result<IdempotencyClaim> claimCommand(
+        const kernel::IdempotencyKey& key,
+        const foundation::Value& signature);
+    [[nodiscard]] foundation::Result<void> releaseCommandClaim(
+        const kernel::IdempotencyKey& key,
+        const foundation::Value& signature);
+    [[nodiscard]] foundation::Result<void> acceptTask(
+        const runtime::TaskRequest& request,
+        const std::optional<state::RevisionSet>& sourceRevisions,
+        const std::optional<runtime::TransactionIdempotency>& commandIdempotency = std::nullopt);
+    [[nodiscard]] foundation::Result<void> recordTaskTerminal(
+        const runtime::TaskSnapshot& snapshot);
+    [[nodiscard]] foundation::Result<std::optional<runtime::TaskSnapshot>> taskHistory(
+        const kernel::TaskId& taskId) const;
+    [[nodiscard]] foundation::Result<void> recordDiagnostic(
+        const observability::DiagnosticReport& report);
+    [[nodiscard]] foundation::Result<std::vector<observability::DiagnosticReport>> diagnosticHistory(
+        const kernel::DiagnosticId& diagnosticId) const;
+    [[nodiscard]] foundation::Result<std::vector<observability::DiagnosticReport>> latestDiagnostics() const;
 
     [[nodiscard]] bool configured() const;
     [[nodiscard]] bool ready() const;
@@ -81,6 +119,14 @@ private:
     friend class kernel::AppKernel;
 
     void freeze();
+    [[nodiscard]] foundation::Result<void> completeCommandInOpenTransaction(
+        const runtime::TransactionCommit& commit,
+        const runtime::TransactionIdempotency& idempotency);
+    [[nodiscard]] foundation::Result<void> completeTaskCommandInOpenTransaction(
+        const runtime::TaskRequest& request,
+        const runtime::TransactionIdempotency& idempotency);
+    [[nodiscard]] foundation::Result<runtime::TransactionCommit> loadCommitUnlocked(
+        const kernel::TransactionId& transactionId) const;
 
     mutable std::mutex mutex_;
     std::unique_ptr<platform::IPersistenceBackend> backend_;

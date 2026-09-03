@@ -1,6 +1,7 @@
 #include <lasercnc/runtime/scheduler.hpp>
 
 #include <lasercnc/foundation/error.hpp>
+#include <lasercnc/persistence/persistence_service.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -11,6 +12,7 @@
 #include <set>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace lasercnc::runtime {
 namespace {
@@ -118,20 +120,44 @@ struct Scheduler::Core final {
         std::function<bool()> sourceIsStale;
         std::size_t sequence{0U};
         bool resourcesHeld{false};
+        bool durablyAccepted{true};
+        bool completionReady{true};
     };
+
+    static TaskSnapshot snapshotOf(const Record& record)
+    {
+        return TaskSnapshot {
+            record.request.taskId,
+            record.request.task,
+            record.state,
+            record.progress,
+            record.progressMessage,
+            record.request.traceId,
+            record.document.has_value()
+                ? std::optional<state::RevisionSet> {record.document->revisions()}
+                : std::nullopt,
+            record.result,
+            record.error};
+    }
 
     Core(
         ResourceManager& resourceManager,
+        persistence::PersistenceService* persistenceService,
         observability::ITraceService& traceService,
         observability::IMetricsService& metricsService)
-        : resources(&resourceManager), traces(&traceService), metrics(&metricsService)
+        : resources(&resourceManager),
+          persistence(persistenceService),
+          traces(&traceService),
+          metrics(&metricsService)
     {
     }
 
     mutable std::mutex mutex;
     mutable std::condition_variable changed;
     std::map<kernel::TaskId, Record> records;
+    std::vector<foundation::Error> persistenceFailures;
     ResourceManager* resources;
+    persistence::PersistenceService* persistence;
     observability::ITraceService* traces;
     observability::IMetricsService* metrics;
     platform::ITaskExecutor* executor{nullptr};
@@ -147,7 +173,16 @@ Scheduler::Scheduler(
     ResourceManager& resources,
     observability::ITraceService& traces,
     observability::IMetricsService& metrics)
-    : core_(std::make_shared<Core>(resources, traces, metrics))
+    : core_(std::make_shared<Core>(resources, nullptr, traces, metrics))
+{
+}
+
+Scheduler::Scheduler(
+    ResourceManager& resources,
+    persistence::PersistenceService& persistence,
+    observability::ITraceService& traces,
+    observability::IMetricsService& metrics)
+    : core_(std::make_shared<Core>(resources, &persistence, traces, metrics))
 {
 }
 
@@ -202,7 +237,8 @@ foundation::Result<void> Scheduler::schedule(
     std::shared_ptr<ITaskHandler> handler,
     TaskRequest request,
     std::optional<state::Document> document,
-    std::function<bool()> sourceIsStale)
+    std::function<bool()> sourceIsStale,
+    bool activateImmediately)
 {
     {
         std::lock_guard lock(core_->mutex);
@@ -271,15 +307,52 @@ foundation::Result<void> Scheduler::schedule(
                 std::move(document),
                 std::move(sourceIsStale),
                 sequence,
-                false});
+                false,
+                activateImmediately});
+    }
+    core_->changed.notify_all();
+    if(activateImmediately) {
+        pump(core_);
+    }
+    return foundation::Result<void>::success();
+}
+
+foundation::Result<void> Scheduler::activate(const kernel::TaskId& taskId)
+{
+    {
+        std::lock_guard lock(core_->mutex);
+        const auto found = core_->records.find(taskId);
+        if(found == core_->records.end()) {
+            return foundation::Result<void>::failure(taskError(
+                "Task.PreparedRecordMissing",
+                foundation::ErrorCategory::Internal,
+                "A durably accepted task has no prepared scheduler record",
+                taskId));
+        }
+        found->second.durablyAccepted = true;
     }
     core_->changed.notify_all();
     pump(core_);
     return foundation::Result<void>::success();
 }
 
+void Scheduler::discardPrepared(const kernel::TaskId& taskId) noexcept
+{
+    try {
+        std::lock_guard lock(core_->mutex);
+        const auto found = core_->records.find(taskId);
+        if(found != core_->records.end() && !found->second.durablyAccepted
+           && found->second.state == TaskState::Pending) {
+            core_->records.erase(found);
+        }
+    } catch(...) {
+    }
+    core_->changed.notify_all();
+}
+
 foundation::Result<void> Scheduler::requestCancel(const kernel::TaskId& taskId)
 {
+    std::optional<TaskSnapshot> terminal;
     {
         std::lock_guard lock(core_->mutex);
         const auto found = core_->records.find(taskId);
@@ -299,14 +372,19 @@ foundation::Result<void> Scheduler::requestCancel(const kernel::TaskId& taskId)
             record.state = TaskState::CancelRequested;
         } else {
             record.state = TaskState::Cancelled;
+            record.completionReady = false;
             record.error = taskError(
                 "Task.Cancelled",
                 foundation::ErrorCategory::Cancellation,
                 "The task was cancelled before execution",
                 taskId);
+            terminal = Core::snapshotOf(record);
         }
     }
     core_->changed.notify_all();
+    if(terminal.has_value()) {
+        persistTerminal(core_, *terminal);
+    }
     pump(core_);
     return foundation::Result<void>::success();
 }
@@ -324,18 +402,7 @@ foundation::Result<TaskSnapshot> Scheduler::snapshot(const kernel::TaskId& taskI
             taskId));
     }
     const auto& record = found->second;
-    return foundation::Result<TaskSnapshot>::success(TaskSnapshot {
-        record.request.taskId,
-        record.request.task,
-        record.state,
-        record.progress,
-        record.progressMessage,
-        record.request.traceId,
-        record.document.has_value()
-            ? std::optional<state::RevisionSet> {record.document->revisions()}
-            : std::nullopt,
-        record.result,
-        record.error});
+    return foundation::Result<TaskSnapshot>::success(Core::snapshotOf(record));
 }
 
 foundation::Result<TaskSnapshot> Scheduler::wait(
@@ -360,20 +427,9 @@ foundation::Result<TaskSnapshot> Scheduler::wait(
                 "The task id does not exist",
                 taskId));
         }
-        if(isTerminal(found->second.state)) {
+        if(isTerminal(found->second.state) && found->second.completionReady) {
             const auto& record = found->second;
-            return foundation::Result<TaskSnapshot>::success(TaskSnapshot {
-                record.request.taskId,
-                record.request.task,
-                record.state,
-                record.progress,
-                record.progressMessage,
-                record.request.traceId,
-                record.document.has_value()
-                    ? std::optional<state::RevisionSet> {record.document->revisions()}
-                    : std::nullopt,
-                record.result,
-                record.error});
+            return foundation::Result<TaskSnapshot>::success(Core::snapshotOf(record));
         }
         if(std::chrono::steady_clock::now() >= end) {
             return foundation::Result<TaskSnapshot>::failure(taskError(
@@ -398,6 +454,7 @@ foundation::Result<void> Scheduler::shutdown(std::chrono::milliseconds timeout)
             "Scheduler shutdown timeout cannot be negative"));
     }
     const auto end = std::chrono::steady_clock::now() + timeout;
+    std::vector<TaskSnapshot> terminal;
     {
         std::lock_guard lock(core_->mutex);
         if(!core_->started) {
@@ -413,15 +470,20 @@ foundation::Result<void> Scheduler::shutdown(std::chrono::milliseconds timeout)
                 record.state = TaskState::CancelRequested;
             } else {
                 record.state = TaskState::Cancelled;
+                record.completionReady = false;
                 record.error = taskError(
                     "Task.CancelledByShutdown",
                     foundation::ErrorCategory::Cancellation,
                     "The task was cancelled during scheduler shutdown",
                     taskId);
+                terminal.push_back(Core::snapshotOf(record));
             }
         }
     }
     core_->changed.notify_all();
+    for(const auto& snapshot : terminal) {
+        persistTerminal(core_, snapshot);
+    }
 
     std::unique_lock lock(core_->mutex);
     if(!core_->changed.wait_until(lock, end, [core = core_]() { return core->runningCount == 0U; })) {
@@ -445,6 +507,12 @@ std::size_t Scheduler::activeTaskCount() const
         [](const auto& entry) { return !isTerminal(entry.second.state); }));
 }
 
+std::vector<foundation::Error> Scheduler::persistenceFailures() const
+{
+    std::lock_guard lock(core_->mutex);
+    return core_->persistenceFailures;
+}
+
 void Scheduler::pump(const std::shared_ptr<Core>& core)
 {
     {
@@ -462,22 +530,27 @@ void Scheduler::pump(const std::shared_ptr<Core>& core)
         std::optional<state::Document> document;
         CancellationToken token;
         bool foundCandidate = false;
+        std::vector<TaskSnapshot> terminal;
 
         {
             std::lock_guard lock(core->mutex);
             const auto now = std::chrono::steady_clock::now();
             for(auto& [taskId, record] : core->records) {
-                if(record.state != TaskState::Pending && record.state != TaskState::Ready) {
+                if(!record.durablyAccepted
+                   || (record.state != TaskState::Pending
+                       && record.state != TaskState::Ready)) {
                     continue;
                 }
                 if(record.request.deadline.has_value() && now >= *record.request.deadline) {
                     record.cancellation->requested.store(true, std::memory_order_release);
                     record.state = TaskState::Cancelled;
+                    record.completionReady = false;
                     record.error = taskError(
                         "Task.DeadlineExceeded",
                         foundation::ErrorCategory::Timeout,
                         "The task deadline elapsed before execution",
                         taskId);
+                    terminal.push_back(Core::snapshotOf(record));
                     continue;
                 }
                 bool waiting = false;
@@ -495,11 +568,13 @@ void Scheduler::pump(const std::shared_ptr<Core>& core)
                 }
                 if(stale) {
                     record.state = TaskState::Stale;
+                    record.completionReady = false;
                     record.error = taskError(
                         "Task.DependencyDidNotSucceed",
                         foundation::ErrorCategory::Conflict,
                         "A task dependency did not succeed",
                         taskId);
+                    terminal.push_back(Core::snapshotOf(record));
                 } else {
                     record.state = waiting ? TaskState::Pending : TaskState::Ready;
                 }
@@ -524,7 +599,9 @@ void Scheduler::pump(const std::shared_ptr<Core>& core)
                     auto acquired = core->resources->tryAcquire(candidate->request.resources);
                     if(!acquired) {
                         candidate->state = TaskState::Failed;
+                        candidate->completionReady = false;
                         candidate->error = std::move(acquired).error();
+                        terminal.push_back(Core::snapshotOf(*candidate));
                     } else if(acquired.value()) {
                         candidate->resourcesHeld = true;
                         candidate->state = TaskState::Running;
@@ -543,8 +620,14 @@ void Scheduler::pump(const std::shared_ptr<Core>& core)
             if(!foundCandidate) {
                 core->dispatching = false;
                 core->changed.notify_all();
-                return;
             }
+        }
+
+        for(const auto& snapshot : terminal) {
+            persistTerminal(core, snapshot);
+        }
+        if(!foundCandidate) {
+            return;
         }
 
         const auto taskId = *selected;
@@ -644,6 +727,7 @@ void Scheduler::finish(
     const std::shared_ptr<Outcome>& outcome)
 {
     std::function<bool()> sourceIsStale;
+    std::optional<TaskSnapshot> terminal;
     {
         std::lock_guard lock(core->mutex);
         const auto found = core->records.find(taskId);
@@ -708,14 +792,61 @@ void Scheduler::finish(
         }
         finalState = record.state;
         finalError = record.error;
+        record.completionReady = false;
+        terminal = Core::snapshotOf(record);
     }
     if(outcome->span != nullptr) {
         outcome->span->end(traceStatus(finalState), finalError);
     }
     recordTaskMetrics(
         *core->metrics, finalState, std::chrono::steady_clock::now() - outcome->startedAt);
+    if(terminal.has_value()) {
+        persistTerminal(core, *terminal);
+    }
     core->changed.notify_all();
     pump(core);
+}
+
+void Scheduler::persistTerminal(
+    const std::shared_ptr<Core>& core,
+    const TaskSnapshot& snapshot) noexcept
+{
+    std::optional<foundation::Error> failure;
+    if(core->persistence != nullptr && core->persistence->configured()) {
+        try {
+            auto persisted = core->persistence->recordTaskTerminal(snapshot);
+            if(!persisted) {
+                failure = std::move(persisted).error();
+            }
+        } catch(const std::exception& exception) {
+            failure = taskError(
+                "Task.PersistenceThrew",
+                foundation::ErrorCategory::Internal,
+                exception.what(),
+                snapshot.taskId);
+        } catch(...) {
+            failure = taskError(
+                "Task.PersistenceThrew",
+                foundation::ErrorCategory::Internal,
+                "Task terminal persistence raised an unknown exception",
+                snapshot.taskId);
+        }
+    }
+    {
+        std::lock_guard lock(core->mutex);
+        constexpr std::size_t failureCapacity = 256U;
+        if(failure.has_value()) {
+            if(core->persistenceFailures.size() >= failureCapacity) {
+                core->persistenceFailures.erase(core->persistenceFailures.begin());
+            }
+            core->persistenceFailures.push_back(std::move(*failure));
+        }
+        const auto found = core->records.find(snapshot.taskId);
+        if(found != core->records.end() && isTerminal(found->second.state)) {
+            found->second.completionReady = true;
+        }
+    }
+    core->changed.notify_all();
 }
 
 } // namespace lasercnc::runtime

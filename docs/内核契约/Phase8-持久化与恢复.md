@@ -4,7 +4,7 @@
 
 Phase 8 正在建设。目标是以 Snapshot、状态 Journal、SQLite Control Plane 和原子文件 Data Plane 建立可校验、可重放、可故障注入的 Crash Recovery。本阶段只处理 Application Kernel 持久化语义，不实现 Workflow、Script、CAD/CAM、GUI、设备控制或其他上层模块。
 
-当前已完成强内容摘要端口、Windows Adapter、PersistenceService v2 schema migration、状态 Journal、ApplicationTransaction 写前接入、Snapshot 文件/索引和启动恢复重放。持久幂等、Task/Diagnostics metadata 与完整阶段门禁仍未完成；下述未完成条目是后续实现必须满足的准入约束。
+当前已完成强内容摘要端口、Windows Adapter、PersistenceService v5 schema migration、状态 Journal、ApplicationTransaction 写前接入、Snapshot 文件/索引、启动恢复重放、持久 Command 幂等、Task History 和 Diagnostics Metadata。完整多配置、重复、Production-only 与独立进程门禁仍未完成，因此本阶段尚未验收。
 
 ## 校验和身份
 
@@ -36,7 +36,7 @@ Phase 8 正在建设。目标是以 Snapshot、状态 Journal、SQLite Control P
 ## 当前 Journal 实现
 
 - PersistenceService 组合期接收唯一的 IPersistenceBackend、IValueSerializer 与 IHashService；缺失端口、重复配置、未初始化使用和 Ready 后变更均返回明确 Error。
-- `initialize()` 在底层数据库事务内建立 `schema_migrations`、`state_journal` 和 `(document_id, sequence)` 索引；数据库版本高于内核支持版本时返回 `Persistence.SchemaTooNew`。
+- `initialize()` 在底层数据库事务内建立 v5 schema：`schema_migrations`、`state_journal`、`snapshot_index`、`command_idempotency`、`task_history`、`diagnostic_history` 及所需索引；数据库版本高于内核支持版本时返回 `Persistence.SchemaTooNew`。
 - v1 payload 保存格式名/版本、Transaction/Project/Document ID、六域修订前后值、完整 ObjectChange before/after 和已提交 Domain Event 材料。
 - Revision 以十进制字符串保存，避免 Kernel 的 uint64 Revision 被 Value/SQLite int64 截断；Journal sequence 使用 SQLite 正整数范围。
 - append 在 BEGIN IMMEDIATE 内查询 TransactionId：相同 payload/digest 返回原 sequence，不同内容返回 `Persistence.JournalTransactionConflict`；新记录写入后回读，再提交数据库事务。
@@ -59,6 +59,30 @@ commit mutex
 因此 serializer/hash/backend 不在 DocumentStore 锁内调用，Query/诊断可以继续读取旧快照；其他事务提交由 commit mutex 等待，不能越过当前 Journal sequence。Journal 失败时 staging state 被回滚，内存对象和 Revision 不变，CommandRuntime 也不会发布尚未提交的 Event。
 
 AppKernel 拥有 PersistenceService：配置时在 bootstrap 执行 migration，失败则不能进入 Ready；Ready 边界冻结配置。未配置 PersistenceService 时保留显式的纯内存运行模式，便于单元测试和无持久化 Host，但不能宣称具备崩溃恢复。
+
+## 持久 Command 幂等
+
+- CommandRuntime 在 schema 校验和 capability 授权后，以 Command 名称/版本、参数、Session、Project、Document 和期望 ProjectRevision 构造版本化请求签名。
+- `command_idempotency` 保存 key、签名 payload/digest、状态和完成结果。相同 key 绑定不同签名返回冲突；签名或结果摘要损坏时 fail-closed。
+- 同步 Command 的 Journal append 与幂等结果完成处于同一 SQLite 事务；不存在“业务状态已持久但幂等结果缺失”的正常提交窗口。
+- 异步 Command 先在 Scheduler 建立不可调度的预备记录，再以同一 SQLite 事务写入 Task 接受记录和 Command 接受结果，提交后才激活 Task。
+- 重启后的成功重试直接返回原 TransactionCommit 或 TaskId，不重新调用 Command handler、不重复发布历史 Event，也不重复提交 Task。
+- 启动时仅把上次进程遗留的 `pending` claim 标记为 `abandoned`，允许同签名重试重新取得；该恢复语义要求一个数据库在同一时刻只由一个活动 AppKernel Host 拥有，多进程共享写入不在本阶段支持范围内。
+
+## Task History
+
+- `task_history` 在 Task 可调度前保存版本化请求、输入、依赖、资源声明、稳定身份、上下文、修订条件、捕获的 source revisions 和 deadline 身份材料，并计算强摘要。
+- Task 的 Succeeded、Failed、Cancelled、Stale 终态保存完整结果或 Error 材料；终态不可变，相同内容可幂等重试，不同终态或结果返回 `Persistence.TaskOutcomeConflict`。
+- Scheduler 在运行完成、执行前超时、依赖失败、资源获取失败、取消和关闭取消路径记录终态；`wait()` 只在终态持久化已成功或失败已进入有界错误缓存后返回。
+- 终态持久化失败不反转已完成的 Task 结果，失败可经 `Scheduler::persistenceFailures()` 检索；下次启动仍会把无持久终态的 accepted/running 记录标记为 `Task.InterruptedByRestart`。
+- 重启后 `TaskRuntime::snapshot()`/`wait()` 可在内存 Scheduler 不含该 TaskId 时读取持久历史，但不会自动重跑未完成任务或恢复 handler 执行栈。
+
+## Diagnostics Metadata
+
+- DiagnosticsService 新增组合期 `IDiagnosticExporter`，与 Trace/Metrics 一样先更新内存 latest，再在内部锁外调用 exporter；失败只进入有界 `exporterFailures()`。
+- AppKernel 挂接 PersistenceService 代理：未配置持久化时为纯内存 no-op；配置后每次报告追加到 `diagnostic_history`。
+- 诊断 payload 保存稳定 DiagnosticId、状态、摘要、details 和观察时间，并以 SHA-256 校验；`diagnosticHistory()` 返回单项顺序历史，`latestDiagnostics()` 按稳定 ID 返回每项最新报告。
+- 任一历史 payload 摘要或控制面元数据不一致时读取 fail-closed。SQLite 写失败不改变已经产生的 DiagnosticReport，也不触发自动恢复动作。
 
 ## Crash Recovery 实现契约
 
@@ -109,9 +133,11 @@ AppKernel 拥有 PersistenceService：配置时在 bootstrap 执行 migration，
 - Snapshot + Journal tail 恢复、纯 Journal 恢复、DocumentStore 原子装载和 AppKernel Ready 前恢复；
 - 恢复不重新发布历史 Domain Event；
 - Journal sequence 缺口、对象 before 状态冲突、Snapshot 缺失/截断/摘要损坏均 fail-closed。
+- 同步/异步 Command 的持久幂等、key 重绑冲突、原 Commit/TaskId 重启重放，以及重放不调用 handler/不重发 Event；
+- Task 原子接受、成功终态、不可变结果、重启中断标记、请求/终态摘要篡改闭锁和终态写失败可见性；
+- Diagnostics 内存优先 exporter、SQLite 顺序历史/latest、重启读取、摘要篡改闭锁和写失败隔离。
 
 ## 尚未验收
 
-- 持久幂等、Task/Diagnostics metadata；
-- 数据库忙/只读/提交失败等更完整故障注入；
+- 数据库 busy、只读文件系统和实际进程中断点等更完整故障注入；
 - Debug/Release、重复、Production-only 与完整进程恢复门禁。

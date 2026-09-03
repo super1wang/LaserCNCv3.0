@@ -409,7 +409,7 @@ foundation::Result<void> PersistenceService::initialize()
         if(!version) {
             return rollback(*backend_, std::move(version).error());
         }
-        if(version.value() > 2) {
+        if(version.value() > 5) {
             return rollback(*backend_, persistenceError(
                 "Persistence.SchemaTooNew",
                 foundation::ErrorCategory::Conflict,
@@ -453,6 +453,49 @@ foundation::Result<void> PersistenceService::initialize()
         if(!snapshotIndex) {
             return rollback(*backend_, std::move(snapshotIndex).error());
         }
+        auto idempotency = backend_->execute(
+            "CREATE TABLE IF NOT EXISTS command_idempotency("
+            "idempotency_key TEXT PRIMARY KEY NOT NULL,signature_payload TEXT NOT NULL,"
+            "signature_digest TEXT NOT NULL,status TEXT NOT NULL,"
+            "outcome_payload TEXT,outcome_digest TEXT,journal_transaction_id TEXT,"
+            "task_id TEXT,created_at_ms INTEGER NOT NULL,completed_at_ms INTEGER)");
+        if(!idempotency) {
+            return rollback(*backend_, std::move(idempotency).error());
+        }
+        auto abandoned = backend_->execute(
+            "UPDATE command_idempotency SET status='abandoned' WHERE status='pending'");
+        if(!abandoned) {
+            return rollback(*backend_, std::move(abandoned).error());
+        }
+        auto taskHistory = backend_->execute(
+            "CREATE TABLE IF NOT EXISTS task_history("
+            "task_id TEXT PRIMARY KEY NOT NULL,task_name TEXT NOT NULL,status TEXT NOT NULL,"
+            "request_payload TEXT NOT NULL,request_digest TEXT NOT NULL,"
+            "terminal_payload TEXT,terminal_digest TEXT,"
+            "created_at_ms INTEGER NOT NULL,updated_at_ms INTEGER NOT NULL)");
+        if(!taskHistory) {
+            return rollback(*backend_, std::move(taskHistory).error());
+        }
+        auto interruptedTasks = backend_->execute(
+            "UPDATE task_history SET status='interrupted' "
+            "WHERE status IN ('accepted','running')");
+        if(!interruptedTasks) {
+            return rollback(*backend_, std::move(interruptedTasks).error());
+        }
+        auto diagnosticHistory = backend_->execute(
+            "CREATE TABLE IF NOT EXISTS diagnostic_history("
+            "sequence INTEGER PRIMARY KEY AUTOINCREMENT,diagnostic_id TEXT NOT NULL,"
+            "status TEXT NOT NULL,payload TEXT NOT NULL,digest TEXT NOT NULL,"
+            "observed_at_ms INTEGER NOT NULL)");
+        if(!diagnosticHistory) {
+            return rollback(*backend_, std::move(diagnosticHistory).error());
+        }
+        auto diagnosticIndex = backend_->execute(
+            "CREATE INDEX IF NOT EXISTS idx_diagnostic_history_id_sequence "
+            "ON diagnostic_history(diagnostic_id,sequence)");
+        if(!diagnosticIndex) {
+            return rollback(*backend_, std::move(diagnosticIndex).error());
+        }
         const std::array migrationParameters {foundation::Value {std::int64_t {1}}};
         auto recorded = backend_->execute(
             "INSERT OR IGNORE INTO schema_migrations(version,applied_at) "
@@ -469,6 +512,33 @@ foundation::Result<void> PersistenceService::initialize()
             snapshotMigrationParameters);
         if(!snapshotMigration) {
             return rollback(*backend_, std::move(snapshotMigration).error());
+        }
+        const std::array idempotencyMigrationParameters {
+            foundation::Value {std::int64_t {3}}};
+        auto idempotencyMigration = backend_->execute(
+            "INSERT OR IGNORE INTO schema_migrations(version,applied_at) "
+            "VALUES(?,CURRENT_TIMESTAMP)",
+            idempotencyMigrationParameters);
+        if(!idempotencyMigration) {
+            return rollback(*backend_, std::move(idempotencyMigration).error());
+        }
+        const std::array taskMigrationParameters {
+            foundation::Value {std::int64_t {4}}};
+        auto taskMigration = backend_->execute(
+            "INSERT OR IGNORE INTO schema_migrations(version,applied_at) "
+            "VALUES(?,CURRENT_TIMESTAMP)",
+            taskMigrationParameters);
+        if(!taskMigration) {
+            return rollback(*backend_, std::move(taskMigration).error());
+        }
+        const std::array diagnosticMigrationParameters {
+            foundation::Value {std::int64_t {5}}};
+        auto diagnosticMigration = backend_->execute(
+            "INSERT OR IGNORE INTO schema_migrations(version,applied_at) "
+            "VALUES(?,CURRENT_TIMESTAMP)",
+            diagnosticMigrationParameters);
+        if(!diagnosticMigration) {
+            return rollback(*backend_, std::move(diagnosticMigration).error());
         }
         auto committed = backend_->commitTransaction();
         if(!committed) {
@@ -496,7 +566,8 @@ foundation::Result<void> PersistenceService::initialize()
 }
 
 foundation::Result<JournalRecord> PersistenceService::append(
-    const runtime::TransactionCommit& commit)
+    const runtime::TransactionCommit& commit,
+    const std::optional<runtime::TransactionIdempotency>& idempotency)
 {
     std::lock_guard lock(mutex_);
     if(!initialized_) {
@@ -572,6 +643,14 @@ foundation::Result<JournalRecord> PersistenceService::append(
                     "A transaction identity is already bound to different journal content"));
                 return foundation::Result<JournalRecord>::failure(std::move(failure).error());
             }
+            if(idempotency.has_value()) {
+                auto completed = completeCommandInOpenTransaction(commit, *idempotency);
+                if(!completed) {
+                    auto failure = rollback(*backend_, std::move(completed).error());
+                    return foundation::Result<JournalRecord>::failure(
+                        std::move(failure).error());
+                }
+            }
             auto committed = backend_->commitTransaction();
             if(!committed) {
                 auto failure = rollback(*backend_, std::move(committed).error());
@@ -632,6 +711,14 @@ foundation::Result<JournalRecord> PersistenceService::append(
         if(!valid) {
             auto failure = rollback(*backend_, std::move(valid).error());
             return foundation::Result<JournalRecord>::failure(std::move(failure).error());
+        }
+        if(idempotency.has_value()) {
+            auto completed = completeCommandInOpenTransaction(commit, *idempotency);
+            if(!completed) {
+                auto failure = rollback(*backend_, std::move(completed).error());
+                return foundation::Result<JournalRecord>::failure(
+                    std::move(failure).error());
+            }
         }
         auto committed = backend_->commitTransaction();
         if(!committed) {

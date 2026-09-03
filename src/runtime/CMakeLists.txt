@@ -21,8 +21,11 @@ target_sources(
         observability/log_observability_exporter.cpp
         observability/diagnostics_service.cpp
         persistence/persistence_service.cpp
+        persistence/idempotency_persistence.cpp
         persistence/recovery.cpp
         persistence/snapshot_persistence.cpp
+        persistence/task_persistence.cpp
+        persistence/diagnostic_persistence.cpp
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS "${PROJECT_SOURCE_DIR}/include"

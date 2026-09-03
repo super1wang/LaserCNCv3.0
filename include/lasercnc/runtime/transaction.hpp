@@ -14,6 +14,7 @@
 namespace lasercnc::runtime {
 
 class TransactionManager;
+class CommandRuntime;
 
 enum class TransactionState : std::uint8_t {
     Active,
@@ -45,6 +46,12 @@ struct TransactionCommit final {
     std::vector<messaging::CommittedDomainEvent> events;
 };
 
+struct TransactionIdempotency final {
+    kernel::IdempotencyKey key;
+    foundation::Value signature;
+    foundation::Value result;
+};
+
 class ApplicationTransaction final {
 public:
     ~ApplicationTransaction();
@@ -74,6 +81,7 @@ public:
     [[nodiscard]] foundation::Result<void> rollback();
 
 private:
+    friend class CommandRuntime;
     friend class TransactionManager;
 
     static constexpr std::size_t revisionScopeCount = 6U;
@@ -84,6 +92,8 @@ private:
         state::Document baseDocument);
 
     [[nodiscard]] foundation::Result<void> ensureActive() const;
+    [[nodiscard]] foundation::Result<void> attachIdempotency(
+        TransactionIdempotency idempotency);
     [[nodiscard]] foundation::Result<void> fail(foundation::Error error);
     void markDocumentChanged() noexcept;
     [[nodiscard]] std::vector<ObjectChange> buildChanges() const;
@@ -97,6 +107,7 @@ private:
     std::optional<foundation::Error> failure_;
     std::array<bool, revisionScopeCount> affectedScopes_ {};
     std::vector<messaging::PendingDomainEvent> pendingEvents_;
+    std::optional<TransactionIdempotency> idempotency_;
 };
 
 } // namespace lasercnc::runtime

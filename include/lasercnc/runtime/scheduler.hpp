@@ -10,6 +10,11 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <vector>
+
+namespace lasercnc::persistence {
+class PersistenceService;
+}
 
 namespace lasercnc::runtime {
 
@@ -19,6 +24,11 @@ class Scheduler final {
 public:
     Scheduler(
         ResourceManager& resources,
+        observability::ITraceService& traces,
+        observability::IMetricsService& metrics);
+    Scheduler(
+        ResourceManager& resources,
+        persistence::PersistenceService& persistence,
         observability::ITraceService& traces,
         observability::IMetricsService& metrics);
     ~Scheduler();
@@ -36,6 +46,7 @@ public:
         std::chrono::milliseconds timeout) const;
     [[nodiscard]] foundation::Result<void> shutdown(std::chrono::milliseconds timeout);
     [[nodiscard]] std::size_t activeTaskCount() const;
+    [[nodiscard]] std::vector<foundation::Error> persistenceFailures() const;
 
 private:
     struct Core;
@@ -48,13 +59,19 @@ private:
         const kernel::TaskId& taskId,
         foundation::Result<void> executionResult,
         const std::shared_ptr<Outcome>& outcome);
+    static void persistTerminal(
+        const std::shared_ptr<Core>& core,
+        const TaskSnapshot& snapshot) noexcept;
 
     [[nodiscard]] foundation::Result<void> schedule(
         TaskDescriptor descriptor,
         std::shared_ptr<ITaskHandler> handler,
         TaskRequest request,
         std::optional<state::Document> document,
-        std::function<bool()> sourceIsStale);
+        std::function<bool()> sourceIsStale,
+        bool activateImmediately);
+    [[nodiscard]] foundation::Result<void> activate(const kernel::TaskId& taskId);
+    void discardPrepared(const kernel::TaskId& taskId) noexcept;
 
     friend class TaskRuntime;
 };

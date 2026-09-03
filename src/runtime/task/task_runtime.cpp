@@ -1,7 +1,9 @@
 #include <lasercnc/runtime/task_runtime.hpp>
 
 #include <lasercnc/foundation/error.hpp>
+#include <lasercnc/persistence/persistence_service.hpp>
 
+#include <string>
 #include <utility>
 
 namespace lasercnc::runtime {
@@ -54,6 +56,20 @@ TaskRuntime::TaskRuntime(
 {
 }
 
+TaskRuntime::TaskRuntime(
+    TaskRegistry& registry,
+    Scheduler& scheduler,
+    ExecutionServices& executionServices,
+    const state::DocumentStore& documents,
+    persistence::PersistenceService& persistence)
+    : registry_(registry),
+      scheduler_(scheduler),
+      executionServices_(executionServices),
+      documents_(documents),
+      persistence_(&persistence)
+{
+}
+
 void TaskRuntime::start() noexcept
 {
     accepting_.store(true, std::memory_order_release);
@@ -65,6 +81,13 @@ void TaskRuntime::stop() noexcept
 }
 
 foundation::Result<void> TaskRuntime::submit(TaskRequest request)
+{
+    return submit(std::move(request), std::nullopt);
+}
+
+foundation::Result<void> TaskRuntime::submit(
+    TaskRequest request,
+    std::optional<TransactionIdempotency> commandIdempotency)
 {
     if(!accepting_.load(std::memory_order_acquire)) {
         return foundation::Result<void>::failure(foundation::makeError(
@@ -92,6 +115,7 @@ foundation::Result<void> TaskRuntime::submit(TaskRequest request)
         services.value().schemaValidator);
 
     std::optional<state::Document> document;
+    std::optional<state::RevisionSet> sourceRevisions;
     std::function<bool()> sourceIsStale;
     if(request.documentId.has_value()) {
         if(!request.projectId.has_value()) {
@@ -127,6 +151,7 @@ foundation::Result<void> TaskRuntime::submit(TaskRequest request)
         }
         const auto documentId = *request.documentId;
         const auto revisions = captured.value().revisions();
+        sourceRevisions = revisions;
         const auto* documents = &documents_;
         sourceIsStale = [documents, documentId, revisions]() {
             auto current = documents->snapshot(documentId);
@@ -140,12 +165,32 @@ foundation::Result<void> TaskRuntime::submit(TaskRequest request)
             foundation::ErrorCategory::Validation,
             "Revision preconditions require a document task"));
     }
-    return scheduler_.schedule(
+    const bool durable = persistence_ != nullptr && persistence_->configured();
+    std::optional<TaskRequest> durableRequest;
+    if(durable) {
+        durableRequest = request;
+    }
+    const auto taskId = request.taskId;
+    auto scheduled = scheduler_.schedule(
         std::move(resolved.descriptor),
         std::move(validatingHandler),
         std::move(request),
         std::move(document),
-        std::move(sourceIsStale));
+        std::move(sourceIsStale),
+        !durable);
+    if(!scheduled) {
+        return scheduled;
+    }
+    if(!durable) {
+        return foundation::Result<void>::success();
+    }
+    auto persisted = persistence_->acceptTask(
+        *durableRequest, sourceRevisions, commandIdempotency);
+    if(!persisted) {
+        scheduler_.discardPrepared(taskId);
+        return persisted;
+    }
+    return scheduler_.activate(taskId);
 }
 
 foundation::Result<void> TaskRuntime::cancel(const kernel::TaskId& taskId)
@@ -155,14 +200,40 @@ foundation::Result<void> TaskRuntime::cancel(const kernel::TaskId& taskId)
 
 foundation::Result<TaskSnapshot> TaskRuntime::snapshot(const kernel::TaskId& taskId) const
 {
-    return scheduler_.snapshot(taskId);
+    auto current = scheduler_.snapshot(taskId);
+    if(current || persistence_ == nullptr || !persistence_->configured()
+       || std::string(current.error().code.value()) != "Task.IdNotFound") {
+        return current;
+    }
+    auto durable = persistence_->taskHistory(taskId);
+    if(!durable) {
+        return foundation::Result<TaskSnapshot>::failure(std::move(durable).error());
+    }
+    if(!durable.value().has_value()) {
+        return current;
+    }
+    return foundation::Result<TaskSnapshot>::success(
+        std::move(*durable.value()));
 }
 
 foundation::Result<TaskSnapshot> TaskRuntime::wait(
     const kernel::TaskId& taskId,
     std::chrono::milliseconds timeout) const
 {
-    return scheduler_.wait(taskId, timeout);
+    auto current = scheduler_.wait(taskId, timeout);
+    if(current || persistence_ == nullptr || !persistence_->configured()
+       || std::string(current.error().code.value()) != "Task.IdNotFound") {
+        return current;
+    }
+    auto durable = persistence_->taskHistory(taskId);
+    if(!durable) {
+        return foundation::Result<TaskSnapshot>::failure(std::move(durable).error());
+    }
+    if(!durable.value().has_value()) {
+        return current;
+    }
+    return foundation::Result<TaskSnapshot>::success(
+        std::move(*durable.value()));
 }
 
 std::size_t TaskRuntime::activeExecutionCount() const

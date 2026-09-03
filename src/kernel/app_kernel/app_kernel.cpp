@@ -6,12 +6,37 @@
 #include <utility>
 
 namespace lasercnc::kernel {
+namespace {
+
+class PersistenceDiagnosticExporter final
+    : public observability::IDiagnosticExporter {
+public:
+    explicit PersistenceDiagnosticExporter(
+        persistence::PersistenceService& persistence) noexcept
+        : persistence_(&persistence)
+    {
+    }
+
+    foundation::Result<void> exportReport(
+        const observability::DiagnosticReport& report) override
+    {
+        if(!persistence_->configured()) {
+            return foundation::Result<void>::success();
+        }
+        return persistence_->recordDiagnostic(report);
+    }
+
+private:
+    persistence::PersistenceService* persistence_;
+};
+
+} // namespace
 
 AppKernel::AppKernel()
     : modules_(services_),
       transactions_(documents_, &persistence_),
-      scheduler_(resources_, traces_, metrics_),
-      tasks_(taskRegistry_, scheduler_, executionServices_, documents_),
+      scheduler_(resources_, persistence_, traces_, metrics_),
+      tasks_(taskRegistry_, scheduler_, executionServices_, documents_, persistence_),
       commands_(
           commandRegistry_,
           transactions_,
@@ -19,11 +44,14 @@ AppKernel::AppKernel()
           events_,
           executionServices_,
           tasks_,
+          persistence_,
           traces_,
           metrics_),
       queries_(
           queryRegistry_, documents_, capabilities_, executionServices_, traces_, metrics_)
 {
+    static_cast<void>(diagnostics_.addExporter(
+        std::make_shared<PersistenceDiagnosticExporter>(persistence_)));
 }
 
 AppKernel::~AppKernel()

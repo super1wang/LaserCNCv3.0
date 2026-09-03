@@ -19,6 +19,10 @@ class IMetricsService;
 class ITraceService;
 }
 
+namespace lasercnc::persistence {
+class PersistenceService;
+}
+
 namespace lasercnc::runtime {
 
 class CapabilityService;
@@ -36,6 +40,7 @@ public:
         messaging::EventBus& events,
         ExecutionServices& executionServices,
         TaskRuntime& tasks,
+        persistence::PersistenceService& persistence,
         observability::ITraceService& traces,
         observability::IMetricsService& metrics,
         std::size_t idempotencyCapacity = 1024U);

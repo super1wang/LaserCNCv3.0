@@ -1,9 +1,12 @@
 #include <lasercnc/infrastructure/jsoncons_adapter.hpp>
 #include <lasercnc/infrastructure/sha256_hash_service.hpp>
 #include <lasercnc/infrastructure/filesystem_snapshot_store.hpp>
+#include <lasercnc/infrastructure/bs_thread_pool_executor.hpp>
 #include <lasercnc/infrastructure/sqlite_persistence_backend.hpp>
 #include <lasercnc/kernel/app_kernel.hpp>
+#include <lasercnc/observability/log_service.hpp>
 #include <lasercnc/persistence/persistence_service.hpp>
+#include <lasercnc/runtime/command_runtime.hpp>
 #include <lasercnc/runtime/transaction_manager.hpp>
 
 #include <catch2/catch_test_macros.hpp>
@@ -168,6 +171,57 @@ public:
     bool active{false};
 };
 
+class FailingTaskTerminalBackend final
+    : public lasercnc::platform::IPersistenceBackend {
+public:
+    explicit FailingTaskTerminalBackend(
+        std::unique_ptr<lasercnc::platform::IPersistenceBackend> delegate)
+        : delegate_(std::move(delegate))
+    {
+    }
+
+    Result<std::size_t> execute(
+        std::string_view statement,
+        std::span<const Value> parameters = {}) override
+    {
+        if(failTerminal.load(std::memory_order_acquire)
+           && statement.starts_with("UPDATE task_history SET status=")) {
+            return Result<std::size_t>::failure(makeError(
+                "Test.TaskTerminalPersistFailed",
+                ErrorCategory::Infrastructure,
+                "expected"));
+        }
+        return delegate_->execute(statement, parameters);
+    }
+
+    Result<std::vector<lasercnc::platform::PersistenceRow>> query(
+        std::string_view statement,
+        std::span<const Value> parameters = {}) override
+    {
+        return delegate_->query(statement, parameters);
+    }
+
+    Result<void> beginTransaction() override
+    {
+        return delegate_->beginTransaction();
+    }
+
+    Result<void> commitTransaction() override
+    {
+        return delegate_->commitTransaction();
+    }
+
+    Result<void> rollbackTransaction() override
+    {
+        return delegate_->rollbackTransaction();
+    }
+
+    std::atomic_bool failTerminal{false};
+
+private:
+    std::unique_ptr<lasercnc::platform::IPersistenceBackend> delegate_;
+};
+
 class ReentrantSerializer final : public IValueSerializer {
 public:
     ReentrantSerializer(DocumentStore& documents, DocumentId documentId)
@@ -210,6 +264,276 @@ public:
             "Test.DeserializeFailed", ErrorCategory::Infrastructure, "expected"));
     }
 };
+
+class NullLogService final : public lasercnc::observability::ILogService {
+public:
+    Result<void> write(const lasercnc::observability::LogRecord&) override
+    {
+        return Result<void>::success();
+    }
+
+    Result<void> flush() override { return Result<void>::success(); }
+};
+
+class PersistentCreateHandler final : public ICommandHandler {
+public:
+    Result<Value> execute(
+        const CommandRequest& request,
+        ApplicationTransaction& transaction) override
+    {
+        ++calls;
+        const auto* arguments = request.arguments.getIf<Value::Object>();
+        const auto* idValue = arguments == nullptr
+            ? nullptr
+            : arguments->at("id").getIf<std::string>();
+        const auto* dataValue = arguments == nullptr
+            ? nullptr
+            : arguments->at("data").getIf<std::string>();
+        if(idValue == nullptr || dataValue == nullptr) {
+            return Result<Value>::failure(makeError(
+                "Test.InvalidArguments",
+                ErrorCategory::Validation,
+                "Invalid persistent command arguments"));
+        }
+        auto objectId = ObjectId::create(*idValue);
+        if(!objectId) {
+            return Result<Value>::failure(std::move(objectId).error());
+        }
+        const auto stableObjectId = objectId.value();
+        auto created = transaction.createObject(ObjectRecord {
+            std::move(objectId).value(),
+            validId<ObjectTypeId>("kernel.persistence.command"),
+            Value {*dataValue}});
+        if(!created) {
+            return Result<Value>::failure(std::move(created).error());
+        }
+        auto event = transaction.collectEvent(lasercnc::messaging::PendingDomainEvent {
+            validId<EventName>("kernel.persistence.command-created"),
+            Version {1U, 0U, 0U},
+            stableObjectId,
+            Value {*idValue}});
+        if(!event) {
+            return Result<Value>::failure(std::move(event).error());
+        }
+        return Result<Value>::success(Value {Value::Object {
+            {"id", Value {*idValue}}, {"data", Value {*dataValue}}}});
+    }
+
+    std::size_t calls{0U};
+};
+
+class PersistentTaskHandler final : public ITaskHandler {
+public:
+    Result<Value> execute(const TaskRequest&, const TaskContext&) override
+    {
+        ++calls;
+        return Result<Value>::success(Value {Value::Object {
+            {"value", Value {"completed"}}}});
+    }
+
+    std::atomic_size_t calls{0U};
+};
+
+class PersistentAsyncHandler final : public IAsyncCommandHandler {
+public:
+    Result<AsyncCommandPlan> prepare(const CommandRequest& command) override
+    {
+        ++calls;
+        auto taskId = TaskId::create(
+            "task." + std::string(command.requestId.value()));
+        if(!taskId) {
+            return Result<AsyncCommandPlan>::failure(std::move(taskId).error());
+        }
+        return Result<AsyncCommandPlan>::success(AsyncCommandPlan {
+            TaskRequest {
+                std::move(taskId).value(),
+                validId<TaskName>("kernel.persistence.async-task"),
+                Value {Value::Object {{"input", Value {"durable"}}}},
+                command.traceId},
+            Value {Value::Object {{"accepted", Value {true}}}}});
+    }
+
+    std::atomic_size_t calls{0U};
+};
+
+class FixedDiagnosticCheck final
+    : public lasercnc::observability::IDiagnosticCheck {
+public:
+    explicit FixedDiagnosticCheck(DiagnosticId id) : id_(std::move(id)) {}
+
+    Result<lasercnc::observability::DiagnosticReport> run() override
+    {
+        ++calls;
+        return Result<lasercnc::observability::DiagnosticReport>::success(
+            lasercnc::observability::DiagnosticReport {
+                id_,
+                lasercnc::observability::DiagnosticStatus::Degraded,
+                "maintenance window",
+                Value {Value::Object {{"attempt", Value {std::to_string(calls)}}}},
+                {}});
+    }
+
+    std::size_t calls{0U};
+
+private:
+    DiagnosticId id_;
+};
+
+Schema objectSchema(const char* id)
+{
+    auto created = Schema::create(
+        validId<SchemaId>(id), Version {1U, 0U, 0U}, SchemaKind::Object);
+    if(!created) {
+        throw std::logic_error("Invalid test schema");
+    }
+    return std::move(created).value();
+}
+
+CommandDescriptor persistentCommandDescriptor()
+{
+    return CommandDescriptor {
+        validId<CommandName>("kernel.persistence.create"),
+        Version {1U, 0U, 0U},
+        objectSchema("schema.persistence.command.arguments"),
+        objectSchema("schema.persistence.command.result"),
+        ExecutionMode::Synchronous,
+        SideEffectLevel::DocumentWrite,
+        validId<CapabilityId>("document.write"),
+        false,
+        true,
+        true};
+}
+
+CommandDescriptor persistentAsyncCommandDescriptor()
+{
+    return CommandDescriptor {
+        validId<CommandName>("kernel.persistence.async-command"),
+        Version {1U, 0U, 0U},
+        objectSchema("schema.persistence.async-command.arguments"),
+        objectSchema("schema.persistence.async-command.result"),
+        ExecutionMode::Asynchronous,
+        SideEffectLevel::ReadOnly,
+        validId<CapabilityId>("task.submit"),
+        false,
+        true,
+        true};
+}
+
+TaskDescriptor persistentTaskDescriptor()
+{
+    return TaskDescriptor {
+        validId<TaskName>("kernel.persistence.async-task"),
+        Version {1U, 0U, 0U},
+        objectSchema("schema.persistence.async-task.input"),
+        objectSchema("schema.persistence.async-task.result")};
+}
+
+CommandRequest persistentCommandRequest(
+    const char* requestId,
+    const ProjectId& projectId,
+    const DocumentId& documentId,
+    const SessionId& sessionId,
+    const IdempotencyKey& key,
+    const char* objectId)
+{
+    return CommandRequest {
+        validId<RequestId>(requestId),
+        sessionId,
+        projectId,
+        documentId,
+        validId<CommandName>("kernel.persistence.create"),
+        Value {Value::Object {
+            {"data", Value {"durable"}}, {"id", Value {objectId}}}},
+        std::nullopt,
+        validId<CorrelationId>("correlation.persistence"),
+        validId<TraceId>("trace.persistence"),
+        key,
+        std::nullopt};
+}
+
+void configureRuntimeKernel(
+    lasercnc::kernel::AppKernel& kernel,
+    const std::filesystem::path& database,
+    const std::filesystem::path& snapshotDirectory,
+    const SessionId& sessionId,
+    std::shared_ptr<PersistentCreateHandler> handler)
+{
+    auto adapter = std::make_shared<JsonconsAdapter>();
+    REQUIRE(kernel.executionServices()
+                .configure(adapter, std::make_shared<NullLogService>())
+                .hasValue());
+    const std::array capabilities {validId<CapabilityId>("document.write")};
+    REQUIRE(kernel.capabilities().replace(sessionId, capabilities).hasValue());
+    REQUIRE(kernel.commandRegistry()
+                .registerHandler(persistentCommandDescriptor(), std::move(handler))
+                .hasValue());
+    auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {database});
+    REQUIRE(backend.hasValue());
+    auto snapshots = FilesystemSnapshotStore::create(
+        FilesystemSnapshotStoreOptions {snapshotDirectory, 1024U * 1024U});
+    REQUIRE(snapshots.hasValue());
+    REQUIRE(kernel.persistence()
+                .configure(
+                    std::move(backend).value(),
+                    adapter,
+                    std::make_shared<Sha256HashService>(),
+                    std::move(snapshots).value())
+                .hasValue());
+}
+
+void configureAsyncRuntimeKernel(
+    lasercnc::kernel::AppKernel& kernel,
+    const std::filesystem::path& database,
+    const SessionId& sessionId,
+    std::shared_ptr<PersistentAsyncHandler> commandHandler,
+    std::shared_ptr<PersistentTaskHandler> taskHandler)
+{
+    auto adapter = std::make_shared<JsonconsAdapter>();
+    REQUIRE(kernel.executionServices()
+                .configure(adapter, std::make_shared<NullLogService>())
+                .hasValue());
+    const std::array capabilities {validId<CapabilityId>("task.submit")};
+    REQUIRE(kernel.capabilities().replace(sessionId, capabilities).hasValue());
+    REQUIRE(kernel.commandRegistry()
+                .registerAsyncHandler(
+                    persistentAsyncCommandDescriptor(), std::move(commandHandler))
+                .hasValue());
+    REQUIRE(kernel.taskRegistry()
+                .registerHandler(persistentTaskDescriptor(), std::move(taskHandler))
+                .hasValue());
+    auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {database});
+    REQUIRE(backend.hasValue());
+    REQUIRE(kernel.persistence()
+                .configure(
+                    std::move(backend).value(),
+                    adapter,
+                    std::make_shared<Sha256HashService>())
+                .hasValue());
+    auto executor = BsThreadPoolExecutor::create(BsThreadPoolExecutorOptions {1U});
+    REQUIRE(executor.hasValue());
+    REQUIRE(kernel.configureTaskExecutor(std::move(executor).value()).hasValue());
+}
+
+CommandRequest persistentAsyncCommandRequest(
+    const char* requestId,
+    const ProjectId& projectId,
+    const DocumentId& documentId,
+    const SessionId& sessionId,
+    const IdempotencyKey& key)
+{
+    return CommandRequest {
+        validId<RequestId>(requestId),
+        sessionId,
+        projectId,
+        documentId,
+        validId<CommandName>("kernel.persistence.async-command"),
+        Value {Value::Object {{"input", Value {"durable"}}}},
+        std::nullopt,
+        validId<CorrelationId>("correlation.persistence.async"),
+        validId<TraceId>("trace.persistence.async"),
+        key,
+        std::nullopt};
+}
 
 } // namespace
 
@@ -721,6 +1045,394 @@ TEST_CASE("Crash recovery validates object before state", "[persistence][recover
     removeSnapshotDirectory(snapshotDirectory);
 }
 
+TEST_CASE("CommandRuntime replays durable idempotency after process restart", "[persistence][idempotency][command]")
+{
+    const auto path = uniqueDatabasePath();
+    const auto snapshotDirectory = uniqueSnapshotDirectory();
+    removeDatabase(path);
+    removeSnapshotDirectory(snapshotDirectory);
+    const auto projectId = validId<ProjectId>("project.command-replay");
+    const auto documentId = validId<DocumentId>("document.command-replay");
+    const auto sessionId = validId<SessionId>("session.command-replay");
+    const auto key = validId<IdempotencyKey>("idempotency.command-replay");
+    TransactionId committedTransaction = validId<TransactionId>("placeholder");
+
+    {
+        lasercnc::kernel::AppKernel kernel;
+        REQUIRE(kernel.addDocument(projectId, documentId).hasValue());
+        auto handler = std::make_shared<PersistentCreateHandler>();
+        configureRuntimeKernel(
+            kernel, path, snapshotDirectory, sessionId, handler);
+        REQUIRE(kernel.bootstrap().hasValue());
+        auto first = kernel.commands().execute(persistentCommandRequest(
+            "request.command-replay.first",
+            projectId,
+            documentId,
+            sessionId,
+            key,
+            "object.command-replay"));
+        REQUIRE(first.hasValue());
+        CHECK_FALSE(first.value().replayed);
+        REQUIRE(first.value().commit.has_value());
+        committedTransaction = first.value().commit->transactionId;
+        CHECK(handler->calls == 1U);
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+
+    {
+        lasercnc::kernel::AppKernel kernel;
+        auto handler = std::make_shared<PersistentCreateHandler>();
+        configureRuntimeKernel(
+            kernel, path, snapshotDirectory, sessionId, handler);
+        std::size_t events = 0U;
+        auto subscription = kernel.events().subscribe(
+            validId<SubscriptionId>("subscription.command-replay"),
+            lasercnc::messaging::EventFilter {
+                lasercnc::messaging::EventKind::Domain, std::nullopt},
+            lasercnc::messaging::DeliveryMode::Immediate,
+            [&events](const lasercnc::messaging::EventEnvelope&) { ++events; });
+        REQUIRE(subscription.hasValue());
+        REQUIRE(kernel.bootstrap().hasValue());
+        auto replay = kernel.commands().execute(persistentCommandRequest(
+            "request.command-replay.retry",
+            projectId,
+            documentId,
+            sessionId,
+            key,
+            "object.command-replay"));
+        REQUIRE(replay.hasValue());
+        CHECK(replay.value().replayed);
+        REQUIRE(replay.value().commit.has_value());
+        CHECK(replay.value().commit->transactionId == committedTransaction);
+        REQUIRE(replay.value().commit->events.size() == 1U);
+        CHECK(replay.value().commit->events.front().name()
+              == validId<EventName>("kernel.persistence.command-created"));
+        CHECK(handler->calls == 0U);
+        CHECK(events == 0U);
+
+        auto conflict = kernel.commands().execute(persistentCommandRequest(
+            "request.command-replay.conflict",
+            projectId,
+            documentId,
+            sessionId,
+            key,
+            "object.command-rebound"));
+        REQUIRE_FALSE(conflict.hasValue());
+        CHECK(std::string(conflict.error().code.value())
+              == "Command.IdempotencyKeyConflict");
+        CHECK(handler->calls == 0U);
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+    removeDatabase(path);
+    removeSnapshotDirectory(snapshotDirectory);
+}
+
+TEST_CASE("Asynchronous command acceptance and task outcome survive restart", "[persistence][idempotency][task]")
+{
+    const auto path = uniqueDatabasePath();
+    removeDatabase(path);
+    const auto projectId = validId<ProjectId>("project.async-replay");
+    const auto documentId = validId<DocumentId>("document.async-replay");
+    const auto sessionId = validId<SessionId>("session.async-replay");
+    const auto key = validId<IdempotencyKey>("idempotency.async-replay");
+    TaskId acceptedTaskId = validId<TaskId>("task.placeholder");
+
+    {
+        lasercnc::kernel::AppKernel kernel;
+        REQUIRE(kernel.addDocument(projectId, documentId).hasValue());
+        auto commandHandler = std::make_shared<PersistentAsyncHandler>();
+        auto taskHandler = std::make_shared<PersistentTaskHandler>();
+        configureAsyncRuntimeKernel(
+            kernel, path, sessionId, commandHandler, taskHandler);
+        REQUIRE(kernel.bootstrap().hasValue());
+        auto accepted = kernel.commands().execute(persistentAsyncCommandRequest(
+            "request.async-replay.first",
+            projectId,
+            documentId,
+            sessionId,
+            key));
+        REQUIRE(accepted.hasValue());
+        CHECK_FALSE(accepted.value().replayed);
+        REQUIRE(accepted.value().taskId.has_value());
+        acceptedTaskId = *accepted.value().taskId;
+        auto terminal = kernel.tasks().wait(acceptedTaskId, std::chrono::seconds(2));
+        REQUIRE(terminal.hasValue());
+        CHECK(terminal.value().state == TaskState::Succeeded);
+        REQUIRE(terminal.value().result.has_value());
+        CHECK(*terminal.value().result == Value {Value::Object {
+            {"value", Value {"completed"}}}});
+        CHECK(commandHandler->calls.load() == 1U);
+        CHECK(taskHandler->calls.load() == 1U);
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+
+    {
+        lasercnc::kernel::AppKernel kernel;
+        auto commandHandler = std::make_shared<PersistentAsyncHandler>();
+        auto taskHandler = std::make_shared<PersistentTaskHandler>();
+        configureAsyncRuntimeKernel(
+            kernel, path, sessionId, commandHandler, taskHandler);
+        REQUIRE(kernel.bootstrap().hasValue());
+        auto replay = kernel.commands().execute(persistentAsyncCommandRequest(
+            "request.async-replay.retry",
+            projectId,
+            documentId,
+            sessionId,
+            key));
+        REQUIRE(replay.hasValue());
+        CHECK(replay.value().replayed);
+        CHECK(replay.value().taskId == acceptedTaskId);
+        CHECK(commandHandler->calls.load() == 0U);
+        CHECK(taskHandler->calls.load() == 0U);
+
+        auto terminal = kernel.tasks().snapshot(acceptedTaskId);
+        REQUIRE(terminal.hasValue());
+        CHECK(terminal.value().state == TaskState::Succeeded);
+        REQUIRE(terminal.value().result.has_value());
+        CHECK(*terminal.value().result == Value {Value::Object {
+            {"value", Value {"completed"}}}});
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+    removeDatabase(path);
+}
+
+TEST_CASE("Task completion exposes persistence failure without changing task outcome", "[persistence][task][failure]")
+{
+    const auto path = uniqueDatabasePath();
+    removeDatabase(path);
+    lasercnc::kernel::AppKernel kernel;
+    auto adapter = std::make_shared<JsonconsAdapter>();
+    REQUIRE(kernel.executionServices()
+                .configure(adapter, std::make_shared<NullLogService>())
+                .hasValue());
+    auto taskHandler = std::make_shared<PersistentTaskHandler>();
+    REQUIRE(kernel.taskRegistry()
+                .registerHandler(persistentTaskDescriptor(), taskHandler)
+                .hasValue());
+    auto sqlite = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+    REQUIRE(sqlite.hasValue());
+    auto failing = std::make_unique<FailingTaskTerminalBackend>(
+        std::move(sqlite).value());
+    auto* observed = failing.get();
+    REQUIRE(kernel.persistence()
+                .configure(
+                    std::move(failing),
+                    adapter,
+                    std::make_shared<Sha256HashService>())
+                .hasValue());
+    auto executor = BsThreadPoolExecutor::create(BsThreadPoolExecutorOptions {1U});
+    REQUIRE(executor.hasValue());
+    REQUIRE(kernel.configureTaskExecutor(std::move(executor).value()).hasValue());
+    REQUIRE(kernel.bootstrap().hasValue());
+    observed->failTerminal.store(true, std::memory_order_release);
+
+    const auto request = TaskRequest {
+        validId<TaskId>("task.persistence-failure"),
+        validId<TaskName>("kernel.persistence.async-task"),
+        Value {Value::Object {{"input", Value {"durable"}}}},
+        validId<TraceId>("trace.persistence-failure")};
+    REQUIRE(kernel.tasks().submit(request).hasValue());
+    auto terminal = kernel.tasks().wait(request.taskId, std::chrono::seconds(2));
+    REQUIRE(terminal.hasValue());
+    CHECK(terminal.value().state == TaskState::Succeeded);
+    REQUIRE(kernel.scheduler().persistenceFailures().size() == 1U);
+    CHECK(std::string(kernel.scheduler().persistenceFailures().front().code.value())
+          == "Test.TaskTerminalPersistFailed");
+    REQUIRE(kernel.shutdown().hasValue());
+    removeDatabase(path);
+}
+
+TEST_CASE("Task history marks interrupted work and rejects tampering", "[persistence][task][recovery]")
+{
+    const auto path = uniqueDatabasePath();
+    removeDatabase(path);
+    const auto taskId = validId<TaskId>("task.interrupted");
+    const auto completedTaskId = validId<TaskId>("task.completed-history");
+    const auto request = TaskRequest {
+        taskId,
+        validId<TaskName>("kernel.persistence.interrupted"),
+        Value {Value::Object {{"input", Value {"durable"}}}},
+        validId<TraceId>("trace.persistence.interrupted")};
+
+    {
+        PersistenceService service;
+        configureService(service, path);
+        REQUIRE(service.acceptTask(request, std::nullopt).hasValue());
+        auto completedRequest = request;
+        completedRequest.taskId = completedTaskId;
+        REQUIRE(service.acceptTask(completedRequest, std::nullopt).hasValue());
+        const auto completed = TaskSnapshot {
+            completedTaskId,
+            request.task,
+            TaskState::Succeeded,
+            1.0,
+            "done",
+            request.traceId,
+            std::nullopt,
+            Value {"result"},
+            std::nullopt};
+        REQUIRE(service.recordTaskTerminal(completed).hasValue());
+        REQUIRE(service.recordTaskTerminal(completed).hasValue());
+        auto conflicting = completed;
+        conflicting.result = Value {"different"};
+        auto rejected = service.recordTaskTerminal(conflicting);
+        REQUIRE_FALSE(rejected.hasValue());
+        CHECK(std::string(rejected.error().code.value())
+              == "Persistence.TaskOutcomeConflict");
+        auto accepted = service.taskHistory(taskId);
+        REQUIRE(accepted.hasValue());
+        REQUIRE(accepted.value().has_value());
+        CHECK(accepted.value()->state == TaskState::Pending);
+    }
+    {
+        PersistenceService reopened;
+        configureService(reopened, path);
+        auto interrupted = reopened.taskHistory(taskId);
+        REQUIRE(interrupted.hasValue());
+        REQUIRE(interrupted.value().has_value());
+        CHECK(interrupted.value()->state == TaskState::Failed);
+        REQUIRE(interrupted.value()->error.has_value());
+        CHECK(std::string(interrupted.value()->error->code.value())
+              == "Task.InterruptedByRestart");
+
+        auto completed = reopened.taskHistory(completedTaskId);
+        REQUIRE(completed.hasValue());
+        REQUIRE(completed.value().has_value());
+        CHECK(completed.value()->state == TaskState::Succeeded);
+        REQUIRE(completed.value()->result.has_value());
+        CHECK(*completed.value()->result == Value {"result"});
+
+        auto tamper = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+        REQUIRE(tamper.hasValue());
+        const std::array parameters {Value {"tampered"}, Value {std::string(taskId.value())}};
+        REQUIRE(tamper.value()
+                    ->execute(
+                        "UPDATE task_history SET request_payload=? WHERE task_id=?",
+                        parameters)
+                    .hasValue());
+        auto corrupted = reopened.taskHistory(taskId);
+        REQUIRE_FALSE(corrupted.hasValue());
+        CHECK(std::string(corrupted.error().code.value())
+              == "Persistence.TaskRequestDigestMismatch");
+
+        const std::array terminalParameters {
+            Value {"tampered"}, Value {std::string(completedTaskId.value())}};
+        REQUIRE(tamper.value()
+                    ->execute(
+                        "UPDATE task_history SET terminal_payload=? WHERE task_id=?",
+                        terminalParameters)
+                    .hasValue());
+        auto corruptedTerminal = reopened.taskHistory(completedTaskId);
+        REQUIRE_FALSE(corruptedTerminal.hasValue());
+        CHECK(std::string(corruptedTerminal.error().code.value())
+              == "Persistence.TaskTerminalDigestMismatch");
+    }
+    removeDatabase(path);
+}
+
+TEST_CASE("AppKernel persists diagnostic history without changing check results", "[persistence][diagnostics]")
+{
+    const auto path = uniqueDatabasePath();
+    removeDatabase(path);
+    const auto diagnosticId = validId<DiagnosticId>("kernel.persistence.health");
+
+    {
+        lasercnc::kernel::AppKernel kernel;
+        auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+        REQUIRE(backend.hasValue());
+        REQUIRE(kernel.persistence()
+                    .configure(
+                        std::move(backend).value(),
+                        std::make_shared<JsonconsAdapter>(),
+                        std::make_shared<Sha256HashService>())
+                    .hasValue());
+        auto check = std::make_shared<FixedDiagnosticCheck>(diagnosticId);
+        REQUIRE(kernel.diagnostics().registerCheck(diagnosticId, check).hasValue());
+        REQUIRE(kernel.bootstrap().hasValue());
+        auto first = kernel.diagnostics().run(diagnosticId);
+        auto second = kernel.diagnostics().run(diagnosticId);
+        REQUIRE(first.hasValue());
+        REQUIRE(second.hasValue());
+        CHECK(first.value().status
+              == lasercnc::observability::DiagnosticStatus::Degraded);
+        CHECK(second.value().status
+              == lasercnc::observability::DiagnosticStatus::Degraded);
+        CHECK(kernel.diagnostics().exporterFailures().empty());
+        CHECK(check->calls == 2U);
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+
+    {
+        PersistenceService reopened;
+        configureService(reopened, path);
+        auto history = reopened.diagnosticHistory(diagnosticId);
+        REQUIRE(history.hasValue());
+        REQUIRE(history.value().size() == 2U);
+        CHECK(history.value().front().summary == "maintenance window");
+        CHECK(history.value().back().details == Value {Value::Object {
+            {"attempt", Value {"2"}}}});
+        auto latest = reopened.latestDiagnostics();
+        REQUIRE(latest.hasValue());
+        REQUIRE(latest.value().size() == 1U);
+        CHECK(latest.value().front().id == diagnosticId);
+        CHECK(latest.value().front().details == history.value().back().details);
+
+        auto tamper = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+        REQUIRE(tamper.hasValue());
+        const std::array parameters {
+            Value {"tampered"}, Value {std::string(diagnosticId.value())}};
+        REQUIRE(tamper.value()
+                    ->execute(
+                        "UPDATE diagnostic_history SET payload=? "
+                        "WHERE diagnostic_id=? AND sequence=1",
+                        parameters)
+                    .hasValue());
+        auto corrupted = reopened.diagnosticHistory(diagnosticId);
+        REQUIRE_FALSE(corrupted.hasValue());
+        CHECK(std::string(corrupted.error().code.value())
+              == "Persistence.DiagnosticDigestMismatch");
+        CHECK_FALSE(reopened.latestDiagnostics().hasValue());
+    }
+    removeDatabase(path);
+}
+
+TEST_CASE("Diagnostic persistence failure is isolated after the in-memory report", "[persistence][diagnostics][failure]")
+{
+    const auto path = uniqueDatabasePath();
+    removeDatabase(path);
+    lasercnc::kernel::AppKernel kernel;
+    auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+    REQUIRE(backend.hasValue());
+    REQUIRE(kernel.persistence()
+                .configure(
+                    std::move(backend).value(),
+                    std::make_shared<JsonconsAdapter>(),
+                    std::make_shared<Sha256HashService>())
+                .hasValue());
+    const auto diagnosticId = validId<DiagnosticId>("kernel.persistence.failure");
+    REQUIRE(kernel.diagnostics()
+                .registerCheck(
+                    diagnosticId,
+                    std::make_shared<FixedDiagnosticCheck>(diagnosticId))
+                .hasValue());
+    REQUIRE(kernel.bootstrap().hasValue());
+    auto tamper = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+    REQUIRE(tamper.hasValue());
+    REQUIRE(tamper.value()->execute("DROP TABLE diagnostic_history").hasValue());
+
+    auto report = kernel.diagnostics().run(diagnosticId);
+    REQUIRE(report.hasValue());
+    CHECK(report.value().status
+          == lasercnc::observability::DiagnosticStatus::Degraded);
+    REQUIRE(kernel.diagnostics().latest().size() == 1U);
+    REQUIRE(kernel.diagnostics().exporterFailures().size() == 1U);
+    CHECK(std::string(
+              kernel.diagnostics().exporterFailures().front().code.value())
+          == "Persistence.DatabaseFailed");
+    REQUIRE(kernel.shutdown().hasValue());
+    removeDatabase(path);
+}
+
 TEST_CASE("PersistenceService rolls back migration exceptions and rejects newer schemas", "[persistence][migration]")
 {
     auto throwing = std::make_unique<ThrowingBackend>();
@@ -749,7 +1461,7 @@ TEST_CASE("PersistenceService rolls back migration exceptions and rejects newer 
                         "CREATE TABLE schema_migrations("
                         "version INTEGER PRIMARY KEY NOT NULL,applied_at TEXT NOT NULL)")
                     .hasValue());
-        const std::array parameters {Value {std::int64_t {3}}, Value {"future"}};
+        const std::array parameters {Value {std::int64_t {6}}, Value {"future"}};
         REQUIRE(backend.value()
                     ->execute(
                         "INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)",

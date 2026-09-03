@@ -12,6 +12,10 @@ namespace lasercnc::runtime {
 class TransactionManager;
 }
 
+namespace lasercnc::persistence {
+class PersistenceService;
+}
+
 namespace lasercnc::messaging {
 
 struct PendingDomainEvent final {
@@ -34,6 +38,7 @@ public:
     [[nodiscard]] std::size_t sequence() const noexcept;
 
 private:
+    friend class persistence::PersistenceService;
     friend class runtime::TransactionManager;
 
     CommittedDomainEvent(

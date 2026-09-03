@@ -134,6 +134,30 @@ foundation::Result<void> ApplicationTransaction::ensureActive() const
         transactionId_));
 }
 
+foundation::Result<void> ApplicationTransaction::attachIdempotency(
+    TransactionIdempotency idempotency)
+{
+    auto active = ensureActive();
+    if(!active) {
+        return active;
+    }
+    if(idempotency_.has_value()) {
+        return fail(foundation::makeError(
+            "Transaction.IdempotencyAlreadyAttached",
+            foundation::ErrorCategory::Conflict,
+            "A transaction already has durable idempotency material"));
+    }
+    try {
+        idempotency_.emplace(std::move(idempotency));
+        return foundation::Result<void>::success();
+    } catch(const std::exception& exception) {
+        return fail(unexpectedFailure(transactionId_, "attachIdempotency", exception.what()));
+    } catch(...) {
+        return fail(unexpectedFailure(
+            transactionId_, "attachIdempotency", "Unknown failure"));
+    }
+}
+
 foundation::Result<void> ApplicationTransaction::fail(foundation::Error error)
 {
     failure_ = error;

@@ -210,7 +210,7 @@ foundation::Result<TransactionCommit> TransactionManager::commit(
     }
 
     if(persistence_ != nullptr && persistence_->configured()) {
-        auto persisted = persistence_->append(*receipt);
+        auto persisted = persistence_->append(*receipt, transaction.idempotency_);
         if(!persisted) {
             return foundation::Result<TransactionCommit>::failure(
                 std::move(persisted).error());

@@ -75,6 +75,28 @@ private:
     Function function_;
 };
 
+class ReentrantFailingDiagnosticExporter final : public IDiagnosticExporter {
+public:
+    explicit ReentrantFailingDiagnosticExporter(DiagnosticsService& service)
+        : service_(service)
+    {
+    }
+
+    Result<void> exportReport(const DiagnosticReport&) override
+    {
+        observedReports.store(service_.latest().size());
+        return Result<void>::failure(makeError(
+            "Test.DiagnosticExportFailed",
+            ErrorCategory::Infrastructure,
+            "expected"));
+    }
+
+    std::atomic_size_t observedReports{0U};
+
+private:
+    DiagnosticsService& service_;
+};
+
 class RecordingLogService final : public ILogService {
 public:
     Result<void> write(const LogRecord& record) override
@@ -207,7 +229,10 @@ TEST_CASE("LocalMetricsService aggregates deterministically without exporter con
 
 TEST_CASE("DiagnosticsService runs checks outside locks and converts failures to reports", "[observability][diagnostics]")
 {
-    DiagnosticsService diagnostics;
+    DiagnosticsService diagnostics(1U);
+    auto exporter = std::make_shared<ReentrantFailingDiagnosticExporter>(diagnostics);
+    REQUIRE(diagnostics.addExporter(exporter).hasValue());
+    CHECK_FALSE(diagnostics.addExporter(nullptr).hasValue());
     const auto healthyId = validId<DiagnosticId>("kernel.healthy");
     const auto failingId = validId<DiagnosticId>("kernel.failing");
     const auto throwingId = validId<DiagnosticId>("kernel.throwing");
@@ -239,6 +264,7 @@ TEST_CASE("DiagnosticsService runs checks outside locks and converts failures to
     CHECK_FALSE(diagnostics.registerCheck(healthyId, healthy).hasValue());
     diagnostics.freeze();
     CHECK(diagnostics.frozen());
+    CHECK_FALSE(diagnostics.addExporter(exporter).hasValue());
     CHECK_FALSE(diagnostics.registerCheck(
         validId<DiagnosticId>("kernel.late"), healthy).hasValue());
 
@@ -251,6 +277,10 @@ TEST_CASE("DiagnosticsService runs checks outside locks and converts failures to
     CHECK(reports[2].id == throwingId);
     CHECK(reports[2].status == DiagnosticStatus::Unhealthy);
     CHECK(diagnostics.latest().size() == 3U);
+    CHECK(exporter->observedReports.load() == 3U);
+    REQUIRE(diagnostics.exporterFailures().size() == 1U);
+    CHECK(std::string(diagnostics.exporterFailures().front().code.value())
+          == "Test.DiagnosticExportFailed");
     auto missing = diagnostics.run(validId<DiagnosticId>("kernel.missing"));
     REQUIRE_FALSE(missing.hasValue());
     CHECK(std::string(missing.error().code.value()) == "Diagnostics.NotFound");
