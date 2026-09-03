@@ -16,6 +16,19 @@
         "LCNC_BUILD_TESTING": "ON",
         "LCNC_WARNINGS_AS_ERRORS": "ON"
       }
+    },
+    {
+      "name": "vs2022-asan",
+      "displayName": "Visual Studio 2022 x64 ASan RelWithDebInfo",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/vs2022-asan",
+      "cacheVariables": {
+        "CMAKE_CONFIGURATION_TYPES": "RelWithDebInfo",
+        "LCNC_BUILD_TESTING": "ON",
+        "LCNC_WARNINGS_AS_ERRORS": "ON",
+        "LCNC_ENABLE_ASAN": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -28,6 +41,11 @@
       "name": "vs2022-release",
       "configurePreset": "vs2022-debug",
       "configuration": "Release"
+    },
+    {
+      "name": "vs2022-asan",
+      "configurePreset": "vs2022-asan",
+      "configuration": "RelWithDebInfo"
     }
   ],
   "testPresets": [
@@ -43,6 +61,18 @@
       "name": "vs2022-release",
       "configurePreset": "vs2022-debug",
       "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "vs2022-asan",
+      "configurePreset": "vs2022-asan",
+      "configuration": "RelWithDebInfo",
+      "environment": {
+        "ASAN_OPTIONS": "alloc_dealloc_mismatch=1:abort_on_error=1",
+        "ASAN_WIN_CONTINUE_ON_INTERCEPTION_FAILURE": null
+      },
       "output": {
         "outputOnFailure": true
       }

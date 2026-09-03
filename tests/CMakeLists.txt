@@ -20,6 +20,27 @@ lcnc_enable_warnings(lasercnc_foundation_tests)
 include(Catch)
 catch_discover_tests(lasercnc_foundation_tests)
 
+add_test(NAME architecture.asan_configuration_guards
+    COMMAND "${CMAKE_COMMAND}" "-DSOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+        "-DEVIDENCE_ROOT=${CMAKE_CURRENT_BINARY_DIR}/asan-config-probes"
+        "-DGENERATOR=${CMAKE_GENERATOR}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_asan_configuration.cmake")
+set_tests_properties(architecture.asan_configuration_guards PROPERTIES TIMEOUT 60)
+
+if(LCNC_ENABLE_ASAN)
+    add_executable(lasercnc_asan_probe integration/kernel_asan_probe.cpp)
+    target_compile_features(lasercnc_asan_probe PRIVATE cxx_std_20)
+    set_target_properties(lasercnc_asan_probe PROPERTIES CXX_EXTENSIONS OFF)
+    lcnc_enable_warnings(lasercnc_asan_probe)
+    foreach(mode IN ITEMS healthy heap-buffer-overflow heap-use-after-free)
+        add_test(NAME integration.kernel_asan_probe_${mode}
+            COMMAND "${CMAKE_COMMAND}" "-DPROBE=$<TARGET_FILE:lasercnc_asan_probe>"
+                "-DMODE=${mode}" "-DEVIDENCE_ROOT=${CMAKE_CURRENT_BINARY_DIR}/asan-probes"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_asan_probe.cmake")
+        set_tests_properties(integration.kernel_asan_probe_${mode} PROPERTIES TIMEOUT 45)
+    endforeach()
+endif()
+
 # Benchmark harness is test-only; it is not a product command-line host.
 # 中文翻译：基准程序仅用于测试，不是产品命令行宿主。
 if(WIN32)
