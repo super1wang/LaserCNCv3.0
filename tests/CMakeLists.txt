@@ -64,6 +64,7 @@ add_executable(
     unit/runtime/persistence_service_tests.cpp
     unit/runtime/history_runtime_tests.cpp
     unit/runtime/asset_state_tests.cpp
+    unit/runtime/kernel_concurrency_tests.cpp
 )
 target_link_libraries(
     lasercnc_infrastructure_tests
@@ -72,10 +73,12 @@ target_link_libraries(
         Catch2::Catch2WithMain
 )
 target_include_directories(lasercnc_infrastructure_tests PRIVATE "${PROJECT_SOURCE_DIR}/tests/support")
+target_compile_definitions(lasercnc_infrastructure_tests PRIVATE
+    LCNC_STRESS_TEST_ROOT="${CMAKE_CURRENT_BINARY_DIR}/stress-contract-runs")
 target_compile_features(lasercnc_infrastructure_tests PRIVATE cxx_std_20)
 set_target_properties(lasercnc_infrastructure_tests PROPERTIES CXX_EXTENSIONS OFF)
 lcnc_enable_warnings(lasercnc_infrastructure_tests)
-catch_discover_tests(lasercnc_infrastructure_tests)
+catch_discover_tests(lasercnc_infrastructure_tests PROPERTIES TIMEOUT 120)
 
 add_test(
     NAME architecture.kernel_public_api_boundary
