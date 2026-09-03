@@ -23,6 +23,8 @@
 namespace lasercnc::infrastructure {
 namespace {
 
+std::atomic_ullong temporarySequence{0U};
+
 std::string pathToUtf8(const std::filesystem::path& path)
 {
     const auto encoded = path.u8string();
@@ -201,7 +203,6 @@ public:
     std::filesystem::path directory_;
     std::size_t maximumPayloadBytes_;
     mutable std::mutex mutex_;
-    std::atomic_ullong temporarySequence_{0U};
 };
 
 FilesystemSnapshotStore::FilesystemSnapshotStore(
@@ -296,7 +297,7 @@ FilesystemSnapshotStore::writeAtomically(
 
     const auto temporary = target.value().wstring() + L".tmp."
         + std::to_wstring(GetCurrentProcessId()) + L'.' + std::to_wstring(GetTickCount64()) + L'.'
-        + std::to_wstring(implementation_->temporarySequence_.fetch_add(1U));
+        + std::to_wstring(temporarySequence.fetch_add(1U));
     FileHandle file(CreateFileW(
         temporary.c_str(),
         GENERIC_WRITE,

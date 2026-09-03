@@ -25,6 +25,7 @@ target_sources(
             "${PROJECT_SOURCE_DIR}/include/lasercnc/platform/config_serializer.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/platform/persistence_backend.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/platform/hash_service.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/platform/asset_store.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/platform/snapshot_store.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/platform/task_executor.hpp"
 )

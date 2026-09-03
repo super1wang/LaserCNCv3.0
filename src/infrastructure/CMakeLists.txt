@@ -10,6 +10,7 @@ target_sources(
         logging/spdlog/spdlog_log_service.cpp
         persistence/sqlite/sqlite_persistence_backend.cpp
         persistence/filesystem/windows/filesystem_snapshot_store.cpp
+        persistence/filesystem/filesystem_asset_store.cpp
         serialization/jsoncons/jsoncons_adapter.cpp
     PUBLIC
         FILE_SET HEADERS
@@ -21,6 +22,7 @@ target_sources(
             "${PROJECT_SOURCE_DIR}/include/lasercnc/infrastructure/spdlog_log_service.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/infrastructure/sqlite_persistence_backend.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/infrastructure/filesystem_snapshot_store.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/infrastructure/filesystem_asset_store.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/infrastructure/toml_config_adapter.hpp"
 )
 
