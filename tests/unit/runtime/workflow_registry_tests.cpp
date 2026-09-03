@@ -637,6 +637,30 @@ TEST_CASE("AppKernel rejects workflow operation drift before Ready", "[workflow]
     CHECK(kernel.state() == AppKernelState::Failed);
 }
 
+TEST_CASE("DocumentRuntime blocks close while a workflow remains active",
+          "[workflow][runtime][document][lifecycle]")
+{
+    WorkflowRuntimeFixture fixture;
+    fixture.bootstrap(workflowDefinition({barrierStep("step.barrier", {})}));
+    const auto request = workflowRequest("workflow.document-close-blocker");
+    auto started = fixture.kernel.workflows().startWorkflow(request);
+    REQUIRE(started.hasValue());
+    CHECK_FALSE(isTerminal(started.value().state));
+
+    auto refused = fixture.kernel.documentRuntime().close(request.documentId);
+    REQUIRE_FALSE(refused.hasValue());
+    CHECK(std::string(refused.error().code.value()) == "Document.CloseBlocked");
+    auto lifecycle = fixture.kernel.documentRuntime().lifecycle(request.documentId);
+    REQUIRE(lifecycle.hasValue());
+    CHECK(lifecycle.value().state == DocumentLifecycleState::Open);
+
+    auto cancelled = fixture.kernel.workflows().cancel(request.workflowId);
+    REQUIRE(cancelled.hasValue());
+    CHECK(isTerminal(cancelled.value().state));
+    REQUIRE(fixture.kernel.documentRuntime().close(request.documentId).hasValue());
+    REQUIRE(fixture.kernel.shutdown().hasValue());
+}
+
 TEST_CASE("WorkflowRuntime binds variables and skips false branches", "[workflow][runtime]")
 {
     WorkflowRuntimeFixture fixture;
@@ -969,6 +993,33 @@ TEST_CASE("ScriptRegistry validates exact references and rejects include cycles"
         CHECK(std::string(bootstrapped.error().cause->code.value())
               == "Script.IncludeCycle");
     }
+}
+
+TEST_CASE("DocumentRuntime blocks close while a script remains active",
+          "[script][runtime][document][lifecycle]")
+{
+    WorkflowRuntimeFixture fixture;
+    REQUIRE(fixture.kernel.scriptRegistry()
+                .registerDefinition(scriptDefinition(
+                    "script.document-close",
+                    {scriptAssign("node.pending", "value", Value {true})}))
+                .hasValue());
+    REQUIRE(fixture.kernel.bootstrap().hasValue());
+
+    auto request = scriptRequest(
+        "script-execution.document-close", "script.document-close");
+    auto started = fixture.kernel.scripts().startScript(request);
+    REQUIRE(started.hasValue());
+    CHECK_FALSE(isTerminal(started.value().state));
+
+    auto refused = fixture.kernel.documentRuntime().close(request.documentId);
+    REQUIRE_FALSE(refused.hasValue());
+    CHECK(std::string(refused.error().code.value()) == "Document.CloseBlocked");
+    auto cancelled = fixture.kernel.scripts().cancel(request.executionId);
+    REQUIRE(cancelled.hasValue());
+    CHECK(isTerminal(cancelled.value().state));
+    REQUIRE(fixture.kernel.documentRuntime().close(request.documentId).hasValue());
+    REQUIRE(fixture.kernel.shutdown().hasValue());
 }
 
 TEST_CASE("ScriptRuntime evaluates structured control flow through registered ports", "[script][runtime]")

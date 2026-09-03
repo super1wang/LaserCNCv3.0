@@ -10,6 +10,7 @@
 #include <utility>
 
 namespace lasercnc::runtime {
+class DocumentRuntime;
 class TransactionManager;
 }
 
@@ -36,10 +37,13 @@ public:
 
 private:
     friend class kernel::AppKernel;
+    friend class runtime::DocumentRuntime;
     friend class runtime::TransactionManager;
 
     [[nodiscard]] foundation::Result<void> restoreDocuments(
         std::span<const DocumentImage> images);
+    [[nodiscard]] foundation::Result<void> detachDocument(
+        const kernel::DocumentId& documentId);
 
     struct StoredDocument final {
         StoredDocument(kernel::ProjectId project, RevisionSet revisionSet)

@@ -8,6 +8,7 @@
 #include <lasercnc/persistence/persistence_service.hpp>
 #include <lasercnc/runtime/capability_service.hpp>
 #include <lasercnc/runtime/command_registry.hpp>
+#include <lasercnc/runtime/document_runtime.hpp>
 #include <lasercnc/runtime/execution_services.hpp>
 #include <lasercnc/runtime/effect_executor.hpp>
 #include <lasercnc/runtime/transaction_manager.hpp>
@@ -266,7 +267,8 @@ public:
         persistence::PersistenceService& persistenceService,
         observability::ITraceService& traceService,
         observability::IMetricsService& metricsService,
-        std::size_t capacity)
+        std::size_t capacity,
+        DocumentRuntime* documentRuntime)
         : registry(commandRegistry),
           documents(documentStore),
           effects(effectExecutor),
@@ -278,6 +280,7 @@ public:
           persistence(persistenceService),
           traces(traceService),
           metrics(metricsService),
+          documentRuntime(documentRuntime),
           idempotencyCapacity(capacity)
     {
     }
@@ -843,6 +846,7 @@ public:
     persistence::PersistenceService& persistence;
     observability::ITraceService& traces;
     observability::IMetricsService& metrics;
+    DocumentRuntime* documentRuntime;
     const std::size_t idempotencyCapacity;
     std::atomic_bool accepting{false};
     std::atomic_size_t activeExecutions{0U};
@@ -863,7 +867,8 @@ CommandRuntime::CommandRuntime(
     persistence::PersistenceService& persistence,
     observability::ITraceService& traces,
     observability::IMetricsService& metrics,
-    std::size_t idempotencyCapacity)
+    std::size_t idempotencyCapacity,
+    DocumentRuntime* documentRuntime)
     : impl_(std::make_unique<Impl>(
           registry,
           documents,
@@ -876,7 +881,8 @@ CommandRuntime::CommandRuntime(
           persistence,
           traces,
           metrics,
-          idempotencyCapacity))
+          idempotencyCapacity,
+          documentRuntime))
 {
 }
 
@@ -896,6 +902,17 @@ foundation::Result<CommandResponse> CommandRuntime::execute(const CommandRequest
                 foundation::ErrorCategory::Conflict,
                 "The command runtime is not accepting requests",
                 request));
+        }
+        std::optional<DocumentActivityLease> documentActivity;
+        if(impl_->documentRuntime != nullptr
+           && request.context.documentId.has_value()) {
+            auto admitted = impl_->documentRuntime->acquireActivity(
+                *request.context.documentId, DocumentActivityKind::Command);
+            if(!admitted) {
+                return foundation::Result<CommandResponse>::failure(
+                    std::move(admitted).error());
+            }
+            documentActivity.emplace(std::move(admitted).value());
         }
         ActiveExecution active(impl_->activeExecutions);
 

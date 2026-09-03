@@ -4,6 +4,7 @@ target_sources(
         transaction/domain_event.cpp
         transaction/application_transaction.cpp
         transaction/transaction_manager.cpp
+        document/document_runtime.cpp
         execution/capability_service.cpp
         execution/execution_services.cpp
         execution/execution_contract.cpp
@@ -24,6 +25,7 @@ target_sources(
         observability/log_observability_exporter.cpp
         observability/diagnostics_service.cpp
         persistence/persistence_service.cpp
+        persistence/document_persistence.cpp
         persistence/idempotency_persistence.cpp
         persistence/effect_persistence.cpp
         persistence/recovery.cpp
@@ -44,6 +46,7 @@ target_sources(
             "${PROJECT_SOURCE_DIR}/include/lasercnc/messaging/domain_event.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/transaction.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/transaction_manager.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/document_runtime.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/capability_service.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/execution_services.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/execution_contract.hpp"

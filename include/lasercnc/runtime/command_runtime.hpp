@@ -29,6 +29,7 @@ class CapabilityService;
 class CommandRegistry;
 class ExecutionServices;
 class EffectExecutor;
+class DocumentRuntime;
 class TransactionManager;
 class TaskRuntime;
 
@@ -54,7 +55,8 @@ public:
         persistence::PersistenceService& persistence,
         observability::ITraceService& traces,
         observability::IMetricsService& metrics,
-        std::size_t idempotencyCapacity = 1024U);
+        std::size_t idempotencyCapacity = 1024U,
+        DocumentRuntime* documentRuntime = nullptr);
     ~CommandRuntime();
 
     CommandRuntime(const CommandRuntime&) = delete;

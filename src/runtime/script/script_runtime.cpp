@@ -5,6 +5,7 @@
 #include <lasercnc/observability/trace_service.hpp>
 #include <lasercnc/runtime/command_runtime.hpp>
 #include <lasercnc/runtime/execution_services.hpp>
+#include <lasercnc/runtime/document_runtime.hpp>
 #include <lasercnc/runtime/query_runtime.hpp>
 #include <lasercnc/runtime/script_registry.hpp>
 #include <lasercnc/runtime/task_runtime.hpp>
@@ -410,7 +411,8 @@ public:
         observability::ITraceService& traces,
         observability::IMetricsService& metrics,
         std::size_t executionNodeLimit,
-        std::size_t includeDepthLimit)
+        std::size_t includeDepthLimit,
+        DocumentRuntime* documentRuntime)
         : registry_(registry),
           commands_(commands),
           queries_(queries),
@@ -420,7 +422,8 @@ public:
           traces_(traces),
           metrics_(metrics),
           executionNodeLimit_(executionNodeLimit),
-          includeDepthLimit_(includeDepthLimit)
+          includeDepthLimit_(includeDepthLimit),
+          documentRuntime_(documentRuntime)
     {
     }
 
@@ -460,6 +463,16 @@ public:
                 foundation::ErrorCategory::Conflict,
                 "The script runtime is not accepting new executions",
                 &request.executionId));
+        }
+        std::optional<DocumentActivityLease> documentActivity;
+        if(documentRuntime_ != nullptr) {
+            auto admitted = documentRuntime_->acquireActivity(
+                request.documentId, DocumentActivityKind::ScriptAdmission);
+            if(!admitted) {
+                return foundation::Result<ScriptSnapshot>::failure(
+                    std::move(admitted).error());
+            }
+            documentActivity.emplace(std::move(admitted).value());
         }
         auto definition = registry_.resolve(request.script);
         if(!definition) {
@@ -698,6 +711,21 @@ public:
     std::size_t activeExecutionCount() const noexcept
     {
         return activeExecutions_.load(std::memory_order_acquire);
+    }
+
+    std::size_t activeInstanceCount(const kernel::DocumentId& documentId) const
+    {
+        std::shared_lock lock(instancesMutex_);
+        std::size_t count = 0U;
+        for(const auto& [unusedExecutionId, instance] : instances_) {
+            static_cast<void>(unusedExecutionId);
+            std::lock_guard instanceLock(instance->mutex);
+            if(instance->request.documentId == documentId
+               && !isTerminal(instance->snapshot.state)) {
+                ++count;
+            }
+        }
+        return count;
     }
 
     bool accepting() const noexcept
@@ -1349,6 +1377,7 @@ private:
     observability::IMetricsService& metrics_;
     const std::size_t executionNodeLimit_;
     const std::size_t includeDepthLimit_;
+    DocumentRuntime* documentRuntime_;
     mutable std::shared_mutex instancesMutex_;
     std::map<kernel::ScriptExecutionId, std::shared_ptr<Instance>> instances_;
     std::atomic_bool accepting_{false};
@@ -1365,7 +1394,8 @@ ScriptRuntime::ScriptRuntime(
     observability::ITraceService& traces,
     observability::IMetricsService& metrics,
     std::size_t executionNodeLimit,
-    std::size_t includeDepthLimit)
+    std::size_t includeDepthLimit,
+    DocumentRuntime* documentRuntime)
     : impl_(std::make_unique<Impl>(
           registry,
           commands,
@@ -1376,7 +1406,8 @@ ScriptRuntime::ScriptRuntime(
           traces,
           metrics,
           executionNodeLimit,
-          includeDepthLimit))
+          includeDepthLimit,
+          documentRuntime))
 {
 }
 
@@ -1444,6 +1475,12 @@ foundation::Result<ScriptSnapshot> ScriptRuntime::snapshot(
 std::size_t ScriptRuntime::activeExecutionCount() const noexcept
 {
     return impl_->activeExecutionCount();
+}
+
+std::size_t ScriptRuntime::activeInstanceCount(
+    const kernel::DocumentId& documentId) const
+{
+    return impl_->activeInstanceCount(documentId);
 }
 
 bool ScriptRuntime::accepting() const noexcept

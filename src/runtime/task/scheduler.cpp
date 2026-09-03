@@ -507,6 +507,22 @@ std::size_t Scheduler::activeTaskCount() const
         [](const auto& entry) { return !isTerminal(entry.second.state); }));
 }
 
+std::size_t Scheduler::activeTaskCount(
+    const kernel::DocumentId& documentId) const
+{
+    std::lock_guard lock(core_->mutex);
+    std::size_t count = 0U;
+    for(const auto& [unusedTaskId, record] : core_->records) {
+        static_cast<void>(unusedTaskId);
+        if(record.request.documentId.has_value()
+           && *record.request.documentId == documentId
+           && !isTerminal(record.state)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 std::vector<foundation::Error> Scheduler::persistenceFailures() const
 {
     std::lock_guard lock(core_->mutex);

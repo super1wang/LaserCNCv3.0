@@ -17,6 +17,7 @@ class PersistenceService;
 namespace lasercnc::runtime {
 
 class CommandRuntime;
+class DocumentRuntime;
 
 class TaskRuntime final {
 public:
@@ -24,13 +25,15 @@ public:
         TaskRegistry& registry,
         Scheduler& scheduler,
         ExecutionServices& executionServices,
-        const state::DocumentStore& documents);
+        const state::DocumentStore& documents,
+        DocumentRuntime* documentRuntime = nullptr);
     TaskRuntime(
         TaskRegistry& registry,
         Scheduler& scheduler,
         ExecutionServices& executionServices,
         const state::DocumentStore& documents,
-        persistence::PersistenceService& persistence);
+        persistence::PersistenceService& persistence,
+        DocumentRuntime* documentRuntime = nullptr);
 
     void start() noexcept;
     void stop() noexcept;
@@ -41,9 +44,12 @@ public:
         const kernel::TaskId& taskId,
         std::chrono::milliseconds timeout) const;
     [[nodiscard]] std::size_t activeExecutionCount() const;
+    [[nodiscard]] std::size_t activeExecutionCount(
+        const kernel::DocumentId& documentId) const;
 
 private:
     friend class CommandRuntime;
+    friend class kernel::AppKernel;
 
     [[nodiscard]] foundation::Result<void> submit(
         TaskRequest request,
@@ -54,6 +60,7 @@ private:
     ExecutionServices& executionServices_;
     const state::DocumentStore& documents_;
     persistence::PersistenceService* persistence_{nullptr};
+    DocumentRuntime* documentRuntime_{nullptr};
     std::atomic_bool accepting_{false};
 };
 

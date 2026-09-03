@@ -51,6 +51,23 @@ struct SnapshotRecord final {
     std::chrono::system_clock::time_point createdAt;
 };
 
+enum class DocumentPersistenceState : std::uint8_t {
+    Detached,
+    Opening,
+    Open,
+    Closing,
+    Failed,
+    Removed
+};
+
+struct DocumentCatalogRecord final {
+    kernel::ProjectId projectId;
+    kernel::DocumentId documentId;
+    DocumentPersistenceState state{DocumentPersistenceState::Detached};
+    bool interruptedTransition{false};
+    std::chrono::system_clock::time_point updatedAt;
+};
+
 struct RecoveryReport final {
     std::vector<state::DocumentImage> documents;
     std::uint64_t latestJournalSequence{0U};
@@ -121,6 +138,15 @@ public:
     [[nodiscard]] foundation::Result<std::optional<SnapshotRecord>> latestSnapshot(
         const kernel::DocumentId& documentId) const;
     [[nodiscard]] foundation::Result<RecoveryReport> recover() const;
+    [[nodiscard]] foundation::Result<void> saveDocumentLifecycle(
+        const kernel::ProjectId& projectId,
+        const kernel::DocumentId& documentId,
+        DocumentPersistenceState state);
+    [[nodiscard]] foundation::Result<void> removeDocumentLifecycle(
+        const kernel::ProjectId& projectId,
+        const kernel::DocumentId& documentId);
+    [[nodiscard]] foundation::Result<std::vector<DocumentCatalogRecord>>
+        documentCatalog() const;
     [[nodiscard]] foundation::Result<IdempotencyClaim> claimCommand(
         const kernel::IdempotencyKey& key,
         const foundation::Value& signature);

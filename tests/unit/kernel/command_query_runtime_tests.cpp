@@ -947,3 +947,42 @@ TEST_CASE("AppKernel refuses shutdown while a query execution is active", "[kern
     REQUIRE(running.get().hasValue());
     REQUIRE(fixture.kernel.shutdown().hasValue());
 }
+
+TEST_CASE("DocumentRuntime blocks close while a document query is active",
+          "[runtime][document][query][concurrency]")
+{
+    RuntimeFixture fixture;
+    std::promise<void> entered;
+    auto enteredFuture = entered.get_future();
+    std::promise<void> release;
+    auto handler = std::make_shared<BlockingQueryHandler>(
+        entered, release.get_future().share());
+    REQUIRE(fixture.kernel.queryRegistry().registerHandler(
+        queryDescriptor("kernel.blocking-document-query", ExecutionScope::Document),
+        handler).hasValue());
+    REQUIRE(fixture.kernel.bootstrap().hasValue());
+
+    auto running = std::async(std::launch::async, [&]() {
+        return fixture.kernel.queries().execute(QueryRequest {
+            validId<RequestId>("request.blocking-document-query"),
+            ExecutionContext {fixture.session, fixture.project, fixture.document},
+            validId<QueryName>("kernel.blocking-document-query"),
+            Version {1U, 0U, 0U},
+            Value {Value::Object {}},
+            validId<CorrelationId>("correlation.blocking-document-query"),
+            validId<TraceId>("trace.blocking-document-query")});
+    });
+    enteredFuture.wait();
+
+    auto refused = fixture.kernel.documentRuntime().close(fixture.document);
+    REQUIRE_FALSE(refused.hasValue());
+    CHECK(std::string(refused.error().code.value()) == "Document.ActiveOperations");
+    auto lifecycle = fixture.kernel.documentRuntime().lifecycle(fixture.document);
+    REQUIRE(lifecycle.hasValue());
+    CHECK(lifecycle.value().state == DocumentLifecycleState::Open);
+
+    release.set_value();
+    REQUIRE(running.get().hasValue());
+    REQUIRE(fixture.kernel.documentRuntime().close(fixture.document).hasValue());
+    REQUIRE(fixture.kernel.shutdown().hasValue());
+}

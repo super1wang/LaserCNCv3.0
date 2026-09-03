@@ -6,6 +6,7 @@
 #include <lasercnc/observability/trace_service.hpp>
 #include <lasercnc/runtime/capability_service.hpp>
 #include <lasercnc/runtime/execution_services.hpp>
+#include <lasercnc/runtime/document_runtime.hpp>
 #include <lasercnc/runtime/query_registry.hpp>
 #include <lasercnc/state/document_store.hpp>
 
@@ -159,13 +160,15 @@ public:
         CapabilityService& capabilityService,
         ExecutionServices& services,
         observability::ITraceService& traceService,
-        observability::IMetricsService& metricsService)
+        observability::IMetricsService& metricsService,
+        DocumentRuntime* documentRuntime)
         : registry(queryRegistry),
           documents(documentStore),
           capabilities(capabilityService),
           executionServices(services),
           traces(traceService),
-          metrics(metricsService)
+          metrics(metricsService),
+          documentRuntime(documentRuntime)
     {
     }
 
@@ -299,6 +302,7 @@ public:
     ExecutionServices& executionServices;
     observability::ITraceService& traces;
     observability::IMetricsService& metrics;
+    DocumentRuntime* documentRuntime;
     std::atomic_bool accepting{false};
     std::atomic_size_t activeExecutions{0U};
 };
@@ -309,9 +313,16 @@ QueryRuntime::QueryRuntime(
     CapabilityService& capabilities,
     ExecutionServices& executionServices,
     observability::ITraceService& traces,
-    observability::IMetricsService& metrics)
+    observability::IMetricsService& metrics,
+    DocumentRuntime* documentRuntime)
     : impl_(std::make_unique<Impl>(
-          registry, documents, capabilities, executionServices, traces, metrics))
+          registry,
+          documents,
+          capabilities,
+          executionServices,
+          traces,
+          metrics,
+          documentRuntime))
 {
 }
 
@@ -330,6 +341,17 @@ foundation::Result<QueryResponse> QueryRuntime::execute(const QueryRequest& requ
                 foundation::ErrorCategory::Conflict,
                 "The query runtime is not accepting requests",
                 request));
+        }
+        std::optional<DocumentActivityLease> documentActivity;
+        if(impl_->documentRuntime != nullptr
+           && request.context.documentId.has_value()) {
+            auto admitted = impl_->documentRuntime->acquireActivity(
+                *request.context.documentId, DocumentActivityKind::Query);
+            if(!admitted) {
+                return foundation::Result<QueryResponse>::failure(
+                    std::move(admitted).error());
+            }
+            documentActivity.emplace(std::move(admitted).value());
         }
         ActiveExecution active(impl_->activeExecutions);
         try {

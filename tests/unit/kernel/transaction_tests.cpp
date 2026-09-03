@@ -97,11 +97,16 @@ TEST_CASE("ApplicationTransaction commits objects revisions changes and events a
     REQUIRE(beforeCommit.hasValue());
     CHECK(beforeCommit.value().objects().empty());
     CHECK(fixture.manager.activeTransactionCount() == 1U);
+    CHECK(fixture.manager.activeTransactionCount(fixture.document) == 1U);
+    CHECK(fixture.manager.activeTransactionCount(
+              validId<DocumentId>("document.unrelated"))
+          == 0U);
 
     auto committed = transaction->commit();
     REQUIRE(committed.hasValue());
     CHECK(transaction->transactionState() == TransactionState::Committed);
     CHECK(fixture.manager.activeTransactionCount() == 0U);
+    CHECK(fixture.manager.activeTransactionCount(fixture.document) == 0U);
     CHECK(committed.value().transactionId == validId<TransactionId>("transaction.commit"));
     CHECK(committed.value().projectId == fixture.project);
     CHECK(committed.value().documentId == fixture.document);

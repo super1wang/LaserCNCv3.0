@@ -144,6 +144,22 @@ foundation::Result<void> DocumentStore::restoreDocuments(
     return foundation::Result<void>::success();
 }
 
+foundation::Result<void> DocumentStore::detachDocument(
+    const kernel::DocumentId& documentId)
+{
+    std::unique_lock lock(mutex_);
+    const auto found = documents_.find(documentId);
+    if(found == documents_.end()) {
+        return foundation::Result<void>::failure(documentError(
+            "Document.NotFound",
+            foundation::ErrorCategory::NotFound,
+            "The document was not found",
+            documentId));
+    }
+    documents_.erase(found);
+    return foundation::Result<void>::success();
+}
+
 bool DocumentStore::contains(const kernel::DocumentId& documentId) const
 {
     std::shared_lock lock(mutex_);

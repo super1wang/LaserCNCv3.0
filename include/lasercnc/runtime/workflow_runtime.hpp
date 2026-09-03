@@ -22,6 +22,7 @@ class ITraceService;
 namespace lasercnc::runtime {
 
 class CommandRuntime;
+class DocumentRuntime;
 class ExecutionServices;
 class QueryRuntime;
 class TaskRuntime;
@@ -37,7 +38,8 @@ public:
         ExecutionServices& executionServices,
         persistence::PersistenceService& persistence,
         observability::ITraceService& traces,
-        observability::IMetricsService& metrics);
+        observability::IMetricsService& metrics,
+        DocumentRuntime* documentRuntime = nullptr);
     ~WorkflowRuntime();
 
     WorkflowRuntime(const WorkflowRuntime&) = delete;
@@ -62,6 +64,8 @@ private:
     void start() noexcept;
     void stop() noexcept;
     [[nodiscard]] foundation::Result<void> restore();
+    [[nodiscard]] std::size_t activeInstanceCount(
+        const kernel::DocumentId& documentId) const;
 
     std::unique_ptr<Impl> impl_;
 };

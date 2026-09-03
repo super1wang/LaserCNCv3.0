@@ -2,6 +2,7 @@
 
 #include <lasercnc/foundation/error.hpp>
 
+#include <algorithm>
 #include <string>
 #include <utility>
 
@@ -34,12 +35,19 @@ private:
 
 AppKernel::AppKernel()
     : modules_(services_),
-      transactions_(documents_, &persistence_),
+      documentRuntime_(documents_, persistence_),
+      transactions_(documents_, &persistence_, &documentRuntime_),
       workflowRegistry_(commandRegistry_, queryRegistry_),
       scriptRegistry_(commandRegistry_, queryRegistry_, workflowRegistry_),
       effects_(effectGuards_, resources_, documents_, persistence_),
       scheduler_(resources_, persistence_, traces_, metrics_),
-      tasks_(taskRegistry_, scheduler_, executionServices_, documents_, persistence_),
+      tasks_(
+          taskRegistry_,
+          scheduler_,
+          executionServices_,
+          documents_,
+          persistence_,
+          &documentRuntime_),
       commands_(
           commandRegistry_,
           documents_,
@@ -51,9 +59,17 @@ AppKernel::AppKernel()
           tasks_,
           persistence_,
           traces_,
-          metrics_),
+          metrics_,
+          1024U,
+          &documentRuntime_),
       queries_(
-          queryRegistry_, documents_, capabilities_, executionServices_, traces_, metrics_),
+          queryRegistry_,
+          documents_,
+          capabilities_,
+          executionServices_,
+          traces_,
+          metrics_,
+          &documentRuntime_),
       workflows_(
           workflowRegistry_,
           commands_,
@@ -62,7 +78,8 @@ AppKernel::AppKernel()
           executionServices_,
           persistence_,
           traces_,
-          metrics_),
+          metrics_,
+          &documentRuntime_),
       scripts_(
           scriptRegistry_,
           commands_,
@@ -71,8 +88,25 @@ AppKernel::AppKernel()
           tasks_,
           executionServices_,
           traces_,
-          metrics_)
+          metrics_,
+          10000U,
+          32U,
+          &documentRuntime_)
 {
+    documentRuntime_.configureCloseBlockers(
+        runtime::DocumentRuntime::CloseBlockers {
+            [this](const DocumentId& documentId) {
+                return transactions_.activeTransactionCount(documentId);
+            },
+            [this](const DocumentId& documentId) {
+                return tasks_.activeExecutionCount(documentId);
+            },
+            [this](const DocumentId& documentId) {
+                return workflows_.activeInstanceCount(documentId);
+            },
+            [this](const DocumentId& documentId) {
+                return scripts_.activeInstanceCount(documentId);
+            }});
     static_cast<void>(diagnostics_.addExporter(
         std::make_shared<PersistenceDiagnosticExporter>(persistence_)));
 }
@@ -153,7 +187,70 @@ foundation::Result<void> AppKernel::bootstrap()
                 std::make_shared<const foundation::Error>(
                     std::move(recovered).error())));
         }
-        auto restored = documents_.restoreDocuments(recovered.value().documents);
+        auto catalog = persistence_.documentCatalog();
+        if(!catalog) {
+            state_ = AppKernelState::Failed;
+            return foundation::Result<void>::failure(foundation::makeError(
+                "Persistence.KernelDocumentCatalogFailed",
+                foundation::ErrorCategory::Infrastructure,
+                "The application kernel could not recover the durable document catalog",
+                foundation::Value {},
+                foundation::Severity::Error,
+                std::make_shared<const foundation::Error>(
+                    std::move(catalog).error())));
+        }
+
+        auto restoredImages = recovered.value().documents;
+        restoredImages.erase(
+            std::remove_if(
+                restoredImages.begin(),
+                restoredImages.end(),
+                [&](const state::DocumentImage& image) {
+                    const auto durable = std::find_if(
+                        catalog.value().begin(),
+                        catalog.value().end(),
+                        [&](const persistence::DocumentCatalogRecord& record) {
+                            return record.documentId == image.documentId;
+                        });
+                    return durable != catalog.value().end()
+                        && durable->state
+                            != persistence::DocumentPersistenceState::Open;
+                }),
+            restoredImages.end());
+
+        for(const auto& record : catalog.value()) {
+            if(record.state != persistence::DocumentPersistenceState::Open
+               || documents_.contains(record.documentId)
+               || std::any_of(
+                   restoredImages.begin(),
+                   restoredImages.end(),
+                   [&](const state::DocumentImage& image) {
+                       return image.documentId == record.documentId;
+                   })) {
+                continue;
+            }
+            state::Revision projectRevision;
+            for(const auto& image : recovered.value().documents) {
+                if(image.projectId == record.projectId) {
+                    projectRevision = image.revisions.at(
+                        state::RevisionScope::Project);
+                    break;
+                }
+            }
+            restoredImages.push_back(state::DocumentImage {
+                record.projectId,
+                record.documentId,
+                state::RevisionSet {
+                    projectRevision,
+                    state::Revision {},
+                    state::Revision {},
+                    state::Revision {},
+                    state::Revision {},
+                    state::Revision {}},
+                {}});
+        }
+
+        auto restored = documents_.restoreDocuments(restoredImages);
         if(!restored) {
             state_ = AppKernelState::Failed;
             return foundation::Result<void>::failure(foundation::makeError(
@@ -164,6 +261,59 @@ foundation::Result<void> AppKernel::bootstrap()
                 foundation::Severity::Error,
                 std::make_shared<const foundation::Error>(
                     std::move(restored).error())));
+        }
+        auto adopted = documentRuntime_.adoptRecovered(restoredImages);
+        if(!adopted) {
+            state_ = AppKernelState::Failed;
+            return foundation::Result<void>::failure(foundation::makeError(
+                "Persistence.KernelDocumentLifecycleRestoreFailed",
+                foundation::ErrorCategory::Infrastructure,
+                "The application kernel could not install recovered document lifecycle state",
+                foundation::Value {},
+                foundation::Severity::Error,
+                std::make_shared<const foundation::Error>(
+                    std::move(adopted).error())));
+        }
+        auto catalogAdopted = documentRuntime_.adoptCatalog(catalog.value());
+        if(!catalogAdopted) {
+            state_ = AppKernelState::Failed;
+            return foundation::Result<void>::failure(foundation::makeError(
+                "Persistence.KernelDocumentCatalogRestoreFailed",
+                foundation::ErrorCategory::Infrastructure,
+                "The application kernel could not install durable document lifecycle state",
+                foundation::Value {},
+                foundation::Severity::Error,
+                std::make_shared<const foundation::Error>(
+                    std::move(catalogAdopted).error())));
+        }
+        for(const auto& lifecycle : documentRuntime_.list()) {
+            if(lifecycle.state != runtime::DocumentLifecycleState::Open) {
+                continue;
+            }
+            const auto durable = std::find_if(
+                catalog.value().begin(),
+                catalog.value().end(),
+                [&](const persistence::DocumentCatalogRecord& record) {
+                    return record.documentId == lifecycle.documentId;
+                });
+            if(durable != catalog.value().end()) {
+                continue;
+            }
+            auto saved = persistence_.saveDocumentLifecycle(
+                lifecycle.projectId,
+                lifecycle.documentId,
+                persistence::DocumentPersistenceState::Open);
+            if(!saved) {
+                state_ = AppKernelState::Failed;
+                return foundation::Result<void>::failure(foundation::makeError(
+                    "Persistence.KernelDocumentCatalogSyncFailed",
+                    foundation::ErrorCategory::Infrastructure,
+                    "The application kernel could not synchronize document lifecycle state",
+                    foundation::Value {},
+                    foundation::Severity::Error,
+                    std::make_shared<const foundation::Error>(
+                        std::move(saved).error())));
+            }
         }
     }
 
@@ -289,6 +439,7 @@ foundation::Result<void> AppKernel::bootstrap()
     traces_.freeze();
     metrics_.freeze();
     diagnostics_.freeze();
+    documentRuntime_.start();
     commands_.start();
     queries_.start();
     if(taskExecutor_ != nullptr) {
@@ -343,6 +494,7 @@ foundation::Result<void> AppKernel::shutdown(std::chrono::milliseconds taskTimeo
 
     const bool wasConfiguring = state_ == AppKernelState::Configuring;
     state_ = AppKernelState::Stopping;
+    documentRuntime_.stop();
     scripts_.stop();
     workflows_.stop();
     commands_.stop();
@@ -395,12 +547,23 @@ foundation::Result<void> AppKernel::addDocument(
             foundation::ErrorCategory::Conflict,
             "Documents can only be attached while the application kernel is configuring"));
     }
-    return documents_.addDocument(std::move(projectId), std::move(documentId));
+    return documentRuntime_.configureDocument(
+        std::move(projectId), std::move(documentId));
 }
 
 const state::DocumentStore& AppKernel::documents() const noexcept
 {
     return documents_;
+}
+
+runtime::DocumentRuntime& AppKernel::documentRuntime() noexcept
+{
+    return documentRuntime_;
+}
+
+const runtime::DocumentRuntime& AppKernel::documentRuntime() const noexcept
+{
+    return documentRuntime_;
 }
 
 runtime::ExecutionServices& AppKernel::executionServices() noexcept

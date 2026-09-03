@@ -17,6 +17,7 @@
 #include <condition_variable>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -133,6 +134,25 @@ void configureService(
                     std::move(snapshots).value())
                 .hasValue());
     REQUIRE(service.initialize().hasValue());
+}
+
+void configureKernelPersistence(
+    lasercnc::kernel::AppKernel& kernel,
+    const std::filesystem::path& path,
+    const std::filesystem::path& snapshotDirectory)
+{
+    auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+    REQUIRE(backend.hasValue());
+    auto snapshots = FilesystemSnapshotStore::create(
+        FilesystemSnapshotStoreOptions {snapshotDirectory, 1024U * 1024U});
+    REQUIRE(snapshots.hasValue());
+    REQUIRE(kernel.persistence()
+                .configure(
+                    std::move(backend).value(),
+                    std::make_shared<JsonconsAdapter>(),
+                    std::make_shared<Sha256HashService>(),
+                    std::move(snapshots).value())
+                .hasValue());
 }
 
 class ThrowingBackend final : public lasercnc::platform::IPersistenceBackend {
@@ -386,6 +406,28 @@ public:
     }
 
     std::atomic_size_t calls{0U};
+};
+
+class BlockingDocumentTaskHandler final : public ITaskHandler {
+public:
+    BlockingDocumentTaskHandler(
+        std::promise<void>& enteredPromise,
+        std::shared_future<void> releaseFuture)
+        : entered_(enteredPromise), release_(std::move(releaseFuture))
+    {
+    }
+
+    Result<Value> execute(const TaskRequest&, const TaskContext&) override
+    {
+        entered_.set_value();
+        release_.wait();
+        return Result<Value>::success(Value {Value::Object {
+            {"value", Value {"completed"}}}});
+    }
+
+private:
+    std::promise<void>& entered_;
+    std::shared_future<void> release_;
 };
 
 class PersistentAsyncHandler final : public IAsyncCommandHandler {
@@ -1723,7 +1765,7 @@ TEST_CASE("PersistenceService rolls back migration exceptions and rejects newer 
                         "CREATE TABLE schema_migrations("
                         "version INTEGER PRIMARY KEY NOT NULL,applied_at TEXT NOT NULL)")
                     .hasValue());
-        const std::array parameters {Value {std::int64_t {8}}, Value {"future"}};
+        const std::array parameters {Value {std::int64_t {9}}, Value {"future"}};
         REQUIRE(backend.value()
                     ->execute(
                         "INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)",
@@ -1744,6 +1786,205 @@ TEST_CASE("PersistenceService rolls back migration exceptions and rejects newer 
         CHECK_FALSE(newerSchema.ready());
     }
     removeDatabase(path);
+}
+
+TEST_CASE("Document lifecycle catalog survives close open remove and restart",
+          "[persistence][document][lifecycle]")
+{
+    const auto path = uniqueDatabasePath();
+    const auto snapshots = uniqueSnapshotDirectory();
+    removeDatabase(path);
+    removeSnapshotDirectory(snapshots);
+    const auto project = validId<ProjectId>("project.lifecycle.persisted");
+    const auto document = validId<DocumentId>("document.lifecycle.persisted");
+
+    {
+        lasercnc::kernel::AppKernel kernel;
+        REQUIRE(kernel.addDocument(project, document).hasValue());
+        configureKernelPersistence(kernel, path, snapshots);
+        REQUIRE(kernel.bootstrap().hasValue());
+        auto catalog = kernel.persistence().documentCatalog();
+        REQUIRE(catalog.hasValue());
+        REQUIRE(catalog.value().size() == 1U);
+        CHECK(catalog.value().front().state == DocumentPersistenceState::Open);
+
+        auto closed = kernel.documentRuntime().close(document);
+        REQUIRE(closed.hasValue());
+        CHECK(closed.value().state == DocumentLifecycleState::Detached);
+        CHECK_FALSE(kernel.documents().contains(document));
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+
+    {
+        lasercnc::kernel::AppKernel kernel;
+        configureKernelPersistence(kernel, path, snapshots);
+        REQUIRE(kernel.bootstrap().hasValue());
+        auto lifecycle = kernel.documentRuntime().lifecycle(document);
+        REQUIRE(lifecycle.hasValue());
+        CHECK(lifecycle.value().state == DocumentLifecycleState::Detached);
+        CHECK_FALSE(kernel.documents().contains(document));
+
+        auto opened = kernel.documentRuntime().open(document);
+        REQUIRE(opened.hasValue());
+        CHECK(opened.value().state == DocumentLifecycleState::Open);
+        CHECK(kernel.documents().contains(document));
+        REQUIRE(kernel.documentRuntime().close(document).hasValue());
+        REQUIRE(kernel.documentRuntime().remove(document).hasValue());
+        CHECK(kernel.documentRuntime().list().empty());
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+
+    {
+        lasercnc::kernel::AppKernel kernel;
+        configureKernelPersistence(kernel, path, snapshots);
+        REQUIRE(kernel.bootstrap().hasValue());
+        CHECK(kernel.documentRuntime().list().empty());
+        CHECK_FALSE(kernel.documents().contains(document));
+        auto catalog = kernel.persistence().documentCatalog();
+        REQUIRE(catalog.hasValue());
+        REQUIRE(catalog.value().size() == 1U);
+        CHECK(catalog.value().front().state == DocumentPersistenceState::Removed);
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+
+    removeDatabase(path);
+    removeSnapshotDirectory(snapshots);
+}
+
+TEST_CASE("Document lifecycle catalog rejects ownership drift and tampering",
+          "[persistence][document][integrity]")
+{
+    const auto path = uniqueDatabasePath();
+    removeDatabase(path);
+    const auto project = validId<ProjectId>("project.lifecycle.integrity");
+    const auto otherProject = validId<ProjectId>("project.lifecycle.other");
+    const auto document = validId<DocumentId>("document.lifecycle.integrity");
+
+    {
+        PersistenceService service;
+        configureService(service, path);
+        REQUIRE(service.saveDocumentLifecycle(
+                    project, document, DocumentPersistenceState::Opening)
+                    .hasValue());
+        auto interrupted = service.documentCatalog();
+        REQUIRE(interrupted.hasValue());
+        REQUIRE(interrupted.value().size() == 1U);
+        CHECK(interrupted.value().front().state == DocumentPersistenceState::Failed);
+        CHECK(interrupted.value().front().interruptedTransition);
+
+        auto ownership = service.saveDocumentLifecycle(
+            otherProject, document, DocumentPersistenceState::Open);
+        REQUIRE_FALSE(ownership.hasValue());
+        CHECK(std::string(ownership.error().code.value())
+              == "Persistence.DocumentOwnershipConflict");
+
+        auto tamper = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+        REQUIRE(tamper.hasValue());
+        const std::array parameters {
+            Value {"detached"}, Value {std::string(document.value())}};
+        REQUIRE(tamper.value()
+                    ->execute(
+                        "UPDATE document_catalog SET state=? WHERE document_id=?",
+                        parameters)
+                    .hasValue());
+
+        auto corrupted = service.documentCatalog();
+        REQUIRE_FALSE(corrupted.hasValue());
+        CHECK(std::string(corrupted.error().code.value())
+              == "Persistence.DocumentCatalogIntegrityFailed");
+        auto overwrite = service.saveDocumentLifecycle(
+            project, document, DocumentPersistenceState::Open);
+        REQUIRE_FALSE(overwrite.hasValue());
+        CHECK(std::string(overwrite.error().code.value())
+              == "Persistence.DocumentCatalogIntegrityFailed");
+    }
+    removeDatabase(path);
+}
+
+TEST_CASE("Document close keeps state attached when snapshot persistence fails",
+          "[persistence][document][failure]")
+{
+    const auto path = uniqueDatabasePath();
+    removeDatabase(path);
+    const auto project = validId<ProjectId>("project.lifecycle.failure");
+    const auto document = validId<DocumentId>("document.lifecycle.failure");
+
+    lasercnc::kernel::AppKernel kernel;
+    REQUIRE(kernel.addDocument(project, document).hasValue());
+    auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+    REQUIRE(backend.hasValue());
+    REQUIRE(kernel.persistence()
+                .configure(
+                    std::move(backend).value(),
+                    std::make_shared<JsonconsAdapter>(),
+                    std::make_shared<Sha256HashService>())
+                .hasValue());
+    REQUIRE(kernel.bootstrap().hasValue());
+
+    auto closed = kernel.documentRuntime().close(document);
+    REQUIRE_FALSE(closed.hasValue());
+    CHECK(std::string(closed.error().code.value())
+          == "Persistence.SnapshotStoreNotConfigured");
+    auto lifecycle = kernel.documentRuntime().lifecycle(document);
+    REQUIRE(lifecycle.hasValue());
+    CHECK(lifecycle.value().state == DocumentLifecycleState::Failed);
+    CHECK(kernel.documents().contains(document));
+    REQUIRE(kernel.shutdown().hasValue());
+    removeDatabase(path);
+}
+
+TEST_CASE("DocumentRuntime blocks close while a document task remains active",
+          "[task][document][lifecycle][concurrency]")
+{
+    const auto project = validId<ProjectId>("project.task-close");
+    const auto document = validId<DocumentId>("document.task-close");
+    const auto taskId = validId<TaskId>("task.document-close");
+    std::promise<void> entered;
+    auto enteredFuture = entered.get_future();
+    std::promise<void> release;
+
+    lasercnc::kernel::AppKernel kernel;
+    REQUIRE(kernel.addDocument(project, document).hasValue());
+    auto adapter = std::make_shared<JsonconsAdapter>();
+    REQUIRE(kernel.executionServices()
+                .configure(adapter, std::make_shared<NullLogService>())
+                .hasValue());
+    REQUIRE(kernel.taskRegistry()
+                .registerHandler(
+                    persistentTaskDescriptor(),
+                    std::make_shared<BlockingDocumentTaskHandler>(
+                        entered, release.get_future().share()))
+                .hasValue());
+    auto executor = BsThreadPoolExecutor::create(BsThreadPoolExecutorOptions {1U});
+    REQUIRE(executor.hasValue());
+    REQUIRE(kernel.configureTaskExecutor(std::move(executor).value()).hasValue());
+    REQUIRE(kernel.bootstrap().hasValue());
+
+    REQUIRE(kernel.tasks()
+                .submit(TaskRequest {
+                    taskId,
+                    validId<TaskName>("kernel.persistence.async-task"),
+                    Value {Value::Object {{"input", Value {"blocking"}}}},
+                    validId<TraceId>("trace.document-close-task"),
+                    std::nullopt,
+                    project,
+                    document})
+                .hasValue());
+    enteredFuture.wait();
+
+    auto refused = kernel.documentRuntime().close(document);
+    REQUIRE_FALSE(refused.hasValue());
+    CHECK(std::string(refused.error().code.value()) == "Document.CloseBlocked");
+    auto lifecycle = kernel.documentRuntime().lifecycle(document);
+    REQUIRE(lifecycle.hasValue());
+    CHECK(lifecycle.value().state == DocumentLifecycleState::Open);
+
+    release.set_value();
+    auto terminal = kernel.tasks().wait(taskId, std::chrono::seconds(2));
+    REQUIRE(terminal.hasValue());
+    CHECK(terminal.value().state == TaskState::Succeeded);
+    REQUIRE(kernel.documentRuntime().close(document).hasValue());
+    REQUIRE(kernel.shutdown().hasValue());
 }
 
 TEST_CASE("TransactionManager persists write-ahead journal before the memory swap", "[persistence][transaction]")

@@ -46,6 +46,8 @@ public:
         std::chrono::milliseconds timeout) const;
     [[nodiscard]] foundation::Result<void> shutdown(std::chrono::milliseconds timeout);
     [[nodiscard]] std::size_t activeTaskCount() const;
+    [[nodiscard]] std::size_t activeTaskCount(
+        const kernel::DocumentId& documentId) const;
     [[nodiscard]] std::vector<foundation::Error> persistenceFailures() const;
 
 private:

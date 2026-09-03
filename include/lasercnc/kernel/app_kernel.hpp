@@ -12,6 +12,7 @@
 #include <lasercnc/runtime/capability_service.hpp>
 #include <lasercnc/runtime/command_registry.hpp>
 #include <lasercnc/runtime/command_runtime.hpp>
+#include <lasercnc/runtime/document_runtime.hpp>
 #include <lasercnc/runtime/execution_services.hpp>
 #include <lasercnc/runtime/effect_executor.hpp>
 #include <lasercnc/runtime/effect_guard.hpp>
@@ -64,6 +65,8 @@ public:
         ProjectId projectId,
         DocumentId documentId);
     [[nodiscard]] const state::DocumentStore& documents() const noexcept;
+    [[nodiscard]] runtime::DocumentRuntime& documentRuntime() noexcept;
+    [[nodiscard]] const runtime::DocumentRuntime& documentRuntime() const noexcept;
     [[nodiscard]] runtime::ExecutionServices& executionServices() noexcept;
     [[nodiscard]] const runtime::ExecutionServices& executionServices() const noexcept;
     [[nodiscard]] runtime::CapabilityService& capabilities() noexcept;
@@ -111,6 +114,7 @@ private:
     ModuleRuntime modules_;
     state::DocumentStore documents_;
     persistence::PersistenceService persistence_;
+    runtime::DocumentRuntime documentRuntime_;
     runtime::TransactionManager transactions_;
     runtime::ExecutionServices executionServices_;
     runtime::CapabilityService capabilities_;

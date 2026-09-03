@@ -409,7 +409,7 @@ foundation::Result<void> PersistenceService::initialize()
         if(!version) {
             return rollback(*backend_, std::move(version).error());
         }
-        if(version.value() > 7) {
+        if(version.value() > 8) {
             return rollback(*backend_, persistenceError(
                 "Persistence.SchemaTooNew",
                 foundation::ErrorCategory::Conflict,
@@ -541,6 +541,14 @@ foundation::Result<void> PersistenceService::initialize()
         if(!interruptedEffects) {
             return rollback(*backend_, std::move(interruptedEffects).error());
         }
+        auto documentCatalog = backend_->execute(
+            "CREATE TABLE IF NOT EXISTS document_catalog("
+            "document_id TEXT PRIMARY KEY NOT NULL,project_id TEXT NOT NULL,"
+            "state TEXT NOT NULL,payload TEXT NOT NULL,digest TEXT NOT NULL,"
+            "updated_at_ms INTEGER NOT NULL)");
+        if(!documentCatalog) {
+            return rollback(*backend_, std::move(documentCatalog).error());
+        }
         const std::array migrationParameters {foundation::Value {std::int64_t {1}}};
         auto recorded = backend_->execute(
             "INSERT OR IGNORE INTO schema_migrations(version,applied_at) "
@@ -602,6 +610,16 @@ foundation::Result<void> PersistenceService::initialize()
             externalEffectMigrationParameters);
         if(!externalEffectMigration) {
             return rollback(*backend_, std::move(externalEffectMigration).error());
+        }
+        const std::array documentLifecycleMigrationParameters {
+            foundation::Value {std::int64_t {8}}};
+        auto documentLifecycleMigration = backend_->execute(
+            "INSERT OR IGNORE INTO schema_migrations(version,applied_at) "
+            "VALUES(?,CURRENT_TIMESTAMP)",
+            documentLifecycleMigrationParameters);
+        if(!documentLifecycleMigration) {
+            return rollback(
+                *backend_, std::move(documentLifecycleMigration).error());
         }
         auto committed = backend_->commitTransaction();
         if(!committed) {

@@ -18,6 +18,7 @@ class ITraceService;
 namespace lasercnc::runtime {
 
 class CommandRuntime;
+class DocumentRuntime;
 class ExecutionServices;
 class QueryRuntime;
 class ScriptRegistry;
@@ -36,7 +37,8 @@ public:
         observability::ITraceService& traces,
         observability::IMetricsService& metrics,
         std::size_t executionNodeLimit = 10000U,
-        std::size_t includeDepthLimit = 32U);
+        std::size_t includeDepthLimit = 32U,
+        DocumentRuntime* documentRuntime = nullptr);
     ~ScriptRuntime();
 
     ScriptRuntime(const ScriptRuntime&) = delete;
@@ -58,6 +60,8 @@ private:
     class Impl;
     void start() noexcept;
     void stop() noexcept;
+    [[nodiscard]] std::size_t activeInstanceCount(
+        const kernel::DocumentId& documentId) const;
 
     std::unique_ptr<Impl> impl_;
 };

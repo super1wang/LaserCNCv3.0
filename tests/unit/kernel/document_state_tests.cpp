@@ -1,5 +1,7 @@
 #include <lasercnc/state/document_store.hpp>
 #include <lasercnc/state/revision.hpp>
+#include <lasercnc/kernel/app_kernel.hpp>
+#include <lasercnc/runtime/document_runtime.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -123,4 +125,77 @@ TEST_CASE("DocumentStore returns immutable snapshots with stable identity", "[st
     auto missing = store.snapshot(makeId<DocumentId>("document.missing"));
     REQUIRE_FALSE(missing.hasValue());
     CHECK(std::string(missing.error().code.value()) == "Document.NotFound");
+}
+
+TEST_CASE("DocumentRuntime owns runtime lifecycle while DocumentStore stays internal",
+          "[runtime][document][lifecycle]")
+{
+    AppKernel kernel;
+    REQUIRE(kernel.bootstrap().hasValue());
+
+    const auto project = makeId<ProjectId>("project.runtime");
+    const auto otherProject = makeId<ProjectId>("project.other");
+    const auto document = makeId<DocumentId>("document.runtime");
+
+    auto created = kernel.documentRuntime().create(project, document);
+    REQUIRE(created.hasValue());
+    CHECK(created.value().state == lasercnc::runtime::DocumentLifecycleState::Open);
+    CHECK(kernel.documents().contains(document));
+
+    auto duplicate = kernel.documentRuntime().create(project, document);
+    REQUIRE_FALSE(duplicate.hasValue());
+    CHECK(std::string(duplicate.error().code.value()) == "Document.LifecycleConflict");
+
+    auto snapshot = kernel.documentRuntime().snapshot(document);
+    REQUIRE(snapshot.hasValue());
+    CHECK(snapshot.value().projectId() == project);
+    CHECK(snapshot.value().id() == document);
+
+    auto detached = kernel.documentRuntime().detach(document);
+    REQUIRE(detached.hasValue());
+    CHECK(detached.value().state == lasercnc::runtime::DocumentLifecycleState::Detached);
+    CHECK_FALSE(kernel.documents().contains(document));
+
+    auto ownershipConflict = kernel.documentRuntime().create(otherProject, document);
+    REQUIRE_FALSE(ownershipConflict.hasValue());
+    CHECK(std::string(ownershipConflict.error().code.value())
+          == "Document.OwnershipConflict");
+
+    const DocumentImage image {project, document, RevisionSet {}, {}};
+    auto attached = kernel.documentRuntime().attach(image);
+    REQUIRE(attached.hasValue());
+    CHECK(attached.value().state == lasercnc::runtime::DocumentLifecycleState::Open);
+    REQUIRE(kernel.documentRuntime().close(document).hasValue());
+    REQUIRE(kernel.documentRuntime().remove(document).hasValue());
+    CHECK(kernel.documentRuntime().list().empty());
+
+    auto missing = kernel.documentRuntime().lifecycle(document);
+    REQUIRE_FALSE(missing.hasValue());
+    CHECK(std::string(missing.error().code.value()) == "Document.LifecycleNotFound");
+    REQUIRE(kernel.shutdown().hasValue());
+}
+
+TEST_CASE("DocumentRuntime rejects lifecycle changes outside Ready state",
+          "[runtime][document][lifecycle]")
+{
+    AppKernel kernel;
+    const auto project = makeId<ProjectId>("project.runtime.state");
+    const auto document = makeId<DocumentId>("document.runtime.state");
+
+    auto beforeReady = kernel.documentRuntime().create(project, document);
+    REQUIRE_FALSE(beforeReady.hasValue());
+    CHECK(std::string(beforeReady.error().code.value())
+          == "Document.RuntimeNotAccepting");
+
+    REQUIRE(kernel.addDocument(project, document).hasValue());
+    REQUIRE(kernel.bootstrap().hasValue());
+    auto lifecycle = kernel.documentRuntime().lifecycle(document);
+    REQUIRE(lifecycle.hasValue());
+    CHECK(lifecycle.value().state == lasercnc::runtime::DocumentLifecycleState::Open);
+    REQUIRE(kernel.shutdown().hasValue());
+
+    auto afterStop = kernel.documentRuntime().detach(document);
+    REQUIRE_FALSE(afterStop.hasValue());
+    CHECK(std::string(afterStop.error().code.value())
+          == "Document.RuntimeNotAccepting");
 }

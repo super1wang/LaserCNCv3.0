@@ -5,6 +5,7 @@
 #include <lasercnc/observability/trace_service.hpp>
 #include <lasercnc/runtime/command_runtime.hpp>
 #include <lasercnc/runtime/execution_services.hpp>
+#include <lasercnc/runtime/document_runtime.hpp>
 #include <lasercnc/runtime/query_runtime.hpp>
 #include <lasercnc/runtime/task_runtime.hpp>
 #include <lasercnc/runtime/workflow_registry.hpp>
@@ -444,7 +445,8 @@ public:
         ExecutionServices& executionServices,
         persistence::PersistenceService& persistence,
         observability::ITraceService& traces,
-        observability::IMetricsService& metrics)
+        observability::IMetricsService& metrics,
+        DocumentRuntime* documentRuntime)
         : registry_(registry),
           commands_(commands),
           queries_(queries),
@@ -452,7 +454,8 @@ public:
           executionServices_(executionServices),
           persistence_(persistence),
           traces_(traces),
-          metrics_(metrics)
+          metrics_(metrics),
+          documentRuntime_(documentRuntime)
     {
     }
 
@@ -488,6 +491,16 @@ public:
                 foundation::ErrorCategory::Conflict,
                 "The workflow runtime is not accepting new instances",
                 &request.workflowId));
+        }
+        std::optional<DocumentActivityLease> documentActivity;
+        if(documentRuntime_ != nullptr) {
+            auto admitted = documentRuntime_->acquireActivity(
+                request.documentId, DocumentActivityKind::WorkflowAdmission);
+            if(!admitted) {
+                return foundation::Result<WorkflowSnapshot>::failure(
+                    std::move(admitted).error());
+            }
+            documentActivity.emplace(std::move(admitted).value());
         }
         auto definition = registry_.resolve(request.workflow);
         if(!definition) {
@@ -1192,6 +1205,24 @@ public:
                     "A durable workflow completion order is invalid",
                     &checkpoint.snapshot.workflowId));
             }
+            if(documentRuntime_ != nullptr) {
+                auto lifecycle = documentRuntime_->lifecycle(
+                    checkpoint.request.documentId);
+                if(!lifecycle
+                   || lifecycle.value().state != DocumentLifecycleState::Open
+                   || lifecycle.value().projectId != checkpoint.request.projectId) {
+                    return foundation::Result<void>::failure(runtimeError(
+                        "Workflow.RecoveryDocumentUnavailable",
+                        foundation::ErrorCategory::Conflict,
+                        "A durable workflow document is not open under its recorded project",
+                        &checkpoint.snapshot.workflowId,
+                        nullptr,
+                        lifecycle
+                            ? nullptr
+                            : std::make_shared<const foundation::Error>(
+                                  std::move(lifecycle).error())));
+                }
+            }
             bool resumedMainAttempt = false;
             for(auto& step : checkpoint.snapshot.steps) {
                 if(step.state != WorkflowStepState::Running) {
@@ -1241,6 +1272,21 @@ public:
     std::size_t activeExecutionCount() const noexcept
     {
         return activeExecutions_.load(std::memory_order_acquire);
+    }
+
+    std::size_t activeInstanceCount(const kernel::DocumentId& documentId) const
+    {
+        std::shared_lock lock(instancesMutex_);
+        std::size_t count = 0U;
+        for(const auto& [unusedWorkflowId, instance] : instances_) {
+            static_cast<void>(unusedWorkflowId);
+            std::lock_guard instanceLock(instance->mutex);
+            if(instance->request.documentId == documentId
+               && !isTerminal(instance->snapshot.state)) {
+                ++count;
+            }
+        }
+        return count;
     }
 
     bool accepting() const noexcept
@@ -1732,6 +1778,7 @@ private:
     persistence::PersistenceService& persistence_;
     observability::ITraceService& traces_;
     observability::IMetricsService& metrics_;
+    DocumentRuntime* documentRuntime_;
     mutable std::shared_mutex instancesMutex_;
     std::map<kernel::WorkflowId, std::shared_ptr<Instance>> instances_;
     std::atomic_bool accepting_{false};
@@ -1746,9 +1793,18 @@ WorkflowRuntime::WorkflowRuntime(
     ExecutionServices& executionServices,
     persistence::PersistenceService& persistence,
     observability::ITraceService& traces,
-    observability::IMetricsService& metrics)
+    observability::IMetricsService& metrics,
+    DocumentRuntime* documentRuntime)
     : impl_(std::make_unique<Impl>(
-          registry, commands, queries, tasks, executionServices, persistence, traces, metrics))
+          registry,
+          commands,
+          queries,
+          tasks,
+          executionServices,
+          persistence,
+          traces,
+          metrics,
+          documentRuntime))
 {
 }
 
@@ -1816,6 +1872,12 @@ foundation::Result<WorkflowSnapshot> WorkflowRuntime::snapshot(
 std::size_t WorkflowRuntime::activeExecutionCount() const noexcept
 {
     return impl_->activeExecutionCount();
+}
+
+std::size_t WorkflowRuntime::activeInstanceCount(
+    const kernel::DocumentId& documentId) const
+{
+    return impl_->activeInstanceCount(documentId);
 }
 
 bool WorkflowRuntime::accepting() const noexcept

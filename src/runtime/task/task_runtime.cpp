@@ -2,6 +2,7 @@
 
 #include <lasercnc/foundation/error.hpp>
 #include <lasercnc/persistence/persistence_service.hpp>
+#include <lasercnc/runtime/document_runtime.hpp>
 
 #include <string>
 #include <utility>
@@ -48,11 +49,13 @@ TaskRuntime::TaskRuntime(
     TaskRegistry& registry,
     Scheduler& scheduler,
     ExecutionServices& executionServices,
-    const state::DocumentStore& documents)
+    const state::DocumentStore& documents,
+    DocumentRuntime* documentRuntime)
     : registry_(registry),
       scheduler_(scheduler),
       executionServices_(executionServices),
-      documents_(documents)
+      documents_(documents),
+      documentRuntime_(documentRuntime)
 {
 }
 
@@ -61,12 +64,14 @@ TaskRuntime::TaskRuntime(
     Scheduler& scheduler,
     ExecutionServices& executionServices,
     const state::DocumentStore& documents,
-    persistence::PersistenceService& persistence)
+    persistence::PersistenceService& persistence,
+    DocumentRuntime* documentRuntime)
     : registry_(registry),
       scheduler_(scheduler),
       executionServices_(executionServices),
       documents_(documents),
-      persistence_(&persistence)
+      persistence_(&persistence),
+      documentRuntime_(documentRuntime)
 {
 }
 
@@ -94,6 +99,15 @@ foundation::Result<void> TaskRuntime::submit(
             "Task.RuntimeNotAccepting",
             foundation::ErrorCategory::Conflict,
             "The task runtime is not accepting new work"));
+    }
+    std::optional<DocumentActivityLease> documentActivity;
+    if(documentRuntime_ != nullptr && request.documentId.has_value()) {
+        auto admitted = documentRuntime_->acquireActivity(
+            *request.documentId, DocumentActivityKind::TaskAdmission);
+        if(!admitted) {
+            return foundation::Result<void>::failure(std::move(admitted).error());
+        }
+        documentActivity.emplace(std::move(admitted).value());
     }
     auto entry = registry_.resolve(request.task);
     if(!entry) {
@@ -239,6 +253,12 @@ foundation::Result<TaskSnapshot> TaskRuntime::wait(
 std::size_t TaskRuntime::activeExecutionCount() const
 {
     return scheduler_.activeTaskCount();
+}
+
+std::size_t TaskRuntime::activeExecutionCount(
+    const kernel::DocumentId& documentId) const
+{
+    return scheduler_.activeTaskCount(documentId);
 }
 
 } // namespace lasercnc::runtime

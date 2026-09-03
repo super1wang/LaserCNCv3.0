@@ -23,6 +23,7 @@ namespace lasercnc::runtime {
 
 class CapabilityService;
 class ExecutionServices;
+class DocumentRuntime;
 class QueryRegistry;
 
 class QueryRuntime final {
@@ -33,7 +34,8 @@ public:
         CapabilityService& capabilities,
         ExecutionServices& executionServices,
         observability::ITraceService& traces,
-        observability::IMetricsService& metrics);
+        observability::IMetricsService& metrics,
+        DocumentRuntime* documentRuntime = nullptr);
     ~QueryRuntime();
 
     QueryRuntime(const QueryRuntime&) = delete;

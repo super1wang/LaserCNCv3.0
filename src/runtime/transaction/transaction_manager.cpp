@@ -2,6 +2,7 @@
 
 #include <lasercnc/foundation/error.hpp>
 #include <lasercnc/persistence/persistence_service.hpp>
+#include <lasercnc/runtime/document_runtime.hpp>
 
 #include <array>
 #include <exception>
@@ -40,8 +41,11 @@ constexpr std::array allRevisionScopes {
 
 TransactionManager::TransactionManager(
     state::DocumentStore& documents,
-    persistence::PersistenceService* persistence) noexcept
-    : documents_(documents), persistence_(persistence)
+    persistence::PersistenceService* persistence,
+    DocumentRuntime* documentRuntime) noexcept
+    : documents_(documents),
+      persistence_(persistence),
+      documentRuntime_(documentRuntime)
 {
 }
 
@@ -50,10 +54,21 @@ foundation::Result<std::unique_ptr<ApplicationTransaction>> TransactionManager::
     const kernel::DocumentId& documentId,
     std::span<const state::RevisionPrecondition> preconditions)
 {
+    std::optional<DocumentActivityLease> activity;
+    if(documentRuntime_ != nullptr) {
+        auto admitted = documentRuntime_->acquireActivity(
+            documentId, DocumentActivityKind::Transaction);
+        if(!admitted) {
+            return foundation::Result<std::unique_ptr<ApplicationTransaction>>::failure(
+                std::move(admitted).error());
+        }
+        activity.emplace(std::move(admitted).value());
+    }
     try {
         {
             std::lock_guard lock(activeMutex_);
-            const auto [unused, inserted] = activeTransactions_.insert(transactionId);
+            const auto [unused, inserted] = activeTransactions_.emplace(
+                transactionId, documentId);
             static_cast<void>(unused);
             if(!inserted) {
                 return foundation::Result<std::unique_ptr<ApplicationTransaction>>::failure(managerError(
@@ -124,6 +139,20 @@ std::size_t TransactionManager::activeTransactionCount() const
 {
     std::lock_guard lock(activeMutex_);
     return activeTransactions_.size();
+}
+
+std::size_t TransactionManager::activeTransactionCount(
+    const kernel::DocumentId& documentId) const
+{
+    std::lock_guard lock(activeMutex_);
+    std::size_t count = 0U;
+    for(const auto& [unusedTransactionId, activeDocumentId] : activeTransactions_) {
+        static_cast<void>(unusedTransactionId);
+        if(activeDocumentId == documentId) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 foundation::Result<TransactionCommit> TransactionManager::commit(
