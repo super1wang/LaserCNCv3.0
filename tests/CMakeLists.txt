@@ -40,6 +40,22 @@ lcnc_enable_warnings(lasercnc_kernel_tests)
 
 catch_discover_tests(lasercnc_kernel_tests)
 
+add_executable(
+    lasercnc_infrastructure_tests
+    unit/infrastructure/jsoncons_adapter_tests.cpp
+    unit/infrastructure/toml_config_adapter_tests.cpp
+)
+target_link_libraries(
+    lasercnc_infrastructure_tests
+    PRIVATE
+        LaserCNC::Infrastructure
+        Catch2::Catch2WithMain
+)
+target_compile_features(lasercnc_infrastructure_tests PRIVATE cxx_std_20)
+set_target_properties(lasercnc_infrastructure_tests PROPERTIES CXX_EXTENSIONS OFF)
+lcnc_enable_warnings(lasercnc_infrastructure_tests)
+catch_discover_tests(lasercnc_infrastructure_tests)
+
 add_test(
     NAME architecture.kernel_public_api_boundary
     COMMAND
