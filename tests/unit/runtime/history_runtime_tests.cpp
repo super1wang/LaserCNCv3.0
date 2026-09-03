@@ -6,6 +6,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include "kernel_test_module.hpp"
+#include "fault_injecting_backend.hpp"
 
 #include <array>
 #include <atomic>
@@ -805,6 +806,172 @@ TEST_CASE("Journal failure changes neither document nor history", "[history][per
         REQUIRE(kernel.shutdown().hasValue());
     }
     removeDatabase(path);
+}
+
+TEST_CASE("Persistence stage failures preserve history revisions and idempotency across restart", "[history][persistence][fault-matrix]")
+{
+    using lasercnc::test::BackendPoint;
+    struct Stage { const char* name; BackendPoint point; const char* sql; unsigned int occurrence; };
+    const std::array stages{
+        Stage{"claim begin", BackendPoint::Begin, "", 1U},
+        Stage{"journal begin", BackendPoint::Begin, "", 2U},
+        Stage{"journal insert", BackendPoint::Execute, "INSERT INTO state_journal", 1U},
+        Stage{"journal readback", BackendPoint::Query, "FROM state_journal WHERE transaction_id=", 2U},
+        Stage{"idempotency completion", BackendPoint::Execute, "UPDATE command_idempotency SET status='completed'", 1U},
+        Stage{"journal commit", BackendPoint::Commit, "", 2U},
+    };
+    for(const auto& stage : stages) {
+        for(const bool throws : {false, true}) {
+            for(const std::string action : {"create", "undo", "redo"}) {
+                if(action != "create" && (std::string(stage.name) == "claim begin"
+                    || std::string(stage.name) == "idempotency completion")) {
+                    continue;
+                }
+                DYNAMIC_SECTION(stage.name << " throws=" << throws << " action=" << action) {
+                    const auto path = databasePath();
+                    const auto project = validId<ProjectId>("project.matrix");
+                    const auto document = validId<DocumentId>("document.matrix");
+                    const auto session = validId<SessionId>("session.matrix");
+                    auto attempted = request("request.matrix.attempt", "kernel.history.create", project,
+                        document, session, "object.matrix.new");
+                    if(action != "create") {
+                        attempted.command = validId<CommandName>(action == "undo" ? "edit.undo" : "edit.redo");
+                        attempted.arguments = Value{Value::Object{}};
+                    }
+                    if(action == "create") {
+                        attempted.idempotencyKey = validId<IdempotencyKey>("key.matrix");
+                    }
+                    RevisionSet expectedRevisions;
+                    HistoryCursor expectedCursor;
+                    std::vector<ObjectRecord> expectedObjects;
+                    std::size_t expectedJournal = 0U;
+                    {
+                        AppKernel kernel;
+                        auto sqlite = SqlitePersistenceBackend::open({path});
+                        REQUIRE(sqlite.hasValue());
+                        auto backend = std::make_unique<lasercnc::test::FaultInjectingBackend>(std::move(sqlite).value());
+                        auto* control = backend.get();
+                        REQUIRE(kernel.persistence().configure(std::move(backend),
+                            std::make_shared<JsonconsAdapter>(), std::make_shared<Sha256HashService>()).hasValue());
+                        configureRuntime(kernel, project, document, session, true);
+                        REQUIRE(kernel.bootstrap().hasValue());
+                        REQUIRE(kernel.execution().executeCommand(request("request.matrix.seed", "kernel.history.create",
+                            project, document, session, "object.matrix.seed")).hasValue());
+                        if(action == "redo") {
+                            REQUIRE(kernel.execution().executeCommand(request("request.matrix.seed-undo", "edit.undo",
+                                project, document, session)).hasValue());
+                        }
+                        expectedRevisions = kernel.documents().snapshot(document).value().revisions();
+                        expectedObjects = kernel.documents().snapshot(document).value().objects().all();
+                        expectedCursor = kernel.history().snapshot(document).value().cursor;
+                        expectedJournal = kernel.persistence().journalAfter(document, 0U).value().size();
+                        const auto occurrence = action != "create"
+                            && (stage.point == BackendPoint::Begin || stage.point == BackendPoint::Commit)
+                            ? 1U : stage.occurrence;
+                        control->arm(stage.point, stage.sql, occurrence, throws);
+                        auto rejected = kernel.execution().executeCommand(attempted);
+                        REQUIRE_FALSE(rejected.hasValue());
+                        INFO(rejected.error().message);
+                        CHECK(control->hits == 1U);
+                        CHECK(kernel.documents().snapshot(document).value().objects().all() == expectedObjects);
+                        CHECK(kernel.documents().snapshot(document).value().revisions() == expectedRevisions);
+                        CHECK(kernel.history().snapshot(document).value().cursor == expectedCursor);
+                        CHECK(kernel.persistence().journalAfter(document, 0U).value().size() == expectedJournal);
+                        auto pending = control->query("SELECT * FROM command_idempotency");
+                        REQUIRE(pending.hasValue());
+                        CHECK(pending.value().empty());
+                        REQUIRE(kernel.shutdown().hasValue());
+                    }
+                    {
+                        AppKernel kernel;
+                        configurePersistence(kernel, path);
+                        configureRuntime(kernel, project, document, session, false);
+                        REQUIRE(kernel.bootstrap().hasValue());
+                        CHECK(kernel.documents().snapshot(document).value().objects().all() == expectedObjects);
+                        CHECK(kernel.documents().snapshot(document).value().revisions() == expectedRevisions);
+                        CHECK(kernel.history().snapshot(document).value().cursor == expectedCursor);
+                        auto retried = kernel.execution().executeCommand(attempted);
+                        REQUIRE(retried.hasValue());
+                        CHECK_FALSE(retried.value().replayed);
+                        CHECK(kernel.persistence().journalAfter(document, 0U).value().size() == expectedJournal + 1U);
+                        const auto cursor = kernel.history().snapshot(document).value().cursor;
+                        CHECK(cursor.position == (action == "undo" ? expectedCursor.position - 1U : expectedCursor.position + 1U));
+                        if(action == "create") {
+                            auto replayed = kernel.execution().executeCommand(attempted);
+                            REQUIRE(replayed.hasValue());
+                            CHECK(replayed.value().replayed);
+                            CHECK(kernel.history().snapshot(document).value().cursor == cursor);
+                        }
+                        CHECK(kernel.persistence().journalAfter(document, 0U).value().size() == expectedJournal + 1U);
+                        REQUIRE(kernel.shutdown().hasValue());
+                    }
+                    removeDatabase(path);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("Rollback failure quarantines persistence until a fresh recovery", "[history][persistence][fault-matrix]")
+{
+    for(const bool throws : {false, true}) {
+        DYNAMIC_SECTION("rollback throws=" << throws) {
+            const auto path = databasePath();
+            const auto project = validId<ProjectId>("project.rollback-fault");
+            const auto document = validId<DocumentId>("document.rollback-fault");
+            const auto session = validId<SessionId>("session.rollback-fault");
+            const auto command = request("request.rollback-fault", "kernel.history.create",
+                project, document, session, "object.rollback-fault");
+            {
+                AppKernel kernel;
+                auto sqlite = SqlitePersistenceBackend::open({path});
+                REQUIRE(sqlite.hasValue());
+                auto backend = std::make_unique<lasercnc::test::FaultInjectingBackend>(std::move(sqlite).value());
+                auto* control = backend.get();
+                REQUIRE(kernel.persistence().configure(std::move(backend), std::make_shared<JsonconsAdapter>(),
+                    std::make_shared<Sha256HashService>()).hasValue());
+                configureRuntime(kernel, project, document, session, true);
+                REQUIRE(kernel.bootstrap().hasValue());
+                control->arm(lasercnc::test::BackendPoint::Commit, "", 1U, false);
+                control->failRollback = true;
+                control->throwRollback = throws;
+                auto rejected = kernel.execution().executeCommand(command);
+                REQUIRE_FALSE(rejected.hasValue());
+                CHECK(std::string(rejected.error().code.value()) == "Persistence.RollbackFailed");
+                CHECK(control->hits == 1U);
+                CHECK(control->rollbackHits == 1U);
+                CHECK(kernel.documents().snapshot(document).value().objects().empty());
+                CHECK(kernel.documents().snapshot(document).value().revisions() == RevisionSet{});
+                CHECK(kernel.history().snapshot(document).value().cursor == HistoryCursor{});
+                CHECK_FALSE(kernel.persistence().ready());
+                CHECK_FALSE(kernel.persistence().journalAfter(document, 0U).hasValue());
+                auto reinitialized = kernel.persistence().initialize();
+                REQUIRE_FALSE(reinitialized.hasValue());
+                CHECK(std::string(reinitialized.error().code.value()) == "Persistence.BackendQuarantined");
+                CHECK_FALSE(kernel.execution().executeCommand(command).hasValue());
+                // An independent connection must never observe the failed transaction.
+                // 中文翻译：独立连接不得观察到失败事务中的记录。
+                auto observer = SqlitePersistenceBackend::open({path});
+                REQUIRE(observer.hasValue());
+                auto rows = observer.value()->query("SELECT * FROM state_journal");
+                REQUIRE(rows.hasValue());
+                CHECK(rows.value().empty());
+                REQUIRE(kernel.shutdown().hasValue());
+            }
+            {
+                AppKernel kernel;
+                configurePersistence(kernel, path);
+                configureRuntime(kernel, project, document, session, false);
+                REQUIRE(kernel.bootstrap().hasValue());
+                CHECK(kernel.documents().snapshot(document).value().objects().empty());
+                CHECK(kernel.history().snapshot(document).value().cursor == HistoryCursor{});
+                REQUIRE(kernel.execution().executeCommand(command).hasValue());
+                CHECK(kernel.persistence().journalAfter(document, 0U).value().size() == 1U);
+                REQUIRE(kernel.shutdown().hasValue());
+            }
+            removeDatabase(path);
+        }
+    }
 }
 
 TEST_CASE("History recovery fails closed on semantically invalid journal metadata", "[history][persistence][tamper]")

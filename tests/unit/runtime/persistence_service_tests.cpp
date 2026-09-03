@@ -10,7 +10,9 @@
 #include <lasercnc/runtime/transaction_manager.hpp>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include "kernel_test_module.hpp"
+#include "fault_injecting_backend.hpp"
 
 #include <array>
 #include <atomic>
@@ -788,7 +790,8 @@ void configureAsyncRuntimeKernel(
     const std::filesystem::path& database,
     const SessionId& sessionId,
     std::shared_ptr<PersistentAsyncHandler> commandHandler,
-    std::shared_ptr<PersistentTaskHandler> taskHandler)
+    std::shared_ptr<PersistentTaskHandler> taskHandler,
+    std::unique_ptr<lasercnc::platform::IPersistenceBackend> injectedBackend = nullptr)
 {
     auto adapter = std::make_shared<JsonconsAdapter>();
     REQUIRE(kernel.executionServices()
@@ -801,11 +804,14 @@ void configureAsyncRuntimeKernel(
                 .hasValue());
     REQUIRE(lasercnc::test::registerTask(kernel, persistentTaskDescriptor(), std::move(taskHandler))
                 .hasValue());
-    auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {database});
-    REQUIRE(backend.hasValue());
+    if(injectedBackend == nullptr) {
+        auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {database});
+        REQUIRE(backend.hasValue());
+        injectedBackend = std::move(backend).value();
+    }
     REQUIRE(kernel.persistence()
                 .configure(
-                    std::move(backend).value(),
+                    std::move(injectedBackend),
                     adapter,
                     std::make_shared<Sha256HashService>())
                 .hasValue());
@@ -1670,6 +1676,96 @@ TEST_CASE("Asynchronous command acceptance and task outcome survive restart", "[
         REQUIRE(kernel.shutdown().hasValue());
     }
     removeDatabase(path);
+}
+
+TEST_CASE("Task acceptance backend failures discard prepared work and preserve retry contracts", "[persistence][task][fault-matrix]")
+{
+    const auto retryBeforeRestart = GENERATE(false, true);
+    using lasercnc::test::BackendPoint;
+    struct Stage { const char* name; BackendPoint point; const char* sql; unsigned int occurrence; };
+    const std::array stages{
+        Stage{"accept begin", BackendPoint::Begin, "", 2U},
+        Stage{"task insert", BackendPoint::Execute, "INSERT INTO task_history", 1U},
+        Stage{"acceptance outcome", BackendPoint::Execute, "UPDATE command_idempotency SET status='completed'", 1U},
+        Stage{"accept commit", BackendPoint::Commit, "", 2U},
+    };
+    for(const auto& stage : stages) {
+        for(const bool throws : {false, true}) {
+            DYNAMIC_SECTION(stage.name << " throws=" << throws << " retryBeforeRestart=" << retryBeforeRestart) {
+                const auto path = uniqueDatabasePath();
+                const auto project = validId<ProjectId>("project.accept-fault");
+                const auto document = validId<DocumentId>("document.accept-fault");
+                const auto session = validId<SessionId>("session.accept-fault");
+                const auto key = validId<IdempotencyKey>("key.accept-fault");
+                auto command = persistentAsyncCommandRequest("request.accept-fault", project, document, session, key);
+                const auto task = validId<TaskId>("task.request.accept-fault");
+                {
+                    AppKernel kernel;
+                    REQUIRE(kernel.addDocument(project, document).hasValue());
+                    auto commandHandler = std::make_shared<PersistentAsyncHandler>();
+                    auto taskHandler = std::make_shared<PersistentTaskHandler>();
+                    auto sqlite = SqlitePersistenceBackend::open({path});
+                    REQUIRE(sqlite.hasValue());
+                    auto backend = std::make_unique<lasercnc::test::FaultInjectingBackend>(std::move(sqlite).value());
+                    auto* control = backend.get();
+                    configureAsyncRuntimeKernel(kernel, path, session, commandHandler, taskHandler, std::move(backend));
+                    REQUIRE(kernel.bootstrap().hasValue());
+                    control->arm(stage.point, stage.sql, stage.occurrence, throws);
+                    auto rejected = kernel.execution().executeCommand(command);
+                    REQUIRE_FALSE(rejected.hasValue());
+                    CHECK(control->hits == 1U);
+                    CHECK(commandHandler->calls.load() == 1U);
+                    CHECK(taskHandler->calls.load() == 0U);
+                    CHECK_FALSE(kernel.execution().task(task).hasValue());
+                    CHECK_FALSE(kernel.persistence().taskHistory(task).value().has_value());
+                    CHECK(kernel.documents().snapshot(document).value().revisions() == RevisionSet{});
+                    CHECK(kernel.persistence().journalAfter(document, 0U).value().empty());
+                    auto claims = control->query("SELECT * FROM command_idempotency");
+                    REQUIRE(claims.hasValue());
+                    CHECK(claims.value().empty());
+                    // In-process idempotency retains errors; a new key permits a fresh attempt.
+                    // 中文翻译：进程内幂等缓存保留错误，使用新 Key 发起新的尝试。
+                    auto cached = kernel.execution().executeCommand(command);
+                    REQUIRE_FALSE(cached.hasValue());
+                    CHECK(cached.error().code == rejected.error().code);
+                    CHECK(commandHandler->calls.load() == 1U);
+                    if(retryBeforeRestart) {
+                        command.idempotencyKey = validId<IdempotencyKey>("key.accept-fault.retry");
+                        // The TaskId stays unchanged, proving prepared scheduler state was removed.
+                        // 中文翻译：保持 TaskId 不变，证明调度器准备态已移除。
+                        auto accepted = kernel.execution().executeCommand(command);
+                        INFO((accepted ? "accepted" : accepted.error().message));
+                        REQUIRE(accepted.hasValue());
+                        CHECK_FALSE(accepted.value().replayed);
+                        CHECK(accepted.value().taskId == task);
+                        auto terminal = kernel.execution().waitTask(task, std::chrono::seconds(2));
+                        REQUIRE(terminal.hasValue());
+                        CHECK(terminal.value().state == TaskState::Succeeded);
+                        CHECK(taskHandler->calls.load() == 1U);
+                    }
+                    REQUIRE(kernel.shutdown().hasValue());
+                }
+                {
+                    AppKernel kernel;
+                    auto commandHandler = std::make_shared<PersistentAsyncHandler>();
+                    auto taskHandler = std::make_shared<PersistentTaskHandler>();
+                    configureAsyncRuntimeKernel(kernel, path, session, commandHandler, taskHandler);
+                    REQUIRE(kernel.bootstrap().hasValue());
+                    auto replayed = kernel.execution().executeCommand(command);
+                    REQUIRE(replayed.hasValue());
+                    CHECK(replayed.value().replayed == retryBeforeRestart);
+                    CHECK(replayed.value().taskId == task);
+                    CHECK(commandHandler->calls.load() == (retryBeforeRestart ? 0U : 1U));
+                    auto terminal = kernel.execution().waitTask(task, std::chrono::seconds(2));
+                    REQUIRE(terminal.hasValue());
+                    CHECK(terminal.value().state == TaskState::Succeeded);
+                    CHECK(taskHandler->calls.load() == (retryBeforeRestart ? 0U : 1U));
+                    REQUIRE(kernel.shutdown().hasValue());
+                }
+                removeDatabase(path);
+            }
+        }
+    }
 }
 
 TEST_CASE("Task completion exposes persistence failure without changing task outcome", "[persistence][task][failure]")

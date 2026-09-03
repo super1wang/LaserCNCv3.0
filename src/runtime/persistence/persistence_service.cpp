@@ -378,6 +378,64 @@ constexpr std::string_view selectColumns =
     "cam_revision_after,machine_context_revision_after,environment_revision_after,"
     "payload,digest,committed_at_ms";
 
+// A failed rollback makes every later observation on this connection untrustworthy.
+// 中文翻译：回滚失败后，该连接上的后续读写均不再可信，必须使用新实例恢复。
+class QuarantiningBackend final : public platform::IPersistenceBackend {
+public:
+    QuarantiningBackend(std::unique_ptr<platform::IPersistenceBackend> delegate, bool& initialized)
+        : delegate_(std::move(delegate)), initialized_(initialized) {}
+
+    foundation::Result<std::size_t> execute(std::string_view sql,
+        std::span<const foundation::Value> parameters) override
+    {
+        return failed_ ? unavailable<std::size_t>() : delegate_->execute(sql, parameters);
+    }
+    foundation::Result<std::vector<platform::PersistenceRow>> query(std::string_view sql,
+        std::span<const foundation::Value> parameters) override
+    {
+        return failed_ ? unavailable<std::vector<platform::PersistenceRow>>() : delegate_->query(sql, parameters);
+    }
+    foundation::Result<void> beginTransaction() override
+    {
+        return failed_ ? unavailable<void>() : delegate_->beginTransaction();
+    }
+    foundation::Result<void> commitTransaction() override
+    {
+        return failed_ ? unavailable<void>() : delegate_->commitTransaction();
+    }
+    foundation::Result<void> rollbackTransaction() override
+    {
+        if(failed_) { return unavailable<void>(); }
+        const bool wasInitialized = initialized_;
+        failed_ = true;
+        initialized_ = false;
+        try {
+            auto rolledBack = delegate_->rollbackTransaction();
+            if(rolledBack) {
+                failed_ = false;
+                initialized_ = wasInitialized;
+            }
+            return rolledBack;
+        } catch(...) {
+            return foundation::Result<void>::failure(persistenceError(
+                "Persistence.RollbackException", foundation::ErrorCategory::Infrastructure,
+                "The persistence backend raised an exception during rollback"));
+        }
+    }
+
+private:
+    template <typename T>
+    foundation::Result<T> unavailable() const
+    {
+        return foundation::Result<T>::failure(persistenceError(
+            "Persistence.BackendQuarantined", foundation::ErrorCategory::Infrastructure,
+            "Rollback could not be confirmed; discard this persistence instance and recover with a new one"));
+    }
+    std::unique_ptr<platform::IPersistenceBackend> delegate_;
+    bool& initialized_;
+    bool failed_{false};
+};
+
 } // namespace
 
 foundation::Result<void> PersistenceService::configure(
@@ -405,7 +463,7 @@ foundation::Result<void> PersistenceService::configure(
             foundation::ErrorCategory::Conflict,
             "Persistence services can only be configured once"));
     }
-    backend_ = std::move(backend);
+    backend_ = std::make_unique<QuarantiningBackend>(std::move(backend), initialized_);
     serializer_ = std::move(serializer);
     hashes_ = std::move(hashes);
     snapshotStore_ = std::move(snapshotStore);
