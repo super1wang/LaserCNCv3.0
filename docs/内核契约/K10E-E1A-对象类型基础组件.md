@@ -47,4 +47,4 @@ E1B1 Debug/Release 均为 173/173 CTest；新增 2 个模块集成用例重复 2
 
 ## 下一节点
 
-为 ObjectRecord 持久化精确 Schema Version，并在事务提交、文档打开与恢复时执行类型和引用准入。之后再闭合 AssetRef/AssetStore 与 OCCT 架构边界。
+E1B2 已为 ObjectRecord 持久化精确 Schema Version，并闭合显式事务迁移、幂等回放及 History 版本保真，详见 [E1B2 契约](K10E-E1B2-对象版本持久化与事务迁移.md)。下一节点在事务提交、文档打开与恢复时执行类型和引用准入，之后再闭合 AssetRef/AssetStore 与 OCCT 架构边界。

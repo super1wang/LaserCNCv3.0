@@ -265,6 +265,36 @@ void configurePersistence(AppKernel& kernel, const std::filesystem::path& path)
                 .hasValue());
 }
 
+class HistoryObjectMigration final : public IObjectMigration {
+public:
+    Result<Value> migrate(const Value& data) const override
+    {
+        const auto* text = data.getIf<std::string>();
+        if(text == nullptr) {
+            return Result<Value>::failure(makeError(
+                "Test.InvalidMigrationData", ErrorCategory::Validation, "Expected string data"));
+        }
+        return Result<Value>::success(Value {*text + ".v2"});
+    }
+};
+
+class MigrateHandler final : public ICommandHandler {
+public:
+    Result<Value> execute(const CommandRequest& request, ApplicationTransaction& transaction) override
+    {
+        const auto& arguments = *request.arguments.getIf<Value::Object>();
+        auto object = ObjectId::create(*arguments.at("id").getIf<std::string>());
+        if(!object) {
+            return Result<Value>::failure(std::move(object).error());
+        }
+        auto migrated = transaction.migrateObject(object.value(), Version {2U, 0U, 0U});
+        if(!migrated) {
+            return Result<Value>::failure(std::move(migrated).error());
+        }
+        return Result<Value>::success(Value {Value::Object{}});
+    }
+};
+
 void configureRuntime(
     AppKernel& kernel,
     const ProjectId& project,
@@ -272,6 +302,16 @@ void configureRuntime(
     const SessionId& session,
     bool addDocument)
 {
+    auto objectType = lasercnc::test::valueObjectType("kernel.history.test");
+    objectType.descriptor.currentVersion = Version {2U, 0U, 0U};
+    objectType.versions.push_back({Version {2U, 0U, 0U},
+        std::make_shared<lasercnc::test::TestValueObjectValidator>(),
+        std::make_shared<lasercnc::test::TestEmptyObjectReferences>()});
+    objectType.migrations.push_back({Version {1U, 0U, 0U}, Version {2U, 0U, 0U},
+        std::make_shared<HistoryObjectMigration>()});
+    REQUIRE(lasercnc::test::registerObjectType(kernel, std::move(objectType)).hasValue());
+    REQUIRE(lasercnc::test::registerCommand(kernel,
+        createDescriptor("kernel.history.migrate", true), std::make_shared<MigrateHandler>()).hasValue());
     if(addDocument) {
         REQUIRE(kernel.addDocument(project, document).hasValue());
     }
@@ -374,6 +414,98 @@ void rewriteJournal(
 }
 
 } // namespace
+
+TEST_CASE("Recovery refuses stripped or malformed object versions despite a valid digest", "[persistence][object-type][recovery]")
+{
+    const auto path = databasePath();
+    const auto project = validId<ProjectId>("project.history");
+    const auto document = validId<DocumentId>("document.history");
+    const auto session = validId<SessionId>("session.history");
+    {
+        AppKernel kernel;
+        configurePersistence(kernel, path);
+        configureRuntime(kernel, project, document, session, true);
+        REQUIRE(kernel.bootstrap().hasValue());
+        REQUIRE(kernel.execution().executeCommand(request(
+            "request.schema.invalid", "kernel.history.create", project, document, session,
+            "object.history.versioned")).hasValue());
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+    SECTION("new journal cannot omit schemaVersion") {
+        rewriteJournal(path, "transaction.request.schema.invalid", [](Value::Object& root) {
+            auto& change = root.at("changes").getIf<Value::Array>()->front();
+            change.getIf<Value::Object>()->at("after").getIf<Value::Object>()->erase("schemaVersion");
+        });
+    }
+    SECTION("new journal rejects overflow version") {
+        rewriteJournal(path, "transaction.request.schema.invalid", [](Value::Object& root) {
+            auto& change = root.at("changes").getIf<Value::Array>()->front();
+            auto& object = *change.getIf<Value::Object>()->at("after").getIf<Value::Object>();
+            object.at("schemaVersion").getIf<Value::Object>()->at("major") = Value {std::int64_t {4294967296LL}};
+        });
+    }
+    SECTION("legacy version cannot silently reinterpret a new object envelope") {
+        rewriteJournal(path, "transaction.request.schema.invalid", [](Value::Object& root) {
+            root.at("version") = Value {std::int64_t {2}};
+        });
+    }
+    {
+        AppKernel kernel;
+        configurePersistence(kernel, path);
+        configureRuntime(kernel, project, document, session, false);
+        CHECK_FALSE(kernel.bootstrap().hasValue());
+        CHECK_FALSE(kernel.documentRuntime().accepting());
+        CHECK(kernel.state() == AppKernelState::Failed);
+    }
+    removeDatabase(path);
+}
+
+TEST_CASE("History restores exact object versions after migration and restart", "[history][object-type][recovery]")
+{
+    const auto path = databasePath();
+    const auto project = validId<ProjectId>("project.history");
+    const auto document = validId<DocumentId>("document.history");
+    const auto session = validId<SessionId>("session.history");
+    const auto object = validId<ObjectId>("object.history.versioned");
+    {
+        AppKernel kernel;
+        configurePersistence(kernel, path);
+        configureRuntime(kernel, project, document, session, true);
+        REQUIRE(kernel.bootstrap().hasValue());
+        REQUIRE(kernel.execution().executeCommand(request(
+            "request.schema.create", "kernel.history.create", project, document, session,
+            "object.history.versioned", "original")).hasValue());
+        REQUIRE(kernel.execution().executeCommand(request(
+            "request.schema.migrate", "kernel.history.migrate", project, document, session,
+            "object.history.versioned")).hasValue());
+        CHECK(kernel.documents().snapshot(document).value().objects().find(object)->schemaVersion == Version {2U, 0U, 0U});
+        CHECK(objectData(kernel, document, "object.history.versioned") == "original.v2");
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+    {
+        AppKernel kernel;
+        configurePersistence(kernel, path);
+        configureRuntime(kernel, project, document, session, false);
+        REQUIRE(kernel.bootstrap().hasValue());
+        REQUIRE(kernel.execution().executeCommand(request(
+            "request.schema.undo", "edit.undo", project, document, session)).hasValue());
+        CHECK(kernel.documents().snapshot(document).value().objects().find(object)->schemaVersion == Version {1U, 0U, 0U});
+        CHECK(objectData(kernel, document, "object.history.versioned") == "original");
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+    {
+        AppKernel kernel;
+        configurePersistence(kernel, path);
+        configureRuntime(kernel, project, document, session, false);
+        REQUIRE(kernel.bootstrap().hasValue());
+        REQUIRE(kernel.execution().executeCommand(request(
+            "request.schema.redo", "edit.redo", project, document, session)).hasValue());
+        CHECK(kernel.documents().snapshot(document).value().objects().find(object)->schemaVersion == Version {2U, 0U, 0U});
+        CHECK(objectData(kernel, document, "object.history.versioned") == "original.v2");
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+    removeDatabase(path);
+}
 
 TEST_CASE("HistoryRuntime executes undo redo branch replacement and barriers", "[history][runtime]")
 {
@@ -698,6 +830,14 @@ TEST_CASE("Version one journal writes become an undo barrier", "[history][persis
         [](Value::Object& root) {
             root.insert_or_assign("version", Value {std::int64_t {1}});
             root.erase("history");
+            for(auto& change : *root.at("changes").getIf<Value::Array>()) {
+                auto& fields = *change.getIf<Value::Object>();
+                for(const auto* name : {"before", "after"}) {
+                    if(auto* object = fields.at(name).getIf<Value::Object>()) {
+                        object->erase("schemaVersion");
+                    }
+                }
+            }
         });
     {
         AppKernel kernel;

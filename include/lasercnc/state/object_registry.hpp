@@ -2,6 +2,7 @@
 
 #include <lasercnc/foundation/result.hpp>
 #include <lasercnc/foundation/value.hpp>
+#include <lasercnc/foundation/version.hpp>
 #include <lasercnc/kernel/identifiers.hpp>
 
 #include <cstddef>
@@ -19,6 +20,7 @@ struct ObjectRecord final {
     kernel::ObjectId id;
     kernel::ObjectTypeId type;
     foundation::Value data;
+    foundation::Version schemaVersion{1U, 0U, 0U};
 
     friend bool operator==(const ObjectRecord&, const ObjectRecord&) = default;
 };
@@ -40,6 +42,7 @@ private:
     [[nodiscard]] foundation::Result<void> replaceData(
         const kernel::ObjectId& id,
         foundation::Value data);
+    [[nodiscard]] foundation::Result<void> replaceRecord(ObjectRecord object);
     [[nodiscard]] foundation::Result<void> erase(const kernel::ObjectId& id);
     void swap(ObjectRegistry& other) noexcept;
 

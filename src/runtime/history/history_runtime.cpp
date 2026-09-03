@@ -68,7 +68,9 @@ foundation::Result<void> verifyCurrent(
     return foundation::Result<void>::success();
 }
 
-foundation::Result<void> applyChange(
+} // namespace
+
+foundation::Result<void> HistoryRuntime::applyChange(
     ApplicationTransaction& transaction,
     const ObjectChange& change,
     bool undo)
@@ -94,7 +96,7 @@ foundation::Result<void> applyChange(
                 "A history update attempts to change an immutable object type",
                 transaction.documentId()));
         }
-        return transaction.replaceObjectData(change.objectId, target->data);
+        return transaction.restoreObject(*target);
     }
     return foundation::Result<void>::failure(historyError(
         "History.InvalidObjectChange",
@@ -102,6 +104,8 @@ foundation::Result<void> applyChange(
         "A history entry contains an empty object change",
         transaction.documentId()));
 }
+
+namespace {
 
 constexpr std::array revisionScopes {
     state::RevisionScope::Project,

@@ -88,6 +88,23 @@ foundation::Result<void> ObjectRegistry::replaceData(
     return foundation::Result<void>::success();
 }
 
+foundation::Result<void> ObjectRegistry::replaceRecord(ObjectRecord object)
+{
+    const auto iterator = objects_.find(object.id);
+    if(iterator == objects_.end()) {
+        return foundation::Result<void>::failure(objectError(
+            "Document.ObjectNotFound", foundation::ErrorCategory::NotFound,
+            "The object was not found", object.id));
+    }
+    if(iterator->second.type != object.type) {
+        return foundation::Result<void>::failure(objectError(
+            "Document.ObjectTypeChanged", foundation::ErrorCategory::Conflict,
+            "An existing object cannot change its stable type", object.id));
+    }
+    iterator->second = std::move(object);
+    return foundation::Result<void>::success();
+}
+
 foundation::Result<void> ObjectRegistry::erase(const kernel::ObjectId& id)
 {
     if(objects_.erase(id) == 0U) {

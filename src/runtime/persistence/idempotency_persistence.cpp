@@ -1,3 +1,5 @@
+#include "object_record_codec.hpp"
+
 #include <lasercnc/persistence/persistence_service.hpp>
 
 #include <lasercnc/foundation/error.hpp>
@@ -256,44 +258,23 @@ foundation::Value revisionsValue(const state::RevisionSet& revisions)
 
 foundation::Value objectValue(const state::ObjectRecord& object)
 {
-    return foundation::Value {foundation::Value::Object {
-        {"data", object.data},
-        {"id", foundation::Value {std::string(object.id.value())}},
-        {"type", foundation::Value {std::string(object.type.value())}},
-    }};
+    return detail::encodeObjectRecord(object);
 }
 
 foundation::Result<state::ObjectRecord> objectFromValue(
-    const foundation::Value& value)
+    const foundation::Value& value, bool legacy)
 {
-    const auto* object = value.getIf<foundation::Value::Object>();
-    if(object == nullptr) {
-        return foundation::Result<state::ObjectRecord>::failure(idempotencyError(
-            "Persistence.InvalidIdempotencyPayload",
-            foundation::ErrorCategory::Infrastructure,
-            "A persisted object record must be an object"));
-    }
-    auto id = idField<kernel::ObjectId>(*object, "id");
-    auto type = idField<kernel::ObjectTypeId>(*object, "type");
-    const auto* data = field(*object, "data");
-    if(!id || !type || data == nullptr) {
-        return foundation::Result<state::ObjectRecord>::failure(idempotencyError(
-            "Persistence.InvalidIdempotencyPayload",
-            foundation::ErrorCategory::Infrastructure,
-            "A persisted object record is incomplete"));
-    }
-    return foundation::Result<state::ObjectRecord>::success(state::ObjectRecord {
-        std::move(id).value(), std::move(type).value(), *data});
+    return detail::decodeObjectRecord(value, legacy);
 }
 
 foundation::Result<std::optional<state::ObjectRecord>> optionalObject(
-    const foundation::Value& value)
+    const foundation::Value& value, bool legacy)
 {
     if(value.kind() == foundation::Value::Kind::Null) {
         return foundation::Result<std::optional<state::ObjectRecord>>::success(
             std::nullopt);
     }
-    auto object = objectFromValue(value);
+    auto object = objectFromValue(value, legacy);
     if(!object) {
         return foundation::Result<std::optional<state::ObjectRecord>>::failure(
             std::move(object).error());
@@ -404,7 +385,7 @@ foundation::Value outcomeValue(
         {"commit", commitValue(commit)},
         {"format", foundation::Value {"lasercnc.command-outcome"}},
         {"result", result},
-        {"version", foundation::Value {std::int64_t {1}}},
+        {"version", foundation::Value {std::int64_t {2}}},
     }};
 }
 
@@ -417,7 +398,7 @@ foundation::Value taskOutcomeValue(
         {"format", foundation::Value {"lasercnc.command-outcome"}},
         {"result", result},
         {"taskId", foundation::Value {std::string(request.taskId.value())}},
-        {"version", foundation::Value {std::int64_t {1}}},
+        {"version", foundation::Value {std::int64_t {2}}},
     }};
 }
 
@@ -595,7 +576,7 @@ foundation::Result<runtime::HistoryMutation> decodeHistoryValue(
     return foundation::Result<runtime::HistoryMutation>::success(std::move(mutation));
 }
 
-foundation::Result<DecodedCommit> decodeCommitValue(const foundation::Value& value)
+foundation::Result<DecodedCommit> decodeCommitValue(const foundation::Value& value, bool legacy)
 {
     const auto* root = value.getIf<foundation::Value::Object>();
     if(root == nullptr) {
@@ -613,7 +594,8 @@ foundation::Result<DecodedCommit> decodeCommitValue(const foundation::Value& val
     const auto* eventsValue = field(*root, "events");
     const auto* historyValue = field(*root, "history");
     if(!transactionId || !projectId || !documentId || beforeValue == nullptr
-       || afterValue == nullptr || changesValue == nullptr || eventsValue == nullptr) {
+       || afterValue == nullptr || changesValue == nullptr || eventsValue == nullptr
+       || (!legacy && historyValue == nullptr)) {
         return foundation::Result<DecodedCommit>::failure(idempotencyError(
             "Persistence.InvalidIdempotencyPayload",
             foundation::ErrorCategory::Infrastructure,
@@ -650,8 +632,8 @@ foundation::Result<DecodedCommit> decodeCommitValue(const foundation::Value& val
                 foundation::ErrorCategory::Infrastructure,
                 "A persisted command change is incomplete"));
         }
-        auto previous = optionalObject(*beforeObject);
-        auto next = optionalObject(*afterObject);
+        auto previous = optionalObject(*beforeObject, legacy);
+        auto next = optionalObject(*afterObject, legacy);
         if(!previous || !next) {
             return foundation::Result<DecodedCommit>::failure(idempotencyError(
                 "Persistence.InvalidIdempotencyPayload",
@@ -878,13 +860,14 @@ foundation::Result<runtime::TransactionCommit> PersistenceService::loadCommitUnl
         ? nullptr
         : versionValue->getIf<std::int64_t>();
     if(!format || format.value() != "lasercnc.state-journal" || version == nullptr
-       || (*version != 1 && *version != 2)) {
+       || (*version != 1 && *version != 2 && *version != 3)
+       || (*version >= 2 && field(*root, "history") == nullptr)) {
         return foundation::Result<runtime::TransactionCommit>::failure(idempotencyError(
             "Persistence.InvalidIdempotencyJournal",
             foundation::ErrorCategory::Infrastructure,
             "A completed idempotency journal format is invalid"));
     }
-    auto commit = decodeCommitValue(decoded.value());
+    auto commit = decodeCommitValue(decoded.value(), *version < 3);
     if(!commit || commit.value().transactionId != transactionId
        || commit.value().projectId != projectId.value()
        || commit.value().documentId != documentId.value()
@@ -1122,7 +1105,7 @@ foundation::Result<IdempotencyClaim> PersistenceService::claimCommand(
             ? nullptr
             : field(*outcomeRoot, "commit");
         if(!format || format.value() != "lasercnc.command-outcome" || version == nullptr
-           || *version != 1 || result == nullptr || commitValueField == nullptr) {
+           || (*version != 1 && *version != 2) || result == nullptr || commitValueField == nullptr) {
             auto failure = rollback(*backend_, idempotencyError(
                 "Persistence.InvalidIdempotencyPayload",
                 foundation::ErrorCategory::Infrastructure,
@@ -1135,7 +1118,7 @@ foundation::Result<IdempotencyClaim> PersistenceService::claimCommand(
         if(commitValueField->kind() == foundation::Value::Kind::Object) {
             auto journalTransactionId = idColumn<kernel::TransactionId>(
                 row, "journal_transaction_id");
-            auto embeddedCommit = decodeCommitValue(*commitValueField);
+            auto embeddedCommit = decodeCommitValue(*commitValueField, *version < 2);
             auto durableCommit = journalTransactionId
                 ? loadCommitUnlocked(journalTransactionId.value())
                 : foundation::Result<runtime::TransactionCommit>::failure(

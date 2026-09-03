@@ -92,6 +92,9 @@ public:
     [[nodiscard]] foundation::Result<void> replaceObjectData(
         const kernel::ObjectId& objectId,
         foundation::Value data);
+    [[nodiscard]] foundation::Result<void> migrateObject(
+        const kernel::ObjectId& objectId,
+        foundation::Version targetVersion);
     [[nodiscard]] foundation::Result<void> removeObject(const kernel::ObjectId& objectId);
     [[nodiscard]] foundation::Result<void> touchRevision(state::RevisionScope scope);
     [[nodiscard]] foundation::Result<void> collectEvent(
@@ -113,6 +116,7 @@ private:
         state::Document baseDocument);
 
     [[nodiscard]] foundation::Result<void> ensureActive() const;
+    [[nodiscard]] foundation::Result<void> restoreObject(state::ObjectRecord object);
     [[nodiscard]] foundation::Result<void> attachIdempotency(
         TransactionIdempotency idempotency);
     [[nodiscard]] foundation::Result<void> attachHistoryMutation(

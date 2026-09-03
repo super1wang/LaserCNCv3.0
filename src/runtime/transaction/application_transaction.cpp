@@ -264,6 +264,61 @@ foundation::Result<void> ApplicationTransaction::replaceObjectData(
     }
 }
 
+foundation::Result<void> ApplicationTransaction::restoreObject(state::ObjectRecord object)
+{
+    auto active = ensureActive();
+    if(!active) {
+        return active;
+    }
+    try {
+        auto replaced = stagedObjects_.replaceRecord(std::move(object));
+        if(!replaced) {
+            return fail(std::move(replaced).error());
+        }
+        markDocumentChanged();
+        return foundation::Result<void>::success();
+    } catch(const std::exception& exception) {
+        return fail(unexpectedFailure(transactionId_, "restoreObject", exception.what()));
+    } catch(...) {
+        return fail(unexpectedFailure(transactionId_, "restoreObject", "Unknown failure"));
+    }
+}
+
+foundation::Result<void> ApplicationTransaction::migrateObject(
+    const kernel::ObjectId& objectId, foundation::Version targetVersion)
+{
+    auto active = ensureActive();
+    if(!active) {
+        return active;
+    }
+    try {
+        if(manager_->objectTypes_ == nullptr) {
+            return fail(foundation::makeError(
+                "Transaction.ObjectTypesRequired", foundation::ErrorCategory::Conflict,
+                "Explicit object migration requires a configured object type registry"));
+        }
+        const auto* source = stagedObjects_.find(objectId);
+        if(source == nullptr) {
+            return fail(foundation::makeError(
+                "Document.ObjectNotFound", foundation::ErrorCategory::NotFound,
+                "The object selected for migration was not found"));
+        }
+        auto data = manager_->objectTypes_->migrate(
+            source->type, source->schemaVersion, targetVersion, source->data);
+        if(!data) {
+            return fail(std::move(data).error());
+        }
+        auto target = *source;
+        target.data = std::move(data).value();
+        target.schemaVersion = targetVersion;
+        return restoreObject(std::move(target));
+    } catch(const std::exception& exception) {
+        return fail(unexpectedFailure(transactionId_, "migrateObject", exception.what()));
+    } catch(...) {
+        return fail(unexpectedFailure(transactionId_, "migrateObject", "Unknown failure"));
+    }
+}
+
 foundation::Result<void> ApplicationTransaction::removeObject(
     const kernel::ObjectId& objectId)
 {

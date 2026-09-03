@@ -16,6 +16,23 @@
 
 namespace lasercnc::test {
 
+class TestValueObjectValidator final : public state::IObjectTypeValidator {
+public:
+    foundation::Result<void> validate(const foundation::Value&) const override
+    {
+        return foundation::Result<void>::success();
+    }
+};
+
+class TestEmptyObjectReferences final : public state::IObjectReferenceEnumerator {
+public:
+    foundation::Result<std::vector<kernel::ObjectId>> enumerate(
+        const foundation::Value&) const override
+    {
+        return foundation::Result<std::vector<kernel::ObjectId>>::success({});
+    }
+};
+
 template <typename Id>
 Id requiredTestId(const char* value)
 {
@@ -397,6 +414,15 @@ inline foundation::Result<void> registerObjectType(
         [definition = std::move(definition)](KernelTestModuleBuilder& builder) mutable {
             builder.objectType(std::move(definition));
         });
+}
+
+inline state::ObjectTypeDefinition valueObjectType(
+    const char* type, foundation::Version version = {1U, 0U, 0U})
+{
+    return state::ObjectTypeDefinition {
+        {requiredTestId<kernel::ObjectTypeId>(type), version, state::ObjectPersistencePolicy::Durable},
+        {{version, std::make_shared<TestValueObjectValidator>(), std::make_shared<TestEmptyObjectReferences>()}},
+        {}};
 }
 
 } // namespace lasercnc::test

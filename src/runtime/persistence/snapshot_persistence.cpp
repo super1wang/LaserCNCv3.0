@@ -1,3 +1,5 @@
+#include "object_record_codec.hpp"
+
 #include <lasercnc/persistence/persistence_service.hpp>
 
 #include <lasercnc/foundation/error.hpp>
@@ -72,11 +74,7 @@ foundation::Value snapshotValue(
     const auto records = document.objects().all();
     objects.reserve(records.size());
     for(const auto& object : records) {
-        objects.emplace_back(foundation::Value::Object {
-            {"data", object.data},
-            {"id", foundation::Value {std::string(object.id.value())}},
-            {"type", foundation::Value {std::string(object.type.value())}},
-        });
+        objects.push_back(detail::encodeObjectRecord(object));
     }
     return foundation::Value {foundation::Value::Object {
         {"documentId", foundation::Value {std::string(document.id().value())}},
@@ -85,7 +83,7 @@ foundation::Value snapshotValue(
         {"projectId", foundation::Value {std::string(document.projectId().value())}},
         {"revisions", revisionsValue(document.revisions())},
         {"snapshotId", foundation::Value {std::string(snapshotId.value())}},
-        {"version", foundation::Value {std::int64_t {1}}},
+        {"version", foundation::Value {std::int64_t {2}}},
     }};
 }
 
@@ -244,7 +242,7 @@ foundation::Result<void> validateSnapshotPayload(
     const auto revisions = root->find("revisions");
     const auto objects = root->find("objects");
     if(!matchesText("format", "lasercnc.document-snapshot")
-       || versionNumber == nullptr || *versionNumber != 1
+       || versionNumber == nullptr || (*versionNumber != 1 && *versionNumber != 2)
        || !matchesText("snapshotId", record.snapshotId.value())
        || !matchesText("projectId", record.projectId.value())
        || !matchesText("documentId", record.documentId.value())

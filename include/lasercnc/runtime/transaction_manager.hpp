@@ -4,6 +4,7 @@
 #include <lasercnc/kernel/identifiers.hpp>
 #include <lasercnc/runtime/transaction.hpp>
 #include <lasercnc/state/document_store.hpp>
+#include <lasercnc/state/object_type_registry.hpp>
 #include <lasercnc/state/revision.hpp>
 
 #include <cstddef>
@@ -28,7 +29,8 @@ public:
         state::DocumentStore& documents,
         persistence::PersistenceService* persistence = nullptr,
         DocumentRuntime* documentRuntime = nullptr,
-        HistoryRuntime* historyRuntime = nullptr) noexcept;
+        HistoryRuntime* historyRuntime = nullptr,
+        const state::ObjectTypeRegistry* objectTypes = nullptr) noexcept;
 
     TransactionManager(const TransactionManager&) = delete;
     TransactionManager& operator=(const TransactionManager&) = delete;
@@ -53,6 +55,7 @@ private:
     persistence::PersistenceService* persistence_;
     DocumentRuntime* documentRuntime_;
     HistoryRuntime* historyRuntime_;
+    const state::ObjectTypeRegistry* objectTypes_;
     std::mutex commitMutex_;
     mutable std::mutex activeMutex_;
     std::map<kernel::TransactionId, kernel::DocumentId> activeTransactions_;

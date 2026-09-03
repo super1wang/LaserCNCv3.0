@@ -44,11 +44,13 @@ TransactionManager::TransactionManager(
     state::DocumentStore& documents,
     persistence::PersistenceService* persistence,
     DocumentRuntime* documentRuntime,
-    HistoryRuntime* historyRuntime) noexcept
+    HistoryRuntime* historyRuntime,
+    const state::ObjectTypeRegistry* objectTypes) noexcept
     : documents_(documents),
       persistence_(persistence),
       documentRuntime_(documentRuntime),
-      historyRuntime_(historyRuntime)
+      historyRuntime_(historyRuntime),
+      objectTypes_(objectTypes)
 {
 }
 

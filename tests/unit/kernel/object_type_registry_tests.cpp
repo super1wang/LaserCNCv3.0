@@ -1,5 +1,6 @@
 #include <lasercnc/state/object_type_registry.hpp>
 #include <lasercnc/foundation/error.hpp>
+#include <lasercnc/runtime/transaction_manager.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 #include "kernel_test_module.hpp"
@@ -135,6 +136,55 @@ private:
 };
 
 } // namespace
+
+TEST_CASE("Object migration is explicit transactional and rollback safe", "[state][object-type][transaction]")
+{
+    using namespace lasercnc::runtime;
+    ObjectTypeRegistry types;
+    REQUIRE(types.registerType(definition()).hasValue());
+    types.freeze();
+    DocumentStore documents;
+    const auto project = id<ProjectId>("project.migration");
+    const auto document = id<DocumentId>("document.migration");
+    const auto object = id<ObjectId>("object.migration");
+    REQUIRE(documents.addDocument(project, document).hasValue());
+    TransactionManager transactions(documents, nullptr, nullptr, nullptr, &types);
+    auto seed = transactions.begin(id<TransactionId>("tx.seed"), document);
+    REQUIRE(seed.hasValue());
+    REQUIRE(seed.value()->createObject(ObjectRecord{
+        object, id<ObjectTypeId>("type.test.versioned"), Value {std::int64_t {1}}}).hasValue());
+    REQUIRE(seed.value()->commit().hasValue());
+    const auto before = documents.snapshot(document).value();
+    auto transaction = transactions.begin(id<TransactionId>("tx.migrate"), document);
+    REQUIRE(transaction.hasValue());
+    REQUIRE(transaction.value()->migrateObject(object, Version {3U, 0U, 0U}).hasValue());
+    CHECK(transaction.value()->stagedObjects().find(object)->schemaVersion == Version {3U, 0U, 0U});
+    CHECK(documents.snapshot(document).value().objects().find(object)->schemaVersion == Version {1U, 0U, 0U});
+    SECTION("commit preserves before and after versions") {
+        auto committed = transaction.value()->commit();
+        REQUIRE(committed.hasValue());
+        REQUIRE(committed.value().changes.size() == 1U);
+        CHECK(committed.value().changes.front().before->schemaVersion == Version {1U, 0U, 0U});
+        CHECK(committed.value().changes.front().after->schemaVersion == Version {3U, 0U, 0U});
+        CHECK(documents.snapshot(document).value().objects().find(object)->data == Value {std::int64_t {3}});
+    }
+    SECTION("explicit rollback leaves state unchanged") {
+        REQUIRE(transaction.value()->rollback().hasValue());
+        CHECK(documents.snapshot(document).value().objects().all() == before.objects().all());
+        CHECK(documents.snapshot(document).value().revisions() == before.revisions());
+    }
+    SECTION("failed downgrade poisons the transaction") {
+        CHECK_FALSE(transaction.value()->migrateObject(object, Version {1U, 0U, 0U}).hasValue());
+        CHECK(transaction.value()->transactionState() == TransactionState::Failed);
+        CHECK_FALSE(transaction.value()->commit().hasValue());
+        CHECK(documents.snapshot(document).value().objects().all() == before.objects().all());
+    }
+    SECTION("missing object poisons the transaction") {
+        CHECK_FALSE(transaction.value()->migrateObject(id<ObjectId>("object.missing"), Version {3U, 0U, 0U}).hasValue());
+        CHECK_FALSE(transaction.value()->commit().hasValue());
+        CHECK(documents.snapshot(document).value().revisions() == before.revisions());
+    }
+}
 
 TEST_CASE("ObjectTypeRegistry freezes deterministic versioned contracts", "[state][object-type]")
 {

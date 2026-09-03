@@ -1,3 +1,5 @@
+#include "object_record_codec.hpp"
+
 #include <lasercnc/persistence/persistence_service.hpp>
 
 #include <lasercnc/foundation/error.hpp>
@@ -65,11 +67,7 @@ foundation::Value revisionsValue(const state::RevisionSet& revisions)
 
 foundation::Value objectValue(const state::ObjectRecord& object)
 {
-    return foundation::Value {foundation::Value::Object {
-        {"data", object.data},
-        {"id", foundation::Value {std::string(object.id.value())}},
-        {"type", foundation::Value {std::string(object.type.value())}},
-    }};
+    return detail::encodeObjectRecord(object);
 }
 
 const char* changeKindName(runtime::ObjectChangeKind kind) noexcept
@@ -164,7 +162,7 @@ foundation::Value commitValue(const runtime::TransactionCommit& commit)
         {"revisionsAfter", revisionsValue(commit.revisionsAfter)},
         {"revisionsBefore", revisionsValue(commit.revisionsBefore)},
         {"transactionId", foundation::Value {std::string(commit.transactionId.value())}},
-        {"version", foundation::Value {std::int64_t {2}}},
+        {"version", foundation::Value {std::int64_t {3}}},
     }};
 }
 
@@ -354,8 +352,8 @@ foundation::Result<void> validateRecord(
     const auto after = root->find("revisionsAfter");
     const auto history = root->find("history");
     if(!matchesText("format", "lasercnc.state-journal")
-       || versionNumber == nullptr || (*versionNumber != 1 && *versionNumber != 2)
-       || (*versionNumber == 2
+       || versionNumber == nullptr || (*versionNumber != 1 && *versionNumber != 2 && *versionNumber != 3)
+       || (*versionNumber >= 2
            && (history == root->end()
                || history->second.kind() != foundation::Value::Kind::Object))
        || !matchesText("transactionId", record.transactionId.value())

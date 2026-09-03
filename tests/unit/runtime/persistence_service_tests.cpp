@@ -831,6 +831,62 @@ CommandRequest persistentAsyncCommandRequest(
 
 } // namespace
 
+TEST_CASE("Persistence preserves object schema versions across journal snapshot and idempotency", "[persistence][object-type]")
+{
+    const auto path = uniqueDatabasePath();
+    const auto snapshotDirectory = uniqueSnapshotDirectory();
+    const auto project = validId<ProjectId>("project.persisted");
+    const auto document = validId<DocumentId>("document.persisted");
+    const auto key = validId<IdempotencyKey>("key.schema");
+    const Value signature {"signature.schema"};
+    const RevisionSet one {Revision {1U}, Revision {1U}, Revision {1U}, Revision {}, Revision {}, Revision {}};
+    const RevisionSet two {Revision {2U}, Revision {2U}, Revision {2U}, Revision {}, Revision {}, Revision {}};
+    auto first = commit("tx.schema.1", RevisionSet {}, one, "schema-data");
+    first.changes.front().after->schemaVersion = Version {2U, 7U, 11U};
+    {
+        PersistenceService service;
+        configureService(service, path, snapshotDirectory);
+        REQUIRE(service.claimCommand(key, signature).hasValue());
+        REQUIRE(service.append(first, TransactionIdempotency{key, signature, Value {"result"}}).hasValue());
+        auto recovered = service.recover();
+        REQUIRE(recovered.hasValue());
+        REQUIRE(recovered.value().documents.size() == 1U);
+        CHECK(recovered.value().documents.front().objects.front().schemaVersion == Version {2U, 7U, 11U});
+        DocumentStore documents;
+        REQUIRE(documents.addDocument(project, document).hasValue());
+        TransactionManager transactions(documents);
+        auto seed = transactions.begin(validId<TransactionId>("tx.schema.snapshot"), document);
+        REQUIRE(seed.hasValue());
+        REQUIRE(seed.value()->createObject(*first.changes.front().after).hasValue());
+        REQUIRE(seed.value()->touchRevision(RevisionScope::Geometry).hasValue());
+        REQUIRE(seed.value()->commit().hasValue());
+        REQUIRE(service.captureSnapshot(validId<SnapshotId>("snapshot.schema"), documents.snapshot(document).value()).hasValue());
+        auto second = commit("tx.schema.2", one, two, "migrated-data");
+        auto& change = second.changes.front();
+        change.kind = ObjectChangeKind::Updated;
+        change.before = first.changes.front().after;
+        change.after->schemaVersion = Version {3U, 0U, 2U};
+        REQUIRE(service.append(second).hasValue());
+    }
+    {
+        PersistenceService service;
+        configureService(service, path, snapshotDirectory);
+        auto recovered = service.recover();
+        REQUIRE(recovered.hasValue());
+        CHECK(recovered.value().journalRecordsReplayed == 1U);
+        const auto& image = recovered.value().documents.front();
+        CHECK(image.projectId == project);
+        CHECK(image.objects.front().schemaVersion == Version {3U, 0U, 2U});
+        auto replay = service.claimCommand(key, signature);
+        REQUIRE(replay.hasValue());
+        REQUIRE(replay.value().replay.has_value());
+        REQUIRE(replay.value().replay->commit.has_value());
+        CHECK(replay.value().replay->commit->changes.front().after->schemaVersion == Version {2U, 7U, 11U});
+    }
+    removeDatabase(path);
+    removeSnapshotDirectory(snapshotDirectory);
+}
+
 TEST_CASE("PersistenceService migrates and appends an idempotent state journal", "[persistence][journal]")
 {
     const auto path = uniqueDatabasePath();

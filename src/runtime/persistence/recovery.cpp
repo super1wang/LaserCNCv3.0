@@ -1,3 +1,5 @@
+#include "object_record_codec.hpp"
+
 #include <lasercnc/persistence/persistence_service.hpp>
 
 #include <lasercnc/foundation/error.hpp>
@@ -250,36 +252,19 @@ foundation::Result<state::RevisionSet> revisionsFromValue(
 }
 
 foundation::Result<state::ObjectRecord> objectFromValue(
-    const foundation::Value& value)
+    const foundation::Value& value, bool legacy)
 {
-    const auto* object = value.getIf<foundation::Value::Object>();
-    if(object == nullptr) {
-        return foundation::Result<state::ObjectRecord>::failure(recoveryError(
-            "Persistence.InvalidRecoveryPayload",
-            foundation::ErrorCategory::Infrastructure,
-            "A recovered object record must be an object"));
-    }
-    auto id = idField<kernel::ObjectId>(*object, "id");
-    auto type = idField<kernel::ObjectTypeId>(*object, "type");
-    const auto* data = field(*object, "data");
-    if(!id || !type || data == nullptr) {
-        return foundation::Result<state::ObjectRecord>::failure(recoveryError(
-            "Persistence.InvalidRecoveryPayload",
-            foundation::ErrorCategory::Infrastructure,
-            "A recovered object record is incomplete"));
-    }
-    return foundation::Result<state::ObjectRecord>::success(state::ObjectRecord {
-        std::move(id).value(), std::move(type).value(), *data});
+    return detail::decodeObjectRecord(value, legacy);
 }
 
 foundation::Result<std::optional<state::ObjectRecord>> optionalObjectFromValue(
-    const foundation::Value& value)
+    const foundation::Value& value, bool legacy)
 {
     if(value.kind() == foundation::Value::Kind::Null) {
         return foundation::Result<std::optional<state::ObjectRecord>>::success(
             std::nullopt);
     }
-    auto object = objectFromValue(value);
+    auto object = objectFromValue(value, legacy);
     if(!object) {
         return foundation::Result<std::optional<state::ObjectRecord>>::failure(
             std::move(object).error());
@@ -531,8 +516,8 @@ foundation::Result<DecodedJournal> decodeJournal(
     const auto* changes = changesValue->getIf<foundation::Value::Array>();
     const auto* events = eventsValue->getIf<foundation::Value::Array>();
     if(!before || !after || changes == nullptr || format.value() != "lasercnc.state-journal"
-       || (*version != 1 && *version != 2)
-       || (*version == 2 && historyValue == nullptr)
+       || (*version != 1 && *version != 2 && *version != 3)
+       || (*version >= 2 && historyValue == nullptr)
        || transactionId.value() != record.value().transactionId
        || projectId.value() != record.value().projectId
        || documentId.value() != record.value().documentId
@@ -565,8 +550,8 @@ foundation::Result<DecodedJournal> decodeJournal(
                 foundation::ErrorCategory::Infrastructure,
                 "A journal change is incomplete"));
         }
-        auto beforeRecord = optionalObjectFromValue(*beforeObject);
-        auto afterRecord = optionalObjectFromValue(*afterObject);
+        auto beforeRecord = optionalObjectFromValue(*beforeObject, *version < 3);
+        auto afterRecord = optionalObjectFromValue(*afterObject, *version < 3);
         if(!beforeRecord || !afterRecord) {
             return foundation::Result<DecodedJournal>::failure(recoveryError(
                 "Persistence.JournalChangeInvalid",
@@ -715,7 +700,7 @@ foundation::Result<SnapshotState> decodeSnapshot(
     auto payloadRevisions = revisionsFromValue(*revisionsValue);
     const auto* objects = objectsValue->getIf<foundation::Value::Array>();
     if(!payloadRevisions || objects == nullptr
-       || format.value() != "lasercnc.document-snapshot" || *version != 1
+       || format.value() != "lasercnc.document-snapshot" || (*version != 1 && *version != 2)
        || payloadSnapshotId.value() != snapshotId.value()
        || payloadProjectId.value() != projectId.value()
        || payloadDocumentId.value() != documentId.value()
@@ -727,7 +712,7 @@ foundation::Result<SnapshotState> decodeSnapshot(
     }
     std::map<kernel::ObjectId, state::ObjectRecord> decodedObjects;
     for(const auto& objectValue : *objects) {
-        auto object = objectFromValue(objectValue);
+        auto object = objectFromValue(objectValue, *version < 2);
         if(!object) {
             return foundation::Result<SnapshotState>::failure(
                 std::move(object).error());

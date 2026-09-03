@@ -83,6 +83,8 @@ private:
     };
 
     [[nodiscard]] foundation::Result<void> registerCommands(CommandRegistry& registry);
+    [[nodiscard]] static foundation::Result<void> applyChange(
+        ApplicationTransaction& transaction, const ObjectChange& change, bool undo);
     [[nodiscard]] foundation::Result<void> prepareUndo(
         ApplicationTransaction& transaction);
     [[nodiscard]] foundation::Result<void> prepareRedo(

@@ -26,6 +26,7 @@ target_sources(
         observability/log_observability_exporter.cpp
         observability/diagnostics_service.cpp
         persistence/persistence_service.cpp
+        persistence/object_record_codec.cpp
         persistence/document_persistence.cpp
         persistence/idempotency_persistence.cpp
         persistence/effect_persistence.cpp
