@@ -49,7 +49,8 @@ AppKernel::AppKernel()
           traces_,
           metrics_),
       queries_(
-          queryRegistry_, documents_, capabilities_, executionServices_, traces_, metrics_)
+          queryRegistry_, documents_, capabilities_, executionServices_, traces_, metrics_),
+      workflows_(workflowRegistry_, commands_, queries_, tasks_, executionServices_)
 {
     static_cast<void>(diagnostics_.addExporter(
         std::make_shared<PersistenceDiagnosticExporter>(persistence_)));
@@ -180,6 +181,21 @@ foundation::Result<void> AppKernel::bootstrap()
                 : std::make_shared<const foundation::Error>(std::move(stopped).error())));
     }
 
+    auto workflowsValidated = workflowRegistry_.validateAndFreeze();
+    if(!workflowsValidated) {
+        auto stopped = modules_.shutdown(*this);
+        state_ = AppKernelState::Failed;
+        return foundation::Result<void>::failure(foundation::makeError(
+            "Workflow.RegistryValidationFailed",
+            foundation::ErrorCategory::Validation,
+            "The workflow registry could not be frozen",
+            foundation::Value {},
+            foundation::Severity::Error,
+            std::make_shared<const foundation::Error>(
+                stopped.hasValue() ? std::move(workflowsValidated).error()
+                                   : std::move(stopped).error())));
+    }
+
     if(taskExecutor_ != nullptr) {
         auto scheduled = scheduler_.start();
         if(!scheduled) {
@@ -193,24 +209,6 @@ foundation::Result<void> AppKernel::bootstrap()
                 foundation::Severity::Error,
                 std::make_shared<const foundation::Error>(std::move(scheduled).error())));
         }
-    }
-
-    auto workflowsValidated = workflowRegistry_.validateAndFreeze();
-    if(!workflowsValidated) {
-        if(taskExecutor_ != nullptr) {
-            static_cast<void>(scheduler_.shutdown(std::chrono::seconds(5)));
-        }
-        auto stopped = modules_.shutdown(*this);
-        state_ = AppKernelState::Failed;
-        return foundation::Result<void>::failure(foundation::makeError(
-            "Workflow.RegistryValidationFailed",
-            foundation::ErrorCategory::Validation,
-            "The workflow registry could not be frozen",
-            foundation::Value {},
-            foundation::Severity::Error,
-            std::make_shared<const foundation::Error>(
-                stopped.hasValue() ? std::move(workflowsValidated).error()
-                                   : std::move(stopped).error())));
     }
 
     services_.freeze();
@@ -227,6 +225,7 @@ foundation::Result<void> AppKernel::bootstrap()
     if(taskExecutor_ != nullptr) {
         tasks_.start();
     }
+    workflows_.start();
     state_ = AppKernelState::Ready;
     return foundation::Result<void>::success();
 }
@@ -256,7 +255,8 @@ foundation::Result<void> AppKernel::shutdown(std::chrono::milliseconds taskTimeo
     }
     const auto activeCommandCount = commands_.activeExecutionCount();
     const auto activeQueryCount = queries_.activeExecutionCount();
-    if(activeCommandCount != 0U || activeQueryCount != 0U) {
+    const auto activeWorkflowCount = workflows_.activeExecutionCount();
+    if(activeCommandCount != 0U || activeQueryCount != 0U || activeWorkflowCount != 0U) {
         return foundation::Result<void>::failure(foundation::makeError(
             "Kernel.ActiveExecutions",
             foundation::ErrorCategory::Conflict,
@@ -264,11 +264,13 @@ foundation::Result<void> AppKernel::shutdown(std::chrono::milliseconds taskTimeo
             foundation::Value {foundation::Value::Object {
                 {"activeCommandCount", foundation::Value {std::to_string(activeCommandCount)}},
                 {"activeQueryCount", foundation::Value {std::to_string(activeQueryCount)}},
+                {"activeWorkflowCount", foundation::Value {std::to_string(activeWorkflowCount)}},
             }}));
     }
 
     const bool wasConfiguring = state_ == AppKernelState::Configuring;
     state_ = AppKernelState::Stopping;
+    workflows_.stop();
     commands_.stop();
     queries_.stop();
     tasks_.stop();
@@ -445,6 +447,16 @@ runtime::TaskRuntime& AppKernel::tasks() noexcept
 const runtime::TaskRuntime& AppKernel::tasks() const noexcept
 {
     return tasks_;
+}
+
+runtime::WorkflowRuntime& AppKernel::workflows() noexcept
+{
+    return workflows_;
+}
+
+const runtime::WorkflowRuntime& AppKernel::workflows() const noexcept
+{
+    return workflows_;
 }
 
 observability::LocalTraceService& AppKernel::traces() noexcept

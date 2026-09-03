@@ -72,6 +72,7 @@ struct WorkflowStep final {
     std::optional<std::chrono::milliseconds> timeout;
     WorkflowRetryPolicy retry;
     std::optional<WorkflowCompensation> compensation;
+    std::string taskIdBinding;
 };
 
 struct WorkflowDescriptor final {
@@ -131,9 +132,11 @@ struct WorkflowStepSnapshot final {
     WorkflowStepState state{WorkflowStepState::Pending};
     std::uint32_t attempt{0U};
     std::optional<std::chrono::system_clock::time_point> nextAttemptAt;
+    std::optional<std::chrono::system_clock::time_point> startedAt;
     std::optional<kernel::TaskId> taskId;
     std::optional<foundation::Value> result;
     std::optional<foundation::Error> error;
+    std::uint32_t compensationAttempt{0U};
 };
 
 struct WorkflowSnapshot final {

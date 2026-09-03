@@ -28,6 +28,7 @@ target_sources(
         persistence/diagnostic_persistence.cpp
         workflow/workflow.cpp
         workflow/workflow_registry.cpp
+        workflow/workflow_runtime.cpp
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS "${PROJECT_SOURCE_DIR}/include"
@@ -56,4 +57,5 @@ target_sources(
             "${PROJECT_SOURCE_DIR}/include/lasercnc/persistence/persistence_service.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/workflow.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/workflow_registry.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/workflow_runtime.hpp"
 )

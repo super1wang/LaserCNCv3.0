@@ -198,6 +198,7 @@ foundation::Result<void> WorkflowRegistry::registerDefinition(WorkflowDefinition
     if(!valid) {
         return valid;
     }
+    std::ranges::sort(definition.steps, {}, &WorkflowStep::stepId);
 
     std::unique_lock lock(mutex_);
     if(frozen_) {
@@ -329,11 +330,12 @@ foundation::Result<void> WorkflowRegistry::validateAndFreeze()
             if(step.compensation.has_value()) {
                 auto descriptor = commands_.descriptor(step.compensation->command.command);
                 if(!descriptor || descriptor.value().version != step.compensation->command.version
-                   || !descriptor.value().idempotent) {
+                   || !descriptor.value().idempotent
+                   || descriptor.value().executionMode != ExecutionMode::Synchronous) {
                     return foundation::Result<void>::failure(workflowError(
                         "Workflow.InvalidCompensationCommand",
                         foundation::ErrorCategory::Validation,
-                        "A compensation command must exist at the exact version and be idempotent",
+                        "A compensation command must exist at the exact version, be synchronous, and be idempotent",
                         definition.descriptor.name,
                         &step.stepId));
                 }

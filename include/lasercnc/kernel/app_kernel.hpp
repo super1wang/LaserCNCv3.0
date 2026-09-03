@@ -20,6 +20,7 @@
 #include <lasercnc/runtime/task_registry.hpp>
 #include <lasercnc/runtime/task_runtime.hpp>
 #include <lasercnc/runtime/workflow_registry.hpp>
+#include <lasercnc/runtime/workflow_runtime.hpp>
 #include <lasercnc/state/document_store.hpp>
 
 #include <chrono>
@@ -83,6 +84,8 @@ public:
     [[nodiscard]] const runtime::Scheduler& scheduler() const noexcept;
     [[nodiscard]] runtime::TaskRuntime& tasks() noexcept;
     [[nodiscard]] const runtime::TaskRuntime& tasks() const noexcept;
+    [[nodiscard]] runtime::WorkflowRuntime& workflows() noexcept;
+    [[nodiscard]] const runtime::WorkflowRuntime& workflows() const noexcept;
     [[nodiscard]] observability::LocalTraceService& traces() noexcept;
     [[nodiscard]] const observability::LocalTraceService& traces() const noexcept;
     [[nodiscard]] observability::LocalMetricsService& metrics() noexcept;
@@ -115,6 +118,7 @@ private:
     runtime::TaskRuntime tasks_;
     runtime::CommandRuntime commands_;
     runtime::QueryRuntime queries_;
+    runtime::WorkflowRuntime workflows_;
     AppKernelState state_{AppKernelState::Configuring};
 };
 
