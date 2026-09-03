@@ -136,8 +136,9 @@ AppKernel 拥有 PersistenceService：配置时在 bootstrap 执行 migration，
 - 同步/异步 Command 的持久幂等、key 重绑冲突、原 Commit/TaskId 重启重放，以及重放不调用 handler/不重发 Event；
 - Task 原子接受、成功终态、不可变结果、重启中断标记、请求/终态摘要篡改闭锁和终态写失败可见性；
 - Diagnostics 内存优先 exporter、SQLite 顺序历史/latest、重启读取、摘要篡改闭锁和写失败隔离。
+- 独立播种进程以 `_Exit` 跳过析构后，恢复进程可验证 Snapshot + Journal tail、原 Commit 幂等结果、未完成 Task 中断和 Diagnostics 历史，且 handler/Event 不重放。
 
 ## 尚未验收
 
 - 数据库 busy、只读文件系统和实际进程中断点等更完整故障注入；
-- Debug/Release、重复、Production-only 与完整进程恢复门禁。
+- Release、Debug 重复、Production-only 与最终架构扫描门禁。

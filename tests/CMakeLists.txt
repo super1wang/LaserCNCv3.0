@@ -109,3 +109,18 @@ set_tests_properties(
     integration.kernel_headless_task_roundtrip
     PROPERTIES PASS_REGULAR_EXPRESSION "task-verified"
 )
+
+add_test(
+    NAME integration.kernel_persistence_process_recovery
+    COMMAND
+        "${CMAKE_COMMAND}"
+        "-DLCNC_CONTRACT_EXECUTABLE=$<TARGET_FILE:lasercnc_kernel_headless_contract>"
+        "-DLCNC_STATE_ROOT=${CMAKE_CURRENT_BINARY_DIR}/persistence-process-contract"
+        -P "${PROJECT_SOURCE_DIR}/cmake/RunPersistenceRecoveryContract.cmake"
+)
+set_tests_properties(
+    integration.kernel_persistence_process_recovery
+    PROPERTIES
+        PASS_REGULAR_EXPRESSION "独立进程持久化恢复契约通过"
+        RUN_SERIAL TRUE
+)

@@ -1,6 +1,9 @@
 #include <lasercnc/infrastructure/jsoncons_adapter.hpp>
 #include <lasercnc/infrastructure/bs_thread_pool_executor.hpp>
+#include <lasercnc/infrastructure/filesystem_snapshot_store.hpp>
+#include <lasercnc/infrastructure/sha256_hash_service.hpp>
 #include <lasercnc/infrastructure/spdlog_log_service.hpp>
+#include <lasercnc/infrastructure/sqlite_persistence_backend.hpp>
 #include <lasercnc/kernel/app_kernel.hpp>
 #include <lasercnc/observability/log_observability_exporter.hpp>
 
@@ -8,6 +11,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -71,6 +75,7 @@ class PutObjectHandler final : public ICommandHandler {
 public:
     Result<Value> execute(const CommandRequest& request, ApplicationTransaction& transaction) override
     {
+        ++calls;
         const auto& arguments = *request.arguments.getIf<Value::Object>();
         const auto idText = *arguments.at("id").getIf<std::string>();
         const auto data = *arguments.at("data").getIf<std::string>();
@@ -96,6 +101,8 @@ public:
         }
         return Result<Value>::success(Value {Value::Object {{"id", Value {idText}}}});
     }
+
+    std::atomic_size_t calls{0U};
 };
 
 class GetObjectHandler final : public IQueryHandler {
@@ -165,6 +172,25 @@ public:
     }
 };
 
+class QuietLogService final : public ILogService {
+public:
+    Result<void> write(const LogRecord&) override { return Result<void>::success(); }
+    Result<void> flush() override { return Result<void>::success(); }
+};
+
+class ContractDiagnosticCheck final : public IDiagnosticCheck {
+public:
+    Result<DiagnosticReport> run() override
+    {
+        return Result<DiagnosticReport>::success(DiagnosticReport {
+            requiredId<DiagnosticId>("kernel.contract.persistence"),
+            DiagnosticStatus::Healthy,
+            "persistent",
+            Value {Value::Object {{"mode", Value {"headless"}}}},
+            {}});
+    }
+};
+
 std::filesystem::path uniqueLogPath()
 {
     static std::atomic_ullong sequence {0U};
@@ -203,6 +229,136 @@ bool containsObservabilityJsonl(const std::filesystem::path& path)
         std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
     return content.find("trace.span") != std::string::npos
         && content.find("metric.observation") != std::string::npos;
+}
+
+Result<void> configurePersistenceContract(
+    lasercnc::kernel::AppKernel& kernel,
+    const std::filesystem::path& stateRoot,
+    const std::shared_ptr<PutObjectHandler>& putHandler)
+{
+    std::error_code error;
+    std::filesystem::create_directories(stateRoot, error);
+    if(error) {
+        return Result<void>::failure(makeError(
+            "Contract.StateDirectoryFailed",
+            ErrorCategory::Infrastructure,
+            "The persistence contract state directory could not be created"));
+    }
+    auto validator = std::make_shared<JsonconsAdapter>();
+    auto execution = kernel.executionServices().configure(
+        validator, std::make_shared<QuietLogService>());
+    if(!execution) {
+        return execution;
+    }
+    const auto session = requiredId<SessionId>("session.persistence-contract");
+    const std::array capabilities {
+        requiredId<CapabilityId>("document.read"),
+        requiredId<CapabilityId>("document.write")};
+    auto granted = kernel.capabilities().replace(session, capabilities);
+    if(!granted) {
+        return granted;
+    }
+    auto putArguments = makeObjectSchema("schema.persistence.put.arguments", true);
+    auto putResult = makeObjectSchema("schema.persistence.put.result", false);
+    auto getArguments = makeObjectSchema("schema.persistence.get.arguments", false);
+    auto getResult = makeObjectSchema("schema.persistence.get.result", true);
+    if(!putArguments || !putResult || !getArguments || !getResult) {
+        return Result<void>::failure(makeError(
+            "Contract.SchemaFailed",
+            ErrorCategory::Internal,
+            "The persistence contract schemas could not be created"));
+    }
+    auto command = kernel.commandRegistry().registerHandler(
+        CommandDescriptor {
+            requiredId<CommandName>("kernel.persistence.object.put"),
+            Version {1U, 0U, 0U},
+            std::move(putArguments).value(),
+            std::move(putResult).value(),
+            ExecutionMode::Synchronous,
+            SideEffectLevel::DocumentWrite,
+            requiredId<CapabilityId>("document.write"),
+            false,
+            true,
+            true},
+        putHandler);
+    if(!command) {
+        return command;
+    }
+    auto query = kernel.queryRegistry().registerHandler(
+        QueryDescriptor {
+            requiredId<QueryName>("kernel.persistence.object.get"),
+            Version {1U, 0U, 0U},
+            std::move(getArguments).value(),
+            std::move(getResult).value(),
+            requiredId<CapabilityId>("document.read"),
+            true,
+            true},
+        std::make_shared<GetObjectHandler>());
+    if(!query) {
+        return query;
+    }
+    auto diagnostic = kernel.diagnostics().registerCheck(
+        requiredId<DiagnosticId>("kernel.contract.persistence"),
+        std::make_shared<ContractDiagnosticCheck>());
+    if(!diagnostic) {
+        return diagnostic;
+    }
+    auto backend = SqlitePersistenceBackend::open(
+        SqliteConnectionOptions {stateRoot / "kernel.db"});
+    if(!backend) {
+        return Result<void>::failure(std::move(backend).error());
+    }
+    auto snapshots = FilesystemSnapshotStore::create(
+        FilesystemSnapshotStoreOptions {stateRoot / "snapshots", 1024U * 1024U});
+    if(!snapshots) {
+        return Result<void>::failure(std::move(snapshots).error());
+    }
+    return kernel.persistence().configure(
+        std::move(backend).value(),
+        validator,
+        std::make_shared<Sha256HashService>(),
+        std::move(snapshots).value());
+}
+
+CommandRequest persistenceCommand(
+    const char* requestId,
+    const char* objectId,
+    const char* data,
+    Revision expected,
+    const char* idempotencyKey)
+{
+    return CommandRequest {
+        requiredId<RequestId>(requestId),
+        requiredId<SessionId>("session.persistence-contract"),
+        requiredId<ProjectId>("project.persistence-contract"),
+        requiredId<DocumentId>("document.persistence-contract"),
+        requiredId<CommandName>("kernel.persistence.object.put"),
+        Value {Value::Object {
+            {"data", Value {data}}, {"id", Value {objectId}}}},
+        expected,
+        requiredId<CorrelationId>("correlation.persistence-contract"),
+        requiredId<TraceId>("trace.persistence-contract"),
+        requiredId<IdempotencyKey>(idempotencyKey)};
+}
+
+Result<Value> queryPersistentObject(
+    lasercnc::kernel::AppKernel& kernel,
+    const char* requestId,
+    const char* objectId)
+{
+    auto queried = kernel.queries().execute(QueryRequest {
+        requiredId<RequestId>(requestId),
+        requiredId<SessionId>("session.persistence-contract"),
+        requiredId<ProjectId>("project.persistence-contract"),
+        requiredId<DocumentId>("document.persistence-contract"),
+        requiredId<QueryName>("kernel.persistence.object.get"),
+        Value {Value::Object {{"id", Value {objectId}}}},
+        requiredId<CorrelationId>("correlation.persistence-contract"),
+        requiredId<TraceId>("trace.persistence-contract")});
+    if(!queried) {
+        return Result<Value>::failure(std::move(queried).error());
+    }
+    return Result<Value>::success(std::move(queried).value().result);
 }
 
 int runRoundTrip()
@@ -525,12 +681,156 @@ int runTaskRoundTrip()
     return serialized.value().find("task-verified") == std::string::npos ? 1 : 0;
 }
 
+int seedPersistence(const std::filesystem::path& stateRoot)
+{
+    lasercnc::kernel::AppKernel kernel;
+    const auto project = requiredId<ProjectId>("project.persistence-contract");
+    const auto document = requiredId<DocumentId>("document.persistence-contract");
+    auto added = kernel.addDocument(project, document);
+    if(!added) {
+        return fail("persistence document", added.error());
+    }
+    auto handler = std::make_shared<PutObjectHandler>();
+    auto configured = configurePersistenceContract(kernel, stateRoot, handler);
+    if(!configured) {
+        return fail("persistence configure", configured.error());
+    }
+    auto bootstrapped = kernel.bootstrap();
+    if(!bootstrapped) {
+        return fail("persistence bootstrap", bootstrapped.error());
+    }
+    auto first = kernel.commands().execute(persistenceCommand(
+        "request.persistence.first",
+        "object.persistence.snapshot",
+        "snapshot",
+        Revision {0U},
+        "idempotency.persistence.first"));
+    if(!first || !first.value().commit.has_value()) {
+        return first ? 1 : fail("persistence first command", first.error());
+    }
+    auto image = kernel.documents().snapshot(document);
+    if(!image) {
+        return fail("persistence snapshot source", image.error());
+    }
+    auto captured = kernel.persistence().captureSnapshot(
+        requiredId<SnapshotId>("snapshot.persistence-contract"), image.value());
+    if(!captured) {
+        return fail("persistence snapshot", captured.error());
+    }
+    auto second = kernel.commands().execute(persistenceCommand(
+        "request.persistence.second",
+        "object.persistence.tail",
+        "journal-tail",
+        Revision {1U},
+        "idempotency.persistence.second"));
+    if(!second || !second.value().commit.has_value()) {
+        return second ? 1 : fail("persistence second command", second.error());
+    }
+    auto latest = kernel.documents().snapshot(document);
+    if(!latest) {
+        return fail("persistence latest document", latest.error());
+    }
+    auto accepted = kernel.persistence().acceptTask(
+        TaskRequest {
+            requiredId<TaskId>("task.persistence.interrupted"),
+            requiredId<TaskName>("kernel.persistence.interrupted"),
+            Value {Value::Object {}},
+            requiredId<TraceId>("trace.persistence.interrupted"),
+            std::nullopt,
+            project,
+            document},
+        latest.value().revisions());
+    if(!accepted) {
+        return fail("persistence interrupted task", accepted.error());
+    }
+    auto diagnostic = kernel.diagnostics().run(
+        requiredId<DiagnosticId>("kernel.contract.persistence"));
+    if(!diagnostic) {
+        return fail("persistence diagnostic", diagnostic.error());
+    }
+    std::cout << "persistence-seeded\n" << std::flush;
+    std::_Exit(EXIT_SUCCESS);
+}
+
+int recoverPersistence(const std::filesystem::path& stateRoot)
+{
+    lasercnc::kernel::AppKernel kernel;
+    auto handler = std::make_shared<PutObjectHandler>();
+    auto configured = configurePersistenceContract(kernel, stateRoot, handler);
+    if(!configured) {
+        return fail("recovery configure", configured.error());
+    }
+    std::size_t eventCount = 0U;
+    auto subscription = kernel.events().subscribe(
+        requiredId<SubscriptionId>("subscription.persistence-recovery"),
+        EventFilter {
+            EventKind::Domain,
+            requiredId<EventName>("kernel.contract.object-created")},
+        DeliveryMode::Immediate,
+        [&](const EventEnvelope&) { ++eventCount; });
+    if(!subscription) {
+        return fail("recovery subscription", subscription.error());
+    }
+    auto bootstrapped = kernel.bootstrap();
+    if(!bootstrapped) {
+        return fail("recovery bootstrap", bootstrapped.error());
+    }
+    auto snapshotObject = queryPersistentObject(
+        kernel, "request.persistence.query-snapshot", "object.persistence.snapshot");
+    auto tailObject = queryPersistentObject(
+        kernel, "request.persistence.query-tail", "object.persistence.tail");
+    if(!snapshotObject || !tailObject) {
+        return !snapshotObject
+            ? fail("recovery snapshot object", snapshotObject.error())
+            : fail("recovery tail object", tailObject.error());
+    }
+    auto replay = kernel.commands().execute(persistenceCommand(
+        "request.persistence.first-retry",
+        "object.persistence.snapshot",
+        "snapshot",
+        Revision {0U},
+        "idempotency.persistence.first"));
+    if(!replay) {
+        return fail("recovery idempotency", replay.error());
+    }
+    if(!replay.value().replayed || !replay.value().commit.has_value()
+       || handler->calls.load() != 0U || eventCount != 0U) {
+        std::cerr << "recovery idempotency: handler or event was replayed\n";
+        return 1;
+    }
+    auto task = kernel.persistence().taskHistory(
+        requiredId<TaskId>("task.persistence.interrupted"));
+    if(!task || !task.value().has_value()
+       || task.value()->state != TaskState::Failed
+       || !task.value()->error.has_value()
+       || std::string(task.value()->error->code.value())
+           != "Task.InterruptedByRestart") {
+        std::cerr << "recovery task: interrupted task history is invalid\n";
+        return 1;
+    }
+    auto diagnostics = kernel.persistence().diagnosticHistory(
+        requiredId<DiagnosticId>("kernel.contract.persistence"));
+    if(!diagnostics || diagnostics.value().size() != 1U
+       || diagnostics.value().front().status != DiagnosticStatus::Healthy) {
+        std::cerr << "recovery diagnostics: durable report is missing\n";
+        return 1;
+    }
+    auto stopped = kernel.shutdown();
+    if(!stopped) {
+        return fail("recovery shutdown", stopped.error());
+    }
+    std::cout << "persistence-recovered\n";
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
 {
-    if(argc != 3 || std::string(argv[1]) != "--mode") {
-        std::cerr << "usage: lasercnc_kernel_headless_contract --mode roundtrip|task-roundtrip\n";
+    if((argc != 3 && argc != 5) || std::string(argv[1]) != "--mode") {
+        std::cerr << "usage: lasercnc_kernel_headless_contract --mode "
+                     "roundtrip|task-roundtrip|persistence-seed|persistence-recover "
+                     "[--state-root path]\n";
         return 2;
     }
     try {
@@ -540,6 +840,12 @@ int main(int argc, char** argv)
         }
         if(mode == "task-roundtrip") {
             return runTaskRoundTrip();
+        }
+        if((mode == "persistence-seed" || mode == "persistence-recover")
+           && argc == 5 && std::string(argv[3]) == "--state-root") {
+            return mode == "persistence-seed"
+                ? seedPersistence(std::filesystem::path {argv[4]})
+                : recoverPersistence(std::filesystem::path {argv[4]});
         }
         std::cerr << "unknown mode\n";
         return 2;
