@@ -34,7 +34,7 @@ private:
 } // namespace
 
 AppKernel::AppKernel()
-    : documentRuntime_(documents_, persistence_),
+    : documentRuntime_(documents_, persistence_, &objectTypes_),
       history_(documents_),
       transactions_(documents_, &persistence_, &documentRuntime_, &history_, &objectTypes_),
       workflowRegistry_(commandRegistry_, queryRegistry_),
@@ -183,16 +183,9 @@ foundation::Result<void> AppKernel::configureTaskExecutor(
     return foundation::Result<void>::success();
 }
 
-foundation::Result<void> AppKernel::bootstrap()
+foundation::Result<void> AppKernel::restoreState()
 {
-    if(state_ != AppKernelState::Configuring) {
-        return foundation::Result<void>::failure(foundation::makeError(
-            "Kernel.AppKernelAlreadyBootstrapped",
-            foundation::ErrorCategory::Conflict,
-            "The application kernel can only be bootstrapped once"));
-    }
-
-    state_ = AppKernelState::Starting;
+    objectTypes_.freeze();
     if(persistence_.configured()) {
         auto initialized = persistence_.initialize();
         if(!initialized) {
@@ -231,6 +224,33 @@ foundation::Result<void> AppKernel::bootstrap()
                     std::move(catalog).error())));
         }
 
+        for(const auto& image : recovered.value().documents) {
+            auto admitted = objectTypes_.validateObjects(image.objects, true);
+            if(!admitted) {
+                return foundation::Result<void>::failure(foundation::makeError(
+                    "ObjectType.RecoveryAdmissionFailed", foundation::ErrorCategory::Validation,
+                    "Recovered document state failed exact type and reference admission",
+                    foundation::Value {}, foundation::Severity::Error,
+                    std::make_shared<const foundation::Error>(std::move(admitted).error())));
+            }
+        }
+        for(const auto& commit : recovered.value().historyCommits) {
+            for(const auto& change : commit.changes) {
+                for(const auto* record : {&change.before, &change.after}) {
+                    if(!record->has_value()) {
+                        continue;
+                    }
+                    auto admitted = objectTypes_.validateRecord(**record, true);
+                    if(!admitted) {
+                        return foundation::Result<void>::failure(foundation::makeError(
+                            "ObjectType.HistoryAdmissionFailed", foundation::ErrorCategory::Validation,
+                            "Recovered history material failed exact type admission",
+                            foundation::Value {}, foundation::Severity::Error,
+                            std::make_shared<const foundation::Error>(std::move(admitted).error())));
+                    }
+                }
+            }
+        }
         auto restoredImages = recovered.value().documents;
         restoredImages.erase(
             std::remove_if(
@@ -360,7 +380,20 @@ foundation::Result<void> AppKernel::bootstrap()
         }
     }
 
-    auto result = modules_.bootstrap(*this);
+    return foundation::Result<void>::success();
+}
+
+foundation::Result<void> AppKernel::bootstrap()
+{
+    if(state_ != AppKernelState::Configuring) {
+        return foundation::Result<void>::failure(foundation::makeError(
+            "Kernel.AppKernelAlreadyBootstrapped",
+            foundation::ErrorCategory::Conflict,
+            "The application kernel can only be bootstrapped once"));
+    }
+
+    state_ = AppKernelState::Starting;
+    auto result = modules_.bootstrap(*this, [this] { return restoreState(); });
     if(!result) {
         state_ = AppKernelState::Failed;
         return result;

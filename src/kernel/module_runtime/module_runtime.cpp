@@ -415,6 +415,12 @@ foundation::Result<void> ModuleRuntime::validateRequiredServices(const Record& r
 
 foundation::Result<void> ModuleRuntime::bootstrap(AppKernel& kernel)
 {
+    return bootstrap(kernel, {});
+}
+
+foundation::Result<void> ModuleRuntime::bootstrap(
+    AppKernel& kernel, const std::function<foundation::Result<void>()>& beforeInitialize)
+{
     if(state_ != ModuleRuntimeState::Configuring) {
         return runtimeStateError("The module runtime can only bootstrap once");
     }
@@ -474,6 +480,25 @@ foundation::Result<void> ModuleRuntime::bootstrap(AppKernel& kernel)
             return foundation::Result<void>::failure(std::move(error));
         }
         record.state = ModuleState::Registered;
+    }
+
+    if(beforeInitialize) {
+        foundation::Result<void> admitted = foundation::Result<void>::success();
+        try {
+            admitted = beforeInitialize();
+        } catch(...) {
+            admitted = foundation::Result<void>::failure(foundation::makeError(
+                "Kernel.StateAdmissionException", foundation::ErrorCategory::Internal,
+                "Kernel state admission raised an exception before module initialization"));
+        }
+        if(!admitted) {
+            auto error = std::move(admitted).error();
+            auto rollbackError = rollback(kernel, std::nullopt);
+            if(rollbackError.has_value()) {
+                error = combineBootstrapAndRollbackErrors(std::move(error), std::move(*rollbackError));
+            }
+            return foundation::Result<void>::failure(std::move(error));
+        }
     }
 
     for(const std::size_t index : startupOrder_) {

@@ -402,6 +402,8 @@ WorkflowDefinition workflowDefinition(std::vector<WorkflowStep> steps)
 
 void configureServices(AppKernel& kernel)
 {
+    REQUIRE(lasercnc::test::registerObjectType(kernel,
+        lasercnc::test::valueObjectType("workflow.test.object")).hasValue());
     REQUIRE(kernel.executionServices()
                 .configure(
                     std::make_shared<RootKindValidator>(),

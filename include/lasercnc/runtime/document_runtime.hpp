@@ -26,6 +26,7 @@ class PersistenceService;
 
 namespace lasercnc::state {
 class DocumentStore;
+class ObjectTypeRegistry;
 }
 
 namespace lasercnc::runtime {
@@ -81,7 +82,8 @@ class DocumentRuntime final {
 public:
     DocumentRuntime(
         state::DocumentStore& documents,
-        persistence::PersistenceService& persistence) noexcept;
+        persistence::PersistenceService& persistence,
+        const state::ObjectTypeRegistry* objectTypes = nullptr) noexcept;
 
     [[nodiscard]] foundation::Result<DocumentLifecycleSnapshot> create(
         kernel::ProjectId projectId,
@@ -151,6 +153,7 @@ private:
 
     state::DocumentStore& documents_;
     persistence::PersistenceService& persistence_;
+    const state::ObjectTypeRegistry* objectTypes_;
     mutable std::mutex mutex_;
     mutable std::map<kernel::DocumentId, Entry> entries_;
     CloseBlockers blockers_;

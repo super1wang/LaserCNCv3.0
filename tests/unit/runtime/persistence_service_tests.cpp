@@ -378,7 +378,7 @@ public:
         auto created = transaction.createObject(ObjectRecord {
             std::move(objectId).value(),
             validId<ObjectTypeId>("kernel.persistence.command"),
-            Value {*dataValue}});
+            Value {*dataValue}, schemaVersion});
         if(!created) {
             return Result<Value>::failure(std::move(created).error());
         }
@@ -394,6 +394,7 @@ public:
             {"id", Value {*idValue}}, {"data", Value {*dataValue}}}});
     }
 
+    Version schemaVersion{1U, 0U, 0U};
     std::size_t calls{0U};
 };
 
@@ -754,8 +755,12 @@ void configureRuntimeKernel(
     const std::filesystem::path& database,
     const std::filesystem::path& snapshotDirectory,
     const SessionId& sessionId,
-    std::shared_ptr<PersistentCreateHandler> handler)
+    std::shared_ptr<PersistentCreateHandler> handler,
+    ObjectPersistencePolicy policy = ObjectPersistencePolicy::Durable)
 {
+    auto objectType = lasercnc::test::valueObjectType("kernel.persistence.command");
+    objectType.descriptor.persistencePolicy = policy;
+    REQUIRE(lasercnc::test::registerObjectType(kernel, std::move(objectType)).hasValue());
     auto adapter = std::make_shared<JsonconsAdapter>();
     REQUIRE(kernel.executionServices()
                 .configure(adapter, std::make_shared<NullLogService>())
@@ -830,6 +835,117 @@ CommandRequest persistentAsyncCommandRequest(
 }
 
 } // namespace
+
+TEST_CASE("Document open refuses unsupported durable object versions and remains detached", "[persistence][object-type][admission]")
+{
+    const auto path = uniqueDatabasePath();
+    const auto snapshots = uniqueSnapshotDirectory();
+    const auto project = validId<ProjectId>("project.open-admission");
+    const auto document = validId<DocumentId>("document.open-admission");
+    const auto session = validId<SessionId>("session.open-admission");
+    {
+        AppKernel kernel;
+        configureRuntimeKernel(kernel, path, snapshots, session, std::make_shared<PersistentCreateHandler>());
+        REQUIRE(kernel.addDocument(project, document).hasValue());
+        REQUIRE(kernel.bootstrap().hasValue());
+        auto created = kernel.execution().executeCommand(persistentCommandRequest(
+            "request.open-admission", project, document, session,
+            validId<IdempotencyKey>("key.open-admission"), "object.open-admission"));
+        REQUIRE(created.hasValue());
+        REQUIRE(created.value().commit.has_value());
+        const auto& first = *created.value().commit;
+        REQUIRE(kernel.documentRuntime().close(document).hasValue());
+        auto after = *first.changes.front().after;
+        after.schemaVersion = Version {9U, 0U, 0U};
+        auto revisions = RevisionManager::advance(first.revisionsAfter,
+            std::array{RevisionScope::Project, RevisionScope::Document});
+        REQUIRE(revisions.hasValue());
+        // Inject well-formed but unsupported durable material through the low-level adapter.
+        // 中文翻译：通过底层持久化适配器注入编码正确但版本未注册的恢复材料。
+        TransactionCommit injected {validId<TransactionId>("tx.open-admission.injected"),
+            project, document, first.revisionsAfter, revisions.value(),
+            {{ObjectChangeKind::Updated, after.id, first.changes.front().after, after}}, {}};
+        REQUIRE(kernel.persistence().append(injected).hasValue());
+        auto opened = kernel.documentRuntime().open(document);
+        REQUIRE_FALSE(opened.hasValue());
+        CHECK(std::string(opened.error().code.value()) == "ObjectType.UnsupportedVersion");
+        CHECK_FALSE(kernel.documents().contains(document));
+        CHECK(kernel.documentRuntime().lifecycle(document).value().state == DocumentLifecycleState::Detached);
+        CHECK(kernel.persistence().documentCatalog().value().front().state == DocumentPersistenceState::Detached);
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+    removeDatabase(path);
+    removeSnapshotDirectory(snapshots);
+}
+
+TEST_CASE("Object admission failure leaves no journal history event or completed idempotency", "[persistence][object-type][admission]")
+{
+    const auto path = uniqueDatabasePath();
+    const auto snapshots = uniqueSnapshotDirectory();
+    const auto project = validId<ProjectId>("project.admission");
+    const auto document = validId<DocumentId>("document.admission");
+    const auto session = validId<SessionId>("session.admission");
+    bool transient = false;
+    SECTION("unsupported schema leaves no durable result and permits retry after restart") {}
+    SECTION("transient type cannot become durable") { transient = true; }
+    {
+        AppKernel kernel;
+        auto handler = std::make_shared<PersistentCreateHandler>();
+        handler->schemaVersion = transient ? Version {1U, 0U, 0U} : Version {9U, 0U, 0U};
+        configureRuntimeKernel(kernel, path, snapshots, session, handler,
+            transient ? ObjectPersistencePolicy::Transient : ObjectPersistencePolicy::Durable);
+        REQUIRE(kernel.addDocument(project, document).hasValue());
+        std::size_t events = 0U;
+        auto subscription = kernel.events().subscribe(
+            validId<SubscriptionId>("subscription.admission"),
+            lasercnc::messaging::EventFilter{lasercnc::messaging::EventKind::Domain, std::nullopt},
+            lasercnc::messaging::DeliveryMode::Immediate,
+            [&](const auto&) { ++events; });
+        REQUIRE(subscription.hasValue());
+        REQUIRE(kernel.bootstrap().hasValue());
+        const auto request = persistentCommandRequest("request.admission", project, document, session,
+            validId<IdempotencyKey>("key.admission"), "object.admission");
+        auto rejected = kernel.execution().executeCommand(request);
+        REQUIRE_FALSE(rejected.hasValue());
+        CHECK(std::string(rejected.error().code.value()) ==
+            (transient ? "ObjectType.TransientPersistenceDenied" : "ObjectType.UnsupportedVersion"));
+        CHECK(kernel.documents().snapshot(document).value().objects().empty());
+        CHECK(kernel.documents().snapshot(document).value().revisions() == RevisionSet{});
+        CHECK(kernel.persistence().journalAfter(document, 0U).value().empty());
+        CHECK(kernel.history().snapshot(document).value().entries.empty());
+        CHECK(events == 0U);
+        if(!transient) {
+            handler->schemaVersion = Version {1U, 0U, 0U};
+            CHECK_FALSE(kernel.execution().executeCommand(request).hasValue());
+            CHECK(handler->calls == 1U); // The existing in-process failure cache is preserved.
+            // 中文翻译：保留既有的进程内失败结果缓存契约。
+        } else {
+            const auto other = validId<DocumentId>("document.transient.attach");
+            DocumentImage image{project, other, RevisionSet{}, {{validId<ObjectId>("object.transient"),
+                validId<ObjectTypeId>("kernel.persistence.command"), Value {"data"}}}};
+            CHECK_FALSE(kernel.documentRuntime().attach(image).hasValue());
+            CHECK_FALSE(kernel.documents().contains(other));
+            CHECK(kernel.persistence().documentCatalog().value().size() == 1U);
+        }
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+    if(!transient) {
+        AppKernel kernel;
+        auto handler = std::make_shared<PersistentCreateHandler>();
+        configureRuntimeKernel(kernel, path, snapshots, session, handler);
+        REQUIRE(kernel.bootstrap().hasValue());
+        auto accepted = kernel.execution().executeCommand(persistentCommandRequest(
+            "request.admission.retry", project, document, session,
+            validId<IdempotencyKey>("key.admission"), "object.admission"));
+        REQUIRE(accepted.hasValue());
+        CHECK_FALSE(accepted.value().replayed);
+        CHECK(handler->calls == 1U);
+        CHECK(kernel.persistence().journalAfter(document, 0U).value().size() == 1U);
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+    removeDatabase(path);
+    removeSnapshotDirectory(snapshots);
+}
 
 TEST_CASE("Persistence preserves object schema versions across journal snapshot and idempotency", "[persistence][object-type]")
 {
@@ -1216,6 +1332,8 @@ TEST_CASE("PersistenceService restores a snapshot and replays only its journal t
                         std::move(snapshots).value())
                     .hasValue());
         std::size_t delivered = 0U;
+        REQUIRE(lasercnc::test::registerObjectType(kernel,
+            lasercnc::test::valueObjectType("kernel.persistence.recovery")).hasValue());
         auto subscription = kernel.events().subscribe(
             validId<SubscriptionId>("subscription.recovery"),
             lasercnc::messaging::EventFilter {
@@ -2341,6 +2459,8 @@ TEST_CASE("Workflow checkpoint failure prevents handler execution", "[persistenc
     const auto definition = persistentWorkflowDefinition(true);
     {
         lasercnc::kernel::AppKernel kernel;
+        REQUIRE(lasercnc::test::registerObjectType(kernel,
+            lasercnc::test::valueObjectType("kernel.persistence.command")).hasValue());
         auto adapter = std::make_shared<JsonconsAdapter>();
         REQUIRE(kernel.executionServices()
                     .configure(adapter, std::make_shared<NullLogService>())

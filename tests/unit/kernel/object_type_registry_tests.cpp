@@ -137,6 +137,116 @@ private:
 
 } // namespace
 
+TEST_CASE("Object type admission checks the final transaction graph before publishing", "[state][object-type][admission]")
+{
+    using namespace lasercnc::runtime;
+    ObjectTypeRegistry types;
+    DocumentStore documents;
+    const auto project = id<ProjectId>("project.admission");
+    const auto document = id<DocumentId>("document.admission");
+    const auto target = id<ObjectId>("object.target");
+    const auto source = id<ObjectId>("object.source");
+    auto graph = lasercnc::test::valueObjectType("type.graph");
+    graph.versions.front().validator = std::make_shared<Validator>([&](const Value&) {
+        // Reentrant reads prove validation is outside the DocumentStore write lock.
+        // 中文翻译：重入读取证明校验发生在 DocumentStore 写锁之外。
+        auto snapshot = documents.snapshot(document);
+        return snapshot ? Result<void>::success() : Result<void>::failure(snapshot.error());
+    });
+    graph.versions.front().references = std::make_shared<References>([&](const Value& data) {
+        return Result<std::vector<ObjectId>>::success(
+            data == Value {"source"} ? std::vector<ObjectId>{target} : std::vector<ObjectId>{});
+    });
+    REQUIRE(types.registerType(std::move(graph)).hasValue());
+    types.freeze();
+    REQUIRE(documents.addDocument(project, document).hasValue());
+    TransactionManager transactions(documents, nullptr, nullptr, nullptr, &types);
+    auto seed = transactions.begin(id<TransactionId>("tx.graph.seed"), document);
+    REQUIRE(seed.hasValue());
+    REQUIRE(seed.value()->createObject(ObjectRecord{source, id<ObjectTypeId>("type.graph"), Value {"source"}}).hasValue());
+    REQUIRE(seed.value()->createObject(ObjectRecord{target, id<ObjectTypeId>("type.graph"), Value {"target"}}).hasValue());
+    REQUIRE(seed.value()->commit().hasValue());
+    const auto before = documents.snapshot(document).value();
+    auto edit = transactions.begin(id<TransactionId>("tx.graph.edit"), document);
+    REQUIRE(edit.hasValue());
+    REQUIRE(edit.value()->removeObject(target).hasValue());
+    SECTION("dangling target deletion fails atomically") {
+        auto committed = edit.value()->commit();
+        REQUIRE_FALSE(committed.hasValue());
+        CHECK(std::string(committed.error().code.value()) == "ObjectType.DanglingReference");
+        CHECK(documents.snapshot(document).value().objects().all() == before.objects().all());
+        CHECK(documents.snapshot(document).value().revisions() == before.revisions());
+        CHECK(transactions.activeTransactionCount() == 0U);
+    }
+    SECTION("removing the whole graph is valid") {
+        REQUIRE(edit.value()->removeObject(source).hasValue());
+        REQUIRE(edit.value()->commit().hasValue());
+        CHECK(documents.snapshot(document).value().objects().empty());
+    }
+}
+
+TEST_CASE("Object type admission rejects unknown or invalid transaction state", "[state][object-type][admission]")
+{
+    using namespace lasercnc::runtime;
+    ObjectTypeRegistry types;
+    REQUIRE(types.registerType(definition()).hasValue());
+    types.freeze();
+    DocumentStore documents;
+    const auto document = id<DocumentId>("document.invalid");
+    REQUIRE(documents.addDocument(id<ProjectId>("project.invalid"), document).hasValue());
+    TransactionManager transactions(documents, nullptr, nullptr, nullptr, &types);
+    ObjectRecord object {id<ObjectId>("object.invalid"), id<ObjectTypeId>("type.test.versioned"), Value {std::int64_t {1}}};
+    SECTION("unknown type") { object.type = id<ObjectTypeId>("type.unknown"); }
+    SECTION("unknown version") { object.schemaVersion = Version {4U, 0U, 0U}; }
+    SECTION("data does not match exact version") { object.data = Value {std::int64_t {2}}; }
+    auto transaction = transactions.begin(id<TransactionId>("tx.invalid"), document);
+    REQUIRE(transaction.hasValue());
+    REQUIRE(transaction.value()->createObject(object).hasValue());
+    CHECK_FALSE(transaction.value()->commit().hasValue());
+    CHECK(documents.snapshot(document).value().objects().empty());
+    CHECK(documents.snapshot(document).value().revisions() == RevisionSet{});
+}
+
+TEST_CASE("Document attach validates types before lifecycle mutation without implicit migration", "[state][object-type][admission]")
+{
+    AppKernel kernel;
+    REQUIRE(lasercnc::test::registerObjectType(kernel, definition()).hasValue());
+    REQUIRE(kernel.bootstrap().hasValue());
+    const auto document = id<DocumentId>("document.attach");
+    DocumentImage image {id<ProjectId>("project.attach"), document, RevisionSet{},
+        {{id<ObjectId>("object.attach"), id<ObjectTypeId>("type.test.versioned"), Value {std::int64_t {1}}}}};
+    bool valid = false;
+    SECTION("known old schema is preserved") { valid = true; }
+    SECTION("unknown type") { image.objects.front().type = id<ObjectTypeId>("type.unknown"); }
+    SECTION("unknown schema") { image.objects.front().schemaVersion = Version {9U, 0U, 0U}; }
+    SECTION("invalid value") { image.objects.front().data = Value {"invalid"}; }
+    SECTION("duplicate stable identity") { image.objects.push_back(image.objects.front()); }
+    auto attached = kernel.documentRuntime().attach(image);
+    if(valid) {
+        REQUIRE(attached.hasValue());
+        CHECK(kernel.documents().snapshot(document).value().objects().find(image.objects.front().id)->schemaVersion == Version {1U, 0U, 0U});
+    } else {
+        REQUIRE_FALSE(attached.hasValue());
+        CHECK_FALSE(kernel.documents().contains(document));
+        CHECK(kernel.documentRuntime().list().empty());
+    }
+    REQUIRE(kernel.shutdown().hasValue());
+}
+
+TEST_CASE("Object persistence policy denies transient state in durable images", "[state][object-type][admission]")
+{
+    ObjectTypeRegistry types;
+    auto transient = definition();
+    transient.descriptor.persistencePolicy = ObjectPersistencePolicy::Transient;
+    REQUIRE(types.registerType(std::move(transient)).hasValue());
+    const std::vector records {ObjectRecord{
+        id<ObjectId>("object.transient"), id<ObjectTypeId>("type.test.versioned"), Value {std::int64_t {1}}}};
+    CHECK(types.validateObjects(records, false).hasValue());
+    auto durable = types.validateObjects(records, true);
+    REQUIRE_FALSE(durable.hasValue());
+    CHECK(std::string(durable.error().code.value()) == "ObjectType.TransientPersistenceDenied");
+}
+
 TEST_CASE("Object migration is explicit transactional and rollback safe", "[state][object-type][transaction]")
 {
     using namespace lasercnc::runtime;

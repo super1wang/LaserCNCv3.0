@@ -415,6 +415,80 @@ void rewriteJournal(
 
 } // namespace
 
+TEST_CASE("Recovery object admission runs before module initialization and rolls back contributions", "[persistence][object-type][admission]")
+{
+    class ObserverModule final : public IModule {
+    public:
+        ObserverModule(int& initialized, int& started) : initialized_(initialized), started_(started) {}
+        const ModuleDescriptor& descriptor() const noexcept override { return descriptor_; }
+        Result<void> registerComponents(ModuleRegistrar&) override { return Result<void>::success(); }
+        Result<void> initialize(AppKernel&) override { ++initialized_; return Result<void>::success(); }
+        Result<void> start(AppKernel&) override { ++started_; return Result<void>::success(); }
+    private:
+        ModuleDescriptor descriptor_ {validId<ModuleId>("module.admission.observer"), "observer", Version {1U, 0U, 0U}};
+        int& initialized_;
+        int& started_;
+    };
+    const auto path = databasePath();
+    const auto project = validId<ProjectId>("project.history");
+    const auto document = validId<DocumentId>("document.history");
+    const auto session = validId<SessionId>("session.history");
+    bool removeObject = false;
+    bool invalidVersion = false;
+    bool dangling = false;
+    SECTION("unknown current type") {}
+    SECTION("unsupported exact schema") { invalidVersion = true; }
+    SECTION("unknown type in history after object removal") { removeObject = true; }
+    SECTION("dangling reference in recovered state") { dangling = true; }
+    {
+        AppKernel kernel;
+        configurePersistence(kernel, path);
+        configureRuntime(kernel, project, document, session, true);
+        REQUIRE(kernel.bootstrap().hasValue());
+        REQUIRE(kernel.execution().executeCommand(request(
+            "request.admission.seed", "kernel.history.create", project, document, session,
+            "object.admission")).hasValue());
+        if(removeObject) {
+            REQUIRE(kernel.execution().executeCommand(request(
+                "request.admission.remove", "kernel.history.remove", project, document, session,
+                "object.admission")).hasValue());
+        }
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+    {
+        AppKernel kernel;
+        configurePersistence(kernel, path);
+        int initialized = 0;
+        int started = 0;
+        REQUIRE(kernel.addModule(std::make_unique<ObserverModule>(initialized, started)).hasValue());
+        auto type = lasercnc::test::valueObjectType(
+            (invalidVersion || dangling) ? "kernel.history.test" : "type.unrelated",
+            invalidVersion ? Version {2U, 0U, 0U} : Version {1U, 0U, 0U});
+        if(dangling) {
+            class DanglingReferences final : public IObjectReferenceEnumerator {
+            public:
+                Result<std::vector<ObjectId>> enumerate(const Value&) const override
+                {
+                    return Result<std::vector<ObjectId>>::success({validId<ObjectId>("object.missing")});
+                }
+            };
+            type.versions.front().references = std::make_shared<DanglingReferences>();
+        }
+        REQUIRE(lasercnc::test::registerObjectType(kernel, std::move(type)).hasValue());
+        auto bootstrapped = kernel.bootstrap();
+        REQUIRE_FALSE(bootstrapped.hasValue());
+        CHECK(std::string(bootstrapped.error().code.value()) ==
+            (removeObject ? "ObjectType.HistoryAdmissionFailed" : "ObjectType.RecoveryAdmissionFailed"));
+        CHECK(initialized == 0);
+        CHECK(started == 0);
+        CHECK(kernel.objectTypes().size() == 0U);
+        CHECK_FALSE(kernel.documents().contains(document));
+        CHECK_FALSE(kernel.documentRuntime().accepting());
+        CHECK(kernel.state() == AppKernelState::Failed);
+    }
+    removeDatabase(path);
+}
+
 TEST_CASE("Recovery refuses stripped or malformed object versions despite a valid digest", "[persistence][object-type][recovery]")
 {
     const auto path = databasePath();

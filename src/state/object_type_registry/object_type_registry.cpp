@@ -327,4 +327,54 @@ foundation::Result<std::vector<kernel::ObjectId>> ObjectTypeRegistry::references
     }
 }
 
+foundation::Result<void> ObjectTypeRegistry::validateRecord(
+    const ObjectRecord& record, bool persistent) const
+{
+    auto contract = descriptor(record.type);
+    if(!contract) {
+        return foundation::Result<void>::failure(std::move(contract).error());
+    }
+    if(persistent && contract.value().persistencePolicy != ObjectPersistencePolicy::Durable) {
+        return foundation::Result<void>::failure(typeError(
+            "ObjectType.TransientPersistenceDenied", foundation::ErrorCategory::Validation,
+            "A transient object cannot enter durable document state or history", record.type));
+    }
+    return validate(record.type, record.schemaVersion, record.data);
+}
+
+foundation::Result<void> ObjectTypeRegistry::validateObjects(
+    std::span<const ObjectRecord> records, bool persistent) const
+{
+    std::set<kernel::ObjectId> identities;
+    for(const auto& record : records) {
+        if(!identities.insert(record.id).second) {
+            return foundation::Result<void>::failure(typeError(
+                "ObjectType.DuplicateObjectId", foundation::ErrorCategory::Validation,
+                "A document candidate contains duplicate stable object identities", record.type));
+        }
+    }
+    for(const auto& record : records) {
+        auto admitted = validateRecord(record, persistent);
+        if(!admitted) {
+            return admitted;
+        }
+        auto referenced = references(record.type, record.schemaVersion, record.data);
+        if(!referenced) {
+            return foundation::Result<void>::failure(std::move(referenced).error());
+        }
+        for(const auto& target : referenced.value()) {
+            if(!identities.contains(target)) {
+                return foundation::Result<void>::failure(foundation::makeError(
+                    "ObjectType.DanglingReference", foundation::ErrorCategory::Validation,
+                    "An object reference does not resolve inside the same document candidate",
+                    foundation::Value {foundation::Value::Object {
+                        {"objectId", foundation::Value {std::string(record.id.value())}},
+                        {"targetId", foundation::Value {std::string(target.value())}},
+                    }}));
+            }
+        }
+    }
+    return foundation::Result<void>::success();
+}
+
 } // namespace lasercnc::state

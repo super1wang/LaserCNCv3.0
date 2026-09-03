@@ -101,8 +101,11 @@ public:
     [[nodiscard]] AppKernelState state() const noexcept;
 
 private:
+    [[nodiscard]] foundation::Result<void> restoreState();
+
     ServiceRegistry services_;
     state::DocumentStore documents_;
+    state::ObjectTypeRegistry objectTypes_;
     persistence::PersistenceService persistence_;
     runtime::DocumentRuntime documentRuntime_;
     runtime::HistoryRuntime history_;
@@ -119,7 +122,6 @@ private:
     runtime::WorkflowRegistry workflowRegistry_;
     runtime::ScriptRegistry scriptRegistry_;
     runtime::TaskRegistry taskRegistry_;
-    state::ObjectTypeRegistry objectTypes_;
     ModuleRuntime modules_;
     runtime::ResourceManager resources_;
     runtime::EffectExecutor effects_;

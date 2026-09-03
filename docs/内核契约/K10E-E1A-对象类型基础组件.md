@@ -2,7 +2,7 @@
 
 ## 状态与范围
 
-E1A 是 K10E 的内部可独立验证节点，不代表 K10E 已验收。E1A 实现对象类型注册、版本校验、显式迁移和对象引用枚举；后续 E1B1 已完成 AppKernel/ModuleRegistrar 集成。Document、Journal、History 与 AssetStore 的准入链仍未闭合。
+E1A 是 K10E 的内部可独立验证节点，不代表 K10E 已验收。E1A 实现对象类型注册、版本校验、显式迁移和对象引用枚举；后续 E1B1 已完成 AppKernel/ModuleRegistrar 集成，E1B2 已完成版本持久化，E1B3 已完成 Document/Transaction/History 状态准入。以下保留各节点实施时的基础契约，最新准入规则见 [E1B3](K10E-E1B3-对象状态准入闭环.md)。AssetStore 链路仍未实现。
 
 ## 类型定义
 
@@ -47,4 +47,4 @@ E1B1 Debug/Release 均为 173/173 CTest；新增 2 个模块集成用例重复 2
 
 ## 下一节点
 
-E1B2 已为 ObjectRecord 持久化精确 Schema Version，并闭合显式事务迁移、幂等回放及 History 版本保真，详见 [E1B2 契约](K10E-E1B2-对象版本持久化与事务迁移.md)。下一节点在事务提交、文档打开与恢复时执行类型和引用准入，之后再闭合 AssetRef/AssetStore 与 OCCT 架构边界。
+E1B2 已闭合精确 Schema Version 的事务与持久化保真，E1B3 已在事务提交、文档打开与恢复时执行类型和引用准入。下一节点闭合 AssetRef/AssetStore 与 OCCT 架构边界。

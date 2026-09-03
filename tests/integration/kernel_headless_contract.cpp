@@ -211,6 +211,11 @@ Result<void> configureObservability(
     lasercnc::kernel::AppKernel& kernel,
     const std::shared_ptr<ILogService>& logService)
 {
+    auto type = lasercnc::test::registerObjectType(kernel,
+        lasercnc::test::valueObjectType("kernel.contract.object"));
+    if(!type) {
+        return type;
+    }
     auto created = LogObservabilityExporter::create(logService);
     if(!created) {
         return Result<void>::failure(std::move(created).error());
@@ -294,6 +299,11 @@ Result<void> configurePersistenceContract(
     const std::filesystem::path& stateRoot,
     const std::shared_ptr<PutObjectHandler>& putHandler)
 {
+    auto type = lasercnc::test::registerObjectType(kernel,
+        lasercnc::test::valueObjectType("kernel.contract.object"));
+    if(!type) {
+        return type;
+    }
     std::error_code error;
     std::filesystem::create_directories(stateRoot, error);
     if(error) {

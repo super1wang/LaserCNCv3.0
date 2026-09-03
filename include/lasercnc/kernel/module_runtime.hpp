@@ -6,6 +6,7 @@
 #include <lasercnc/kernel/module_registrar.hpp>
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -63,6 +64,10 @@ public:
     [[nodiscard]] std::vector<ModuleSnapshot> snapshot() const;
 
 private:
+    friend class AppKernel;
+    [[nodiscard]] foundation::Result<void> bootstrap(
+        AppKernel& kernel, const std::function<foundation::Result<void>()>& beforeInitialize);
+
     struct Record final {
         std::unique_ptr<IModule> module;
         ModuleDescriptor descriptor;

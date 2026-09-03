@@ -351,6 +351,8 @@ struct RuntimeFixture final {
           document(validId<DocumentId>("document.runtime")),
           session(validId<SessionId>("session.runtime"))
     {
+        REQUIRE(lasercnc::test::registerObjectType(kernel,
+            lasercnc::test::valueObjectType("kernel.runtime.test")).hasValue());
         REQUIRE(kernel.addDocument(project, document).hasValue());
         REQUIRE(kernel.executionServices().configure(validator, log).hasValue());
         const std::array grants {

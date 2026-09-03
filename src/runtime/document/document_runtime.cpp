@@ -3,6 +3,7 @@
 #include <lasercnc/foundation/error.hpp>
 #include <lasercnc/persistence/persistence_service.hpp>
 #include <lasercnc/state/document_store.hpp>
+#include <lasercnc/state/object_type_registry.hpp>
 
 #include <algorithm>
 #include <array>
@@ -78,8 +79,9 @@ const char* documentLifecycleStateName(DocumentLifecycleState state) noexcept
 
 DocumentRuntime::DocumentRuntime(
     state::DocumentStore& documents,
-    persistence::PersistenceService& persistence) noexcept
-    : documents_(documents), persistence_(persistence)
+    persistence::PersistenceService& persistence,
+    const state::ObjectTypeRegistry* objectTypes) noexcept
+    : documents_(documents), persistence_(persistence), objectTypes_(objectTypes)
 {
 }
 
@@ -177,6 +179,12 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::attach(
     }
     const auto documentId = image.documentId;
     const auto projectId = image.projectId;
+    if(objectTypes_ != nullptr) {
+        auto admitted = objectTypes_->validateObjects(image.objects, persistence_.configured());
+        if(!admitted) {
+            return foundation::Result<DocumentLifecycleSnapshot>::failure(std::move(admitted).error());
+        }
+    }
     {
         std::lock_guard lock(mutex_);
         const auto existing = entries_.find(documentId);

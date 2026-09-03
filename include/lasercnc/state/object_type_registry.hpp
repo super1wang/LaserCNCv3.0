@@ -4,12 +4,14 @@
 #include <lasercnc/foundation/value.hpp>
 #include <lasercnc/foundation/version.hpp>
 #include <lasercnc/kernel/identifiers.hpp>
+#include <lasercnc/state/object_registry.hpp>
 
 #include <cstdint>
 #include <cstddef>
 #include <map>
 #include <memory>
 #include <shared_mutex>
+#include <span>
 #include <vector>
 
 namespace lasercnc::kernel {
@@ -84,6 +86,10 @@ public:
         const kernel::ObjectTypeId& type,
         foundation::Version version,
         const foundation::Value& data) const;
+    [[nodiscard]] foundation::Result<void> validateRecord(
+        const ObjectRecord& record, bool persistent) const;
+    [[nodiscard]] foundation::Result<void> validateObjects(
+        std::span<const ObjectRecord> records, bool persistent) const;
     [[nodiscard]] foundation::Result<foundation::Value> migrate(
         const kernel::ObjectTypeId& type,
         foundation::Version from,

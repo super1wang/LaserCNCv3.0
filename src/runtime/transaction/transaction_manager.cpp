@@ -164,6 +164,15 @@ foundation::Result<TransactionCommit> TransactionManager::commit(
     ApplicationTransaction& transaction,
     std::vector<ObjectChange> changes)
 {
+    // Validate the complete candidate before locks, journal writes or history changes.
+    // 中文翻译：完整候选状态在加锁、写日志和变更历史之前校验。
+    if(objectTypes_ != nullptr) {
+        auto admitted = objectTypes_->validateObjects(
+            transaction.stagedObjects_.all(), persistence_ != nullptr && persistence_->configured());
+        if(!admitted) {
+            return foundation::Result<TransactionCommit>::failure(std::move(admitted).error());
+        }
+    }
     std::lock_guard commitLock(commitMutex_);
     std::optional<TransactionCommit> receipt;
     {
