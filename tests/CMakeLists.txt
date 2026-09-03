@@ -96,3 +96,12 @@ set_tests_properties(
     integration.kernel_headless_cli_roundtrip
     PROPERTIES PASS_REGULAR_EXPRESSION "verified"
 )
+
+add_test(
+    NAME integration.kernel_headless_task_roundtrip
+    COMMAND lasercnc_kernel_headless_contract --mode task-roundtrip
+)
+set_tests_properties(
+    integration.kernel_headless_task_roundtrip
+    PROPERTIES PASS_REGULAR_EXPRESSION "task-verified"
+)

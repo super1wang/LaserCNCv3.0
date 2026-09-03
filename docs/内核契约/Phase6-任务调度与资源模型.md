@@ -70,6 +70,6 @@ AppKernel 在 Configuring 注入并独占 `ITaskExecutor`，模块在组合回�
 | 异步命令 | `Command.HandlerModeMismatch`、`Command.AsyncSideEffectUnsupported`、`Command.PostAcceptanceIntegrationFailed` |
 | 生命周期 | `Task.ExecutorNotConfigured`、`Task.RuntimeNotAccepting`、`Task.WaitTimeout`、`Task.ShutdownTimeout` |
 
-## 尚未验收与后续边界
+## 验收与后续边界
 
-当前契约代码与任务专项测试已落地，但 Phase 6 尚未完成 Debug/Release 全量 CTest、连续重复、Production-only、架构扫描与独立进程闭环，因此仍为“进行中”。Queued Event 继续由调用方显式 drain：Scheduler 是长任务语义，不冒充 GUI/Host 事件循环；后续 Host 可以经明确的内核适配驱动 drain，但不得为 EventBus 私建无生命周期线程。Trace/Metrics/Diagnostics 属于 Phase 7；持久化任务、Journal、Snapshot、Crash Recovery 属于 Phase 8；Workflow/Script 属于 Phase 9；所有上层领域模块继续延后。
+Phase 6 已完成 Debug/Release 全量 CTest、Debug 连续重复、Production-only、架构扫描与独立进程闭环。Queued Event 继续由调用方显式 drain：Scheduler 是长任务语义，不冒充 GUI/Host 事件循环；后续 Host 可以经明确的内核适配驱动 drain，但不得为 EventBus 私建无生命周期线程。Trace/Metrics/Diagnostics 属于 Phase 7；持久化任务、Journal、Snapshot、Crash Recovery 属于 Phase 8；Workflow/Script 属于 Phase 9；所有上层领域模块继续延后。

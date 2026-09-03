@@ -1,4 +1,5 @@
 #include <lasercnc/infrastructure/jsoncons_adapter.hpp>
+#include <lasercnc/infrastructure/bs_thread_pool_executor.hpp>
 #include <lasercnc/infrastructure/spdlog_log_service.hpp>
 #include <lasercnc/kernel/app_kernel.hpp>
 
@@ -117,6 +118,45 @@ public:
             {"data", object->data},
             {"id", Value {idText}},
         }});
+    }
+};
+
+class ContractTaskHandler final : public ITaskHandler {
+public:
+    Result<Value> execute(const TaskRequest& request, const TaskContext& context) override
+    {
+        if(!context.document.has_value()
+           || request.correlationId
+               != requiredId<CorrelationId>("correlation.cli.task")
+           || context.traceId != requiredId<TraceId>("trace.cli.task")) {
+            return Result<Value>::failure(makeError(
+                "Contract.TaskContextInvalid",
+                ErrorCategory::Internal,
+                "The asynchronous command context was not propagated"));
+        }
+        auto progressed = context.progress.report(0.5, "computing");
+        if(!progressed) {
+            return Result<Value>::failure(std::move(progressed).error());
+        }
+        const auto& arguments = *request.input.getIf<Value::Object>();
+        return Result<Value>::success(Value {Value::Object {
+            {"data", Value {"task-verified"}},
+            {"id", arguments.at("id")},
+        }});
+    }
+};
+
+class ContractAsyncCommandHandler final : public IAsyncCommandHandler {
+public:
+    Result<AsyncCommandPlan> prepare(const CommandRequest& request) override
+    {
+        return Result<AsyncCommandPlan>::success(AsyncCommandPlan {
+            TaskRequest {
+                requiredId<TaskId>("task.cli.contract"),
+                requiredId<TaskName>("kernel.contract.compute"),
+                request.arguments,
+                requiredId<TraceId>("trace.must-be-overridden")},
+            Value {Value::Object {{"id", Value {"task.cli.contract"}}}}});
     }
 };
 
@@ -298,17 +338,150 @@ int runRoundTrip()
     return serialized.value().find("verified") == std::string::npos ? 1 : 0;
 }
 
+int runTaskRoundTrip()
+{
+    const auto logPath = uniqueLogPath();
+    std::error_code ignored;
+    static_cast<void>(std::filesystem::remove(logPath, ignored));
+    SpdlogLogOptions options;
+    options.enableConsole = false;
+    options.jsonlFilePath = logPath;
+    auto logger = SpdlogLogService::create(options);
+    if(!logger) {
+        return fail("logger", logger.error());
+    }
+    auto validator = std::make_shared<JsonconsAdapter>();
+    std::shared_ptr<lasercnc::observability::ILogService> logService(
+        std::move(logger).value());
+
+    lasercnc::kernel::AppKernel kernel;
+    auto configured = kernel.executionServices().configure(validator, logService);
+    if(!configured) {
+        return fail("configure", configured.error());
+    }
+    const auto project = requiredId<ProjectId>("project.headless-task");
+    const auto document = requiredId<DocumentId>("document.headless-task");
+    const auto session = requiredId<SessionId>("session.cli-task");
+    auto added = kernel.addDocument(project, document);
+    if(!added) {
+        return fail("document", added.error());
+    }
+    const std::array grants {requiredId<CapabilityId>("task.submit")};
+    auto granted = kernel.capabilities().replace(session, grants);
+    if(!granted) {
+        return fail("capability", granted.error());
+    }
+
+    auto arguments = makeObjectSchema("schema.contract.task.arguments", false);
+    auto taskResult = makeObjectSchema("schema.contract.task.result", true);
+    auto acceptance = makeObjectSchema("schema.contract.task.acceptance", false);
+    if(!arguments || !taskResult || !acceptance) {
+        std::cerr << "schema: task contract schema creation failed\n";
+        return 1;
+    }
+    auto taskRegistered = kernel.taskRegistry().registerHandler(
+        TaskDescriptor {
+            requiredId<TaskName>("kernel.contract.compute"),
+            Version {1U, 0U, 0U},
+            arguments.value(),
+            std::move(taskResult).value()},
+        std::make_shared<ContractTaskHandler>());
+    if(!taskRegistered) {
+        return fail("task registration", taskRegistered.error());
+    }
+    auto commandRegistered = kernel.commandRegistry().registerAsyncHandler(
+        CommandDescriptor {
+            requiredId<CommandName>("kernel.contract.compute.accept"),
+            Version {1U, 0U, 0U},
+            std::move(arguments).value(),
+            std::move(acceptance).value(),
+            ExecutionMode::Asynchronous,
+            SideEffectLevel::ReadOnly,
+            requiredId<CapabilityId>("task.submit"),
+            false,
+            true,
+            true},
+        std::make_shared<ContractAsyncCommandHandler>());
+    if(!commandRegistered) {
+        return fail("async command registration", commandRegistered.error());
+    }
+    auto executor = BsThreadPoolExecutor::create(BsThreadPoolExecutorOptions {2U});
+    if(!executor) {
+        return fail("executor", executor.error());
+    }
+    auto executorConfigured = kernel.configureTaskExecutor(std::move(executor).value());
+    if(!executorConfigured) {
+        return fail("executor configure", executorConfigured.error());
+    }
+    auto bootstrapped = kernel.bootstrap();
+    if(!bootstrapped) {
+        return fail("bootstrap", bootstrapped.error());
+    }
+
+    auto parsed = validator->deserialize(R"({"id":"input.cli.task"})");
+    if(!parsed) {
+        return fail("argument parse", parsed.error());
+    }
+    auto accepted = kernel.commands().execute(CommandRequest {
+        requiredId<RequestId>("request.cli.task"),
+        session,
+        project,
+        document,
+        requiredId<CommandName>("kernel.contract.compute.accept"),
+        std::move(parsed).value(),
+        Revision {0U},
+        requiredId<CorrelationId>("correlation.cli.task"),
+        requiredId<TraceId>("trace.cli.task"),
+        requiredId<IdempotencyKey>("idempotency.cli.task")});
+    if(!accepted) {
+        return fail("async command execute", accepted.error());
+    }
+    if(accepted.value().commit.has_value() || !accepted.value().taskId.has_value()
+       || !accepted.value().postExecutionErrors.empty()) {
+        std::cerr << "async command execute: invalid acceptance\n";
+        return 1;
+    }
+    auto completed = kernel.tasks().wait(*accepted.value().taskId, std::chrono::seconds(2));
+    if(!completed) {
+        return fail("task wait", completed.error());
+    }
+    if(completed.value().state != TaskState::Succeeded
+       || !completed.value().sourceRevisions.has_value()
+       || !completed.value().result.has_value()) {
+        std::cerr << "task wait: invalid terminal state\n";
+        return 1;
+    }
+    auto serialized = validator->serialize(*completed.value().result);
+    if(!serialized) {
+        return fail("task result serialize", serialized.error());
+    }
+    auto stopped = kernel.shutdown();
+    if(!stopped) {
+        return fail("shutdown", stopped.error());
+    }
+    std::cout << serialized.value() << '\n';
+    static_cast<void>(std::filesystem::remove(logPath, ignored));
+    return serialized.value().find("task-verified") == std::string::npos ? 1 : 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
 {
-    if(argc != 3 || std::string(argv[1]) != "--mode"
-       || std::string(argv[2]) != "roundtrip") {
-        std::cerr << "usage: lasercnc_kernel_headless_contract --mode roundtrip\n";
+    if(argc != 3 || std::string(argv[1]) != "--mode") {
+        std::cerr << "usage: lasercnc_kernel_headless_contract --mode roundtrip|task-roundtrip\n";
         return 2;
     }
     try {
-        return runRoundTrip();
+        const auto mode = std::string(argv[2]);
+        if(mode == "roundtrip") {
+            return runRoundTrip();
+        }
+        if(mode == "task-roundtrip") {
+            return runTaskRoundTrip();
+        }
+        std::cerr << "unknown mode\n";
+        return 2;
     } catch(const std::exception& exception) {
         std::cerr << "unexpected: " << exception.what() << '\n';
         return 3;

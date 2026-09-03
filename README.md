@@ -8,6 +8,10 @@ Command-First、Automation-First、Headless-First 和 Infrastructure-Adapter
 
 - Phase 1：Foundation（`StrongId`、`Value`、`Result`、`Error`、`Schema`）
 - Phase 2：Application Composition（`AppKernel`、`ServiceRegistry`、`ModuleRuntime`）
+- Phase 3：Infrastructure Adapters（日志、JSON、TOML、SQLite、线程池）
+- Phase 4：Document、Revision 与 Application Transaction
+- Phase 5：CommandRuntime、QueryRuntime 与 EventBus
+- Phase 6：TaskRuntime、Scheduler、Cancellation 与 Resource Model
 - 标准：C++20
 - 测试：Catch2 + CTest
 

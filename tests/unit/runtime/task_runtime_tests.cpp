@@ -223,6 +223,54 @@ TEST_CASE("TaskRuntime cancellation and deadline are cooperative", "[runtime][ta
     fixture.stop();
 }
 
+TEST_CASE("TaskRuntime exposes pending running and cancel-requested transitions", "[runtime][task][state]")
+{
+    RuntimeFixture fixture(1U);
+    auto entered = std::make_shared<std::promise<void>>();
+    auto releasePromise = std::make_shared<std::promise<void>>();
+    auto release = std::make_shared<std::shared_future<void>>(releasePromise->get_future().share());
+    REQUIRE(fixture.registry
+                .registerHandler(
+                    descriptor("task.state"),
+                    std::make_shared<LambdaHandler>(
+                        [entered, release](const TaskRequest&, const TaskContext&) {
+                            entered->set_value();
+                            release->wait();
+                            return Result<Value>::success(Value {});
+                        }))
+                .hasValue());
+    fixture.start();
+
+    auto running = request("state-running", "task.state");
+    REQUIRE(fixture.runtime.submit(running).hasValue());
+    entered->get_future().wait();
+    auto runningSnapshot = fixture.runtime.snapshot(running.taskId);
+    REQUIRE(runningSnapshot.hasValue());
+    CHECK(runningSnapshot.value().state == TaskState::Running);
+
+    auto dependent = request("state-pending", "task.state");
+    dependent.dependencies.push_back(running.taskId);
+    REQUIRE(fixture.runtime.submit(dependent).hasValue());
+    auto pendingSnapshot = fixture.runtime.snapshot(dependent.taskId);
+    REQUIRE(pendingSnapshot.hasValue());
+    CHECK(pendingSnapshot.value().state == TaskState::Pending);
+
+    REQUIRE(fixture.runtime.cancel(running.taskId).hasValue());
+    auto cancellingSnapshot = fixture.runtime.snapshot(running.taskId);
+    REQUIRE(cancellingSnapshot.hasValue());
+    CHECK(cancellingSnapshot.value().state == TaskState::CancelRequested);
+    REQUIRE(fixture.runtime.cancel(dependent.taskId).hasValue());
+    auto pendingCancelled = fixture.runtime.snapshot(dependent.taskId);
+    REQUIRE(pendingCancelled.hasValue());
+    CHECK(pendingCancelled.value().state == TaskState::Cancelled);
+
+    releasePromise->set_value();
+    auto cancelled = fixture.runtime.wait(running.taskId, 2s);
+    REQUIRE(cancelled.hasValue());
+    CHECK(cancelled.value().state == TaskState::Cancelled);
+    fixture.stop();
+}
+
 TEST_CASE("Scheduler arbitrates project read and write claims", "[runtime][task][resource]")
 {
     RuntimeFixture fixture(2U);
@@ -482,6 +530,42 @@ TEST_CASE("AppKernel owns freezes and stops the task stack", "[kernel][runtime][
     REQUIRE(kernel.shutdown().hasValue());
     CHECK(kernel.state() == lasercnc::kernel::AppKernelState::Stopped);
     CHECK_FALSE(kernel.tasks().submit(request("late", "task.kernel-owned")).hasValue());
+}
+
+TEST_CASE("AppKernel preserves stopping state after bounded task shutdown timeout", "[kernel][runtime][task][shutdown]")
+{
+    lasercnc::kernel::AppKernel kernel;
+    REQUIRE(kernel.executionServices()
+                .configure(std::make_shared<PassValidator>(), std::make_shared<NullLog>())
+                .hasValue());
+    auto entered = std::make_shared<std::promise<void>>();
+    REQUIRE(kernel.taskRegistry()
+                .registerHandler(
+                    descriptor("task.kernel-slow"),
+                    std::make_shared<LambdaHandler>(
+                        [entered](const TaskRequest&, const TaskContext&) {
+                            entered->set_value();
+                            std::this_thread::sleep_for(100ms);
+                            return Result<Value>::success(Value {});
+                        }))
+                .hasValue());
+    auto executor = BsThreadPoolExecutor::create(BsThreadPoolExecutorOptions {1U});
+    REQUIRE(executor.hasValue());
+    REQUIRE(kernel.configureTaskExecutor(std::move(executor).value()).hasValue());
+    REQUIRE(kernel.bootstrap().hasValue());
+    auto slow = request("kernel-slow", "task.kernel-slow");
+    REQUIRE(kernel.tasks().submit(slow).hasValue());
+    entered->get_future().wait();
+
+    auto timedOut = kernel.shutdown(5ms);
+    REQUIRE_FALSE(timedOut.hasValue());
+    CHECK(std::string(timedOut.error().code.value()) == "Task.ShutdownTimeout");
+    CHECK(kernel.state() == lasercnc::kernel::AppKernelState::Stopping);
+    auto completed = kernel.tasks().wait(slow.taskId, 2s);
+    REQUIRE(completed.hasValue());
+    CHECK(completed.value().state == TaskState::Cancelled);
+    REQUIRE(kernel.shutdown(2s).hasValue());
+    CHECK(kernel.state() == lasercnc::kernel::AppKernelState::Stopped);
 }
 
 TEST_CASE("Asynchronous commands use CommandRuntime to accept one read-only task", "[runtime][command][task]")
