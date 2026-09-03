@@ -17,6 +17,8 @@
 #include <lasercnc/runtime/query_runtime.hpp>
 #include <lasercnc/runtime/resource_manager.hpp>
 #include <lasercnc/runtime/scheduler.hpp>
+#include <lasercnc/runtime/script_registry.hpp>
+#include <lasercnc/runtime/script_runtime.hpp>
 #include <lasercnc/runtime/task_registry.hpp>
 #include <lasercnc/runtime/task_runtime.hpp>
 #include <lasercnc/runtime/workflow_registry.hpp>
@@ -72,6 +74,8 @@ public:
     [[nodiscard]] const runtime::QueryRegistry& queryRegistry() const noexcept;
     [[nodiscard]] runtime::WorkflowRegistry& workflowRegistry() noexcept;
     [[nodiscard]] const runtime::WorkflowRegistry& workflowRegistry() const noexcept;
+    [[nodiscard]] runtime::ScriptRegistry& scriptRegistry() noexcept;
+    [[nodiscard]] const runtime::ScriptRegistry& scriptRegistry() const noexcept;
     [[nodiscard]] runtime::CommandRuntime& commands() noexcept;
     [[nodiscard]] const runtime::CommandRuntime& commands() const noexcept;
     [[nodiscard]] runtime::QueryRuntime& queries() noexcept;
@@ -86,6 +90,8 @@ public:
     [[nodiscard]] const runtime::TaskRuntime& tasks() const noexcept;
     [[nodiscard]] runtime::WorkflowRuntime& workflows() noexcept;
     [[nodiscard]] const runtime::WorkflowRuntime& workflows() const noexcept;
+    [[nodiscard]] runtime::ScriptRuntime& scripts() noexcept;
+    [[nodiscard]] const runtime::ScriptRuntime& scripts() const noexcept;
     [[nodiscard]] observability::LocalTraceService& traces() noexcept;
     [[nodiscard]] const observability::LocalTraceService& traces() const noexcept;
     [[nodiscard]] observability::LocalMetricsService& metrics() noexcept;
@@ -111,6 +117,7 @@ private:
     runtime::CommandRegistry commandRegistry_;
     runtime::QueryRegistry queryRegistry_;
     runtime::WorkflowRegistry workflowRegistry_;
+    runtime::ScriptRegistry scriptRegistry_;
     runtime::TaskRegistry taskRegistry_;
     runtime::ResourceManager resources_;
     std::unique_ptr<platform::ITaskExecutor> taskExecutor_;
@@ -119,6 +126,7 @@ private:
     runtime::CommandRuntime commands_;
     runtime::QueryRuntime queries_;
     runtime::WorkflowRuntime workflows_;
+    runtime::ScriptRuntime scripts_;
     AppKernelState state_{AppKernelState::Configuring};
 };
 

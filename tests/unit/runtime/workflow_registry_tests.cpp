@@ -484,6 +484,55 @@ struct WorkflowRuntimeFixture final {
     std::shared_ptr<EchoQueryHandler> query;
 };
 
+ScriptNode scriptNode(const char* id, ScriptNodeKind kind)
+{
+    return ScriptNode {validId<ScriptNodeId>(id), kind};
+}
+
+ScriptNode scriptAssign(const char* id, const char* binding, Value value)
+{
+    auto node = scriptNode(id, ScriptNodeKind::Assign);
+    node.valueTemplate = std::move(value);
+    node.resultBinding = binding;
+    return node;
+}
+
+ScriptNode scriptInclude(const char* id, const char* script)
+{
+    auto node = scriptNode(id, ScriptNodeKind::Include);
+    node.include = ScriptInclude {validId<ScriptName>(script), Version {1U, 0U, 0U}};
+    return node;
+}
+
+ScriptDefinition scriptDefinition(
+    const char* name,
+    std::vector<ScriptNode> nodes,
+    Value resultTemplate = Value {Value::Object {}})
+{
+    return ScriptDefinition {
+        ScriptDescriptor {
+            validId<ScriptName>(name),
+            Version {1U, 0U, 0U},
+            schema("schema.script.input"),
+            schema("schema.script.result", SchemaKind::Any)},
+        std::move(nodes),
+        std::move(resultTemplate)};
+}
+
+ScriptRequest scriptRequest(const char* id, const char* script)
+{
+    return ScriptRequest {
+        validId<ScriptExecutionId>(id),
+        validId<ScriptName>(script),
+        Value {Value::Object {}},
+        validId<SessionId>("session.workflow"),
+        validId<ProjectId>("project.workflow"),
+        validId<DocumentId>("document.workflow"),
+        validId<CorrelationId>("correlation.script"),
+        validId<TraceId>("trace.script"),
+        std::nullopt};
+}
+
 } // namespace
 
 TEST_CASE("WorkflowRegistry validates stable acyclic definitions", "[workflow][registry]")
@@ -868,4 +917,302 @@ TEST_CASE("WorkflowRuntime exposes compensation failure without erasing the orig
     REQUIRE(result.value().compensationErrors.size() == 1U);
     CHECK(std::string(result.value().compensationErrors[0].code.value())
           == "Test.CompensationFailure");
+}
+
+TEST_CASE("ScriptRegistry validates exact references and rejects include cycles", "[script][registry]")
+{
+    SECTION("exact command reference") {
+        AppKernel kernel;
+        configureServices(kernel);
+        REQUIRE(kernel.commandRegistry()
+                    .registerHandler(
+                        commandDescriptor("command.script", false),
+                        std::make_shared<CommandHandler>())
+                    .hasValue());
+        auto command = scriptNode("node.command", ScriptNodeKind::Command);
+        command.command = ScriptCommandCall {
+            validId<CommandName>("command.script"),
+            Version {1U, 0U, 0U},
+            Value {Value::Object {}},
+            false,
+            {},
+            {},
+            {}};
+        REQUIRE(kernel.scriptRegistry()
+                    .registerDefinition(scriptDefinition("script.invalid", {command}))
+                    .hasValue());
+        auto bootstrapped = kernel.bootstrap();
+        REQUIRE_FALSE(bootstrapped.hasValue());
+        CHECK(std::string(bootstrapped.error().code.value())
+              == "Script.RegistryValidationFailed");
+        REQUIRE(bootstrapped.error().cause != nullptr);
+        CHECK(std::string(bootstrapped.error().cause->code.value())
+              == "Script.InvalidCommandReference");
+    }
+
+    SECTION("include cycle") {
+        AppKernel kernel;
+        configureServices(kernel);
+        REQUIRE(kernel.scriptRegistry()
+                    .registerDefinition(scriptDefinition(
+                        "script.a", {scriptInclude("node.include-b", "script.b")}))
+                    .hasValue());
+        REQUIRE(kernel.scriptRegistry()
+                    .registerDefinition(scriptDefinition(
+                        "script.b", {scriptInclude("node.include-a", "script.a")}))
+                    .hasValue());
+        auto bootstrapped = kernel.bootstrap();
+        REQUIRE_FALSE(bootstrapped.hasValue());
+        CHECK(std::string(bootstrapped.error().code.value())
+              == "Script.RegistryValidationFailed");
+        REQUIRE(bootstrapped.error().cause != nullptr);
+        CHECK(std::string(bootstrapped.error().cause->code.value())
+              == "Script.IncludeCycle");
+    }
+}
+
+TEST_CASE("ScriptRuntime evaluates structured control flow through registered ports", "[script][runtime]")
+{
+    WorkflowRuntimeFixture fixture;
+
+    auto query = scriptNode("node.query", ScriptNodeKind::Query);
+    query.query = ScriptQueryCall {
+        validId<QueryName>("query.echo"),
+        Version {1U, 0U, 0U},
+        Value {Value::Object {
+            {"flag", Value {Value::Object {{"$ref", Value {"flag"}}}}},
+        }},
+        "query"};
+
+    auto condition = scriptNode("node.if", ScriptNodeKind::If);
+    condition.predicate = WorkflowPredicate {
+        WorkflowPredicateKind::IsTrue, "flag", Value {}};
+    condition.thenNodes.push_back(std::move(query));
+
+    auto assertion = scriptNode("node.assert-item", ScriptNodeKind::Assert);
+    assertion.predicate = WorkflowPredicate {
+        WorkflowPredicateKind::Exists, "item", Value {}};
+    auto loop = scriptNode("node.foreach", ScriptNodeKind::ForEach);
+    loop.collectionTemplate = Value {Value::Array {Value {"first"}, Value {"second"}}};
+    loop.itemVariable = "item";
+    loop.indexVariable = "index";
+    loop.body.push_back(std::move(assertion));
+
+    auto command = scriptNode("node.command", ScriptNodeKind::Command);
+    command.command = ScriptCommandCall {
+        validId<CommandName>("command.action"),
+        Version {1U, 0U, 0U},
+        Value {Value::Object {{"label", Value {"script"}}}},
+        false,
+        "commandResult",
+        {},
+        {}};
+
+    REQUIRE(fixture.kernel.scriptRegistry()
+                .registerDefinition(scriptDefinition(
+                    "script.child",
+                    {scriptAssign("node.child", "included", Value {true})}))
+                .hasValue());
+    REQUIRE(fixture.kernel.scriptRegistry()
+                .registerDefinition(scriptDefinition(
+                    "script.main",
+                    {
+                        scriptAssign("node.flag", "flag", Value {true}),
+                        std::move(condition),
+                        std::move(loop),
+                        scriptInclude("node.include", "script.child"),
+                        std::move(command),
+                    },
+                    Value {Value::Object {
+                        {"included", Value {Value::Object {{"$ref", Value {"included"}}}}},
+                        {"query", Value {Value::Object {{"$ref", Value {"query.flag"}}}}},
+                        {"command", Value {Value::Object {{"$ref", Value {"commandResult.label"}}}}},
+                    }}))
+                .hasValue());
+    REQUIRE(fixture.kernel.bootstrap().hasValue());
+
+    auto request = scriptRequest("script-execution.main", "script.main");
+    REQUIRE(fixture.kernel.scripts().startScript(request).hasValue());
+    auto completed = fixture.kernel.scripts().advance(request.executionId);
+    REQUIRE(completed.hasValue());
+    CHECK(completed.value().state == ScriptState::Succeeded);
+    CHECK(completed.value().executedNodeCount == 9U);
+    REQUIRE(completed.value().result.has_value());
+    const auto* result = completed.value().result->getIf<Value::Object>();
+    REQUIRE(result != nullptr);
+    CHECK(*result->at("included").getIf<bool>());
+    CHECK(*result->at("query").getIf<bool>());
+    CHECK(*result->at("command").getIf<std::string>() == "script");
+    CHECK(fixture.command->calls() == std::vector<std::string> {"script"});
+
+    const auto spans = fixture.kernel.traces().records();
+    const auto scriptSpan = std::find_if(spans.begin(), spans.end(), [](const auto& span) {
+        return span.name == "script.advance";
+    });
+    const auto commandSpan = std::find_if(spans.begin(), spans.end(), [](const auto& span) {
+        return span.name == "command.execute";
+    });
+    const auto querySpan = std::find_if(spans.begin(), spans.end(), [](const auto& span) {
+        return span.name == "query.execute";
+    });
+    REQUIRE(scriptSpan != spans.end());
+    REQUIRE(commandSpan != spans.end());
+    REQUIRE(querySpan != spans.end());
+    CHECK(commandSpan->parentSpanId == std::optional<SpanId> {scriptSpan->spanId});
+    CHECK(querySpan->parentSpanId == std::optional<SpanId> {scriptSpan->spanId});
+    CHECK(commandSpan->traceId == scriptSpan->traceId);
+    CHECK(querySpan->traceId == scriptSpan->traceId);
+
+    const auto metrics = fixture.kernel.metrics().snapshot();
+    const auto scriptMetric = std::find_if(metrics.begin(), metrics.end(), [](const auto& metric) {
+        return metric.name.value() == std::string_view {"kernel.script.advance.completed"}
+            && metric.labels == MetricLabels {{"outcome", "succeeded"}};
+    });
+    REQUIRE(scriptMetric != metrics.end());
+    CHECK(scriptMetric->value == 1.0);
+}
+
+TEST_CASE("ScriptRuntime waits for asynchronous commands and propagates cancellation", "[script][runtime][task]")
+{
+    SECTION("resume") {
+        WorkflowRuntimeFixture fixture;
+        auto& executor = fixture.enableAsync();
+        auto command = scriptNode("node.async", ScriptNodeKind::Command);
+        command.command = ScriptCommandCall {
+            validId<CommandName>("command.async"),
+            Version {1U, 0U, 0U},
+            Value {Value::Object {{"label", Value {"async"}}}},
+            false,
+            "accepted",
+            "taskId",
+            {}};
+        auto wait = scriptNode("node.wait", ScriptNodeKind::Wait);
+        wait.wait = ScriptWait {ScriptWaitTarget::Task, "taskId", "taskResult"};
+        REQUIRE(fixture.kernel.scriptRegistry()
+                    .registerDefinition(scriptDefinition(
+                        "script.async",
+                        {std::move(command), std::move(wait)},
+                        Value {Value::Object {{"$ref", Value {"taskResult.label"}}}}))
+                    .hasValue());
+        REQUIRE(fixture.kernel.bootstrap().hasValue());
+
+        auto request = scriptRequest("script-execution.async", "script.async");
+        REQUIRE(fixture.kernel.scripts().startScript(request).hasValue());
+        auto waiting = fixture.kernel.scripts().advance(request.executionId);
+        REQUIRE(waiting.hasValue());
+        CHECK(waiting.value().state == ScriptState::Waiting);
+        CHECK(waiting.value().waitingTaskId.has_value());
+        CHECK(executor.queued() == 1U);
+
+        executor.runAll();
+        auto completed = fixture.kernel.scripts().advance(request.executionId);
+        REQUIRE(completed.hasValue());
+        CHECK(completed.value().state == ScriptState::Succeeded);
+        REQUIRE(completed.value().result.has_value());
+        CHECK(*completed.value().result->getIf<std::string>() == "async");
+    }
+
+    SECTION("cancel") {
+        WorkflowRuntimeFixture fixture;
+        auto& executor = fixture.enableAsync();
+        auto command = scriptNode("node.async", ScriptNodeKind::Command);
+        command.command = ScriptCommandCall {
+            validId<CommandName>("command.async"),
+            Version {1U, 0U, 0U},
+            Value {Value::Object {{"label", Value {"cancel"}}}},
+            true,
+            {},
+            {},
+            {}};
+        REQUIRE(fixture.kernel.scriptRegistry()
+                    .registerDefinition(scriptDefinition("script.cancel", {std::move(command)}))
+                    .hasValue());
+        REQUIRE(fixture.kernel.bootstrap().hasValue());
+
+        auto request = scriptRequest("script-execution.cancel", "script.cancel");
+        REQUIRE(fixture.kernel.scripts().startScript(request).hasValue());
+        REQUIRE(fixture.kernel.scripts().advance(request.executionId).hasValue());
+        auto cancelled = fixture.kernel.scripts().cancel(request.executionId);
+        REQUIRE(cancelled.hasValue());
+        CHECK(cancelled.value().state == ScriptState::Cancelled);
+        REQUIRE(cancelled.value().error.has_value());
+        CHECK(std::string(cancelled.value().error->code.value()) == "Script.Cancelled");
+        executor.runAll();
+    }
+}
+
+TEST_CASE("ScriptRuntime invokes workflows through the workflow boundary", "[script][runtime][workflow]")
+{
+    WorkflowRuntimeFixture fixture;
+    auto definition = workflowDefinition(
+        {assignStep("step.answer", "answer", Value {"workflow"})});
+    definition.resultTemplate = Value {Value::Object {{"$ref", Value {"answer"}}}};
+    REQUIRE(fixture.kernel.workflowRegistry().registerDefinition(std::move(definition)).hasValue());
+
+    auto workflow = scriptNode("node.workflow", ScriptNodeKind::Workflow);
+    workflow.workflow = ScriptWorkflowCall {
+        validId<WorkflowName>("workflow.registry.test"),
+        Version {1U, 0U, 0U},
+        Value {Value::Object {}},
+        true,
+        "workflowId",
+        "workflowResult"};
+    REQUIRE(fixture.kernel.scriptRegistry()
+                .registerDefinition(scriptDefinition(
+                    "script.workflow",
+                    {std::move(workflow)},
+                    Value {Value::Object {{"$ref", Value {"workflowResult"}}}}))
+                .hasValue());
+    REQUIRE(fixture.kernel.bootstrap().hasValue());
+
+    auto request = scriptRequest("script-execution.workflow", "script.workflow");
+    REQUIRE(fixture.kernel.scripts().startScript(request).hasValue());
+    auto completed = fixture.kernel.scripts().advance(request.executionId);
+    REQUIRE(completed.hasValue());
+    CHECK(completed.value().state == ScriptState::Succeeded);
+    REQUIRE(completed.value().result.has_value());
+    CHECK(*completed.value().result->getIf<std::string>() == "workflow");
+
+    const auto spans = fixture.kernel.traces().records();
+    const auto scriptSpan = std::find_if(spans.begin(), spans.end(), [](const auto& span) {
+        return span.name == "script.advance";
+    });
+    const auto workflowSpan = std::find_if(spans.begin(), spans.end(), [](const auto& span) {
+        return span.name == "workflow.advance";
+    });
+    REQUIRE(scriptSpan != spans.end());
+    REQUIRE(workflowSpan != spans.end());
+    CHECK(workflowSpan->parentSpanId == std::optional<SpanId> {scriptSpan->spanId});
+    CHECK(workflowSpan->traceId == scriptSpan->traceId);
+}
+
+TEST_CASE("ScriptRuntime fails closed at the total execution node limit", "[script][runtime][limit]")
+{
+    WorkflowRuntimeFixture fixture;
+    Value::Array items;
+    items.reserve(10000U);
+    for(std::size_t index = 0U; index < 10000U; ++index) {
+        items.emplace_back(static_cast<std::int64_t>(index));
+    }
+    auto loop = scriptNode("node.loop", ScriptNodeKind::ForEach);
+    loop.collectionTemplate = Value {std::move(items)};
+    loop.itemVariable = "item";
+    loop.indexVariable = "index";
+    loop.maxIterations = 10000U;
+    loop.body.push_back(scriptAssign(
+        "node.body", "last", Value {Value::Object {{"$ref", Value {"item"}}}}));
+    REQUIRE(fixture.kernel.scriptRegistry()
+                .registerDefinition(scriptDefinition("script.limit", {std::move(loop)}))
+                .hasValue());
+    REQUIRE(fixture.kernel.bootstrap().hasValue());
+
+    auto request = scriptRequest("script-execution.limit", "script.limit");
+    REQUIRE(fixture.kernel.scripts().startScript(request).hasValue());
+    auto failed = fixture.kernel.scripts().advance(request.executionId);
+    REQUIRE(failed.hasValue());
+    CHECK(failed.value().state == ScriptState::Failed);
+    REQUIRE(failed.value().error.has_value());
+    CHECK(std::string(failed.value().error->code.value())
+          == "Script.ExecutionNodeLimitExceeded");
+    CHECK(failed.value().executedNodeCount == 10000U);
 }

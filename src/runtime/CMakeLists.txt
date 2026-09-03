@@ -30,6 +30,9 @@ target_sources(
         workflow/workflow_registry.cpp
         workflow/workflow_runtime.cpp
         persistence/workflow_persistence.cpp
+        script/script.cpp
+        script/script_registry.cpp
+        script/script_runtime.cpp
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS "${PROJECT_SOURCE_DIR}/include"
@@ -59,4 +62,7 @@ target_sources(
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/workflow.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/workflow_registry.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/workflow_runtime.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/script.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/script_registry.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/script_runtime.hpp"
 )

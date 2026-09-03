@@ -1,6 +1,8 @@
 #include <lasercnc/runtime/workflow_runtime.hpp>
 
 #include <lasercnc/foundation/error.hpp>
+#include <lasercnc/observability/metrics_service.hpp>
+#include <lasercnc/observability/trace_service.hpp>
 #include <lasercnc/runtime/command_runtime.hpp>
 #include <lasercnc/runtime/execution_services.hpp>
 #include <lasercnc/runtime/query_runtime.hpp>
@@ -10,6 +12,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -270,6 +273,81 @@ struct StepOutcome final {
     std::optional<foundation::Error> error;
 };
 
+struct WorkflowObservationContext final {
+    kernel::TraceId traceId;
+    std::optional<kernel::SpanId> parentSpanId;
+    kernel::WorkflowName workflow;
+};
+
+const char* workflowStateLabel(WorkflowState state) noexcept
+{
+    switch(state) {
+    case WorkflowState::Pending:
+        return "pending";
+    case WorkflowState::Running:
+        return "running";
+    case WorkflowState::Waiting:
+        return "waiting";
+    case WorkflowState::Succeeded:
+        return "succeeded";
+    case WorkflowState::Failed:
+        return "failed";
+    case WorkflowState::CancelRequested:
+        return "cancel_requested";
+    case WorkflowState::Compensating:
+        return "compensating";
+    case WorkflowState::Cancelled:
+        return "cancelled";
+    case WorkflowState::Compensated:
+        return "compensated";
+    case WorkflowState::CompensationFailed:
+        return "compensation_failed";
+    }
+    return "unknown";
+}
+
+observability::TraceStatus workflowTraceStatus(WorkflowState state) noexcept
+{
+    if(state == WorkflowState::Cancelled) {
+        return observability::TraceStatus::Cancelled;
+    }
+    if(state == WorkflowState::Failed || state == WorkflowState::Compensated
+       || state == WorkflowState::CompensationFailed) {
+        return observability::TraceStatus::Failed;
+    }
+    return observability::TraceStatus::Succeeded;
+}
+
+foundation::Result<kernel::SpanId> workflowSpanId(const kernel::WorkflowId& workflowId)
+{
+    static std::atomic_ullong sequence {0U};
+    return kernel::SpanId::create(
+        "span.workflow." + std::string(workflowId.value()) + "."
+        + std::to_string(sequence.fetch_add(1U, std::memory_order_relaxed)));
+}
+
+void recordWorkflowMetrics(
+    observability::IMetricsService& metrics,
+    const char* outcome,
+    std::chrono::steady_clock::duration elapsed) noexcept
+{
+    try {
+        const observability::MetricLabels labels {{"outcome", outcome}};
+        auto completed = kernel::MetricName::create("kernel.workflow.advance.completed");
+        if(completed) {
+            static_cast<void>(metrics.addCounter(std::move(completed).value(), 1.0, labels));
+        }
+        auto duration = kernel::MetricName::create("kernel.workflow.advance.duration_ms");
+        if(duration) {
+            static_cast<void>(metrics.observeHistogram(
+                std::move(duration).value(),
+                std::chrono::duration<double, std::milli>(elapsed).count(),
+                labels));
+        }
+    } catch(...) {
+    }
+}
+
 } // namespace
 
 class WorkflowRuntime::Impl final {
@@ -280,13 +358,17 @@ public:
         QueryRuntime& queries,
         TaskRuntime& tasks,
         ExecutionServices& executionServices,
-        persistence::PersistenceService& persistence)
+        persistence::PersistenceService& persistence,
+        observability::ITraceService& traces,
+        observability::IMetricsService& metrics)
         : registry_(registry),
           commands_(commands),
           queries_(queries),
           tasks_(tasks),
           executionServices_(executionServices),
-          persistence_(persistence)
+          persistence_(persistence),
+          traces_(traces),
+          metrics_(metrics)
     {
     }
 
@@ -309,6 +391,7 @@ public:
         bool advancing{false};
         bool cancellationRequested{false};
         bool checkpointDirty{false};
+        std::optional<kernel::SpanId> activeAdvanceSpanId;
     };
 
     foundation::Result<WorkflowSnapshot> startWorkflow(WorkflowRequest request)
@@ -466,7 +549,9 @@ public:
         return advance(workflowId);
     }
 
-    foundation::Result<WorkflowSnapshot> advance(const kernel::WorkflowId& workflowId)
+    foundation::Result<WorkflowSnapshot> advance(
+        const kernel::WorkflowId& workflowId,
+        std::optional<kernel::SpanId> advanceSpanId = std::nullopt)
     {
         if(!accepting_.load(std::memory_order_acquire)) {
             return foundation::Result<WorkflowSnapshot>::failure(runtimeError(
@@ -501,6 +586,7 @@ public:
                     &workflowId));
             }
             instance->advancing = true;
+            instance->activeAdvanceSpanId = std::move(advanceSpanId);
         }
         activeExecutions_.fetch_add(1U, std::memory_order_acq_rel);
         struct Guard final {
@@ -511,6 +597,7 @@ public:
                 {
                     std::lock_guard lock(instance->mutex);
                     instance->advancing = false;
+                    instance->activeAdvanceSpanId.reset();
                 }
                 active.fetch_sub(1U, std::memory_order_acq_rel);
             }
@@ -1018,6 +1105,30 @@ public:
         return accepting_.load(std::memory_order_acquire);
     }
 
+    std::optional<WorkflowObservationContext> observationContext(
+        const kernel::WorkflowId& workflowId) const
+    {
+        auto instance = find(workflowId);
+        if(!instance) {
+            return std::nullopt;
+        }
+        std::lock_guard lock(instance.value()->mutex);
+        return WorkflowObservationContext {
+            instance.value()->request.traceId,
+            instance.value()->request.parentSpanId,
+            instance.value()->definition.descriptor.name};
+    }
+
+    observability::ITraceService& traces() noexcept
+    {
+        return traces_;
+    }
+
+    observability::IMetricsService& metrics() noexcept
+    {
+        return metrics_;
+    }
+
 private:
     foundation::Result<std::shared_ptr<Instance>> find(
         const kernel::WorkflowId& workflowId) const
@@ -1169,7 +1280,9 @@ private:
                 instance.request.correlationId,
                 instance.request.traceId,
                 std::move(idempotency).value(),
-                instance.request.parentSpanId});
+                instance.activeAdvanceSpanId.has_value()
+                    ? instance.activeAdvanceSpanId
+                    : instance.request.parentSpanId});
             if(!response) {
                 return StepOutcome {
                     WorkflowStepState::Failed,
@@ -1214,7 +1327,9 @@ private:
                 std::move(arguments).value(),
                 instance.request.correlationId,
                 instance.request.traceId,
-                instance.request.parentSpanId});
+                instance.activeAdvanceSpanId.has_value()
+                    ? instance.activeAdvanceSpanId
+                    : instance.request.parentSpanId});
             if(!response) {
                 return StepOutcome {
                     WorkflowStepState::Failed,
@@ -1406,7 +1521,9 @@ private:
             instance.request.correlationId,
             instance.request.traceId,
             std::move(idempotency).value(),
-            instance.request.parentSpanId});
+            instance.activeAdvanceSpanId.has_value()
+                ? instance.activeAdvanceSpanId
+                : instance.request.parentSpanId});
         if(!response) {
             return StepOutcome {
                 WorkflowStepState::CompensationFailed,
@@ -1458,6 +1575,8 @@ private:
     TaskRuntime& tasks_;
     ExecutionServices& executionServices_;
     persistence::PersistenceService& persistence_;
+    observability::ITraceService& traces_;
+    observability::IMetricsService& metrics_;
     mutable std::shared_mutex instancesMutex_;
     std::map<kernel::WorkflowId, std::shared_ptr<Instance>> instances_;
     std::atomic_bool accepting_{false};
@@ -1470,9 +1589,11 @@ WorkflowRuntime::WorkflowRuntime(
     QueryRuntime& queries,
     TaskRuntime& tasks,
     ExecutionServices& executionServices,
-    persistence::PersistenceService& persistence)
+    persistence::PersistenceService& persistence,
+    observability::ITraceService& traces,
+    observability::IMetricsService& metrics)
     : impl_(std::make_unique<Impl>(
-          registry, commands, queries, tasks, executionServices, persistence))
+          registry, commands, queries, tasks, executionServices, persistence, traces, metrics))
 {
 }
 
@@ -1486,7 +1607,43 @@ foundation::Result<WorkflowSnapshot> WorkflowRuntime::startWorkflow(WorkflowRequ
 foundation::Result<WorkflowSnapshot> WorkflowRuntime::advance(
     const kernel::WorkflowId& workflowId)
 {
-    return impl_->advance(workflowId);
+    const auto startedAt = std::chrono::steady_clock::now();
+    const auto context = impl_->observationContext(workflowId);
+    std::optional<kernel::SpanId> activeSpanId;
+    std::unique_ptr<observability::ITraceSpan> span;
+    if(context.has_value()) {
+        try {
+            auto createdSpanId = workflowSpanId(workflowId);
+            if(createdSpanId) {
+                const auto spanId = createdSpanId.value();
+                auto started = impl_->traces().startSpan(observability::TraceSpanStart {
+                    context->traceId,
+                    spanId,
+                    context->parentSpanId,
+                    "workflow.advance",
+                    foundation::Value::Object {
+                        {"workflow", foundation::Value {std::string(context->workflow.value())}},
+                    }});
+                if(started && started.value() != nullptr) {
+                    activeSpanId = spanId;
+                    span = std::move(started).value();
+                }
+            }
+        } catch(...) {
+        }
+    }
+    auto result = impl_->advance(workflowId, activeSpanId);
+    const auto outcome = result ? workflowStateLabel(result.value().state) : "error";
+    if(span != nullptr) {
+        span->end(
+            result ? workflowTraceStatus(result.value().state)
+                   : observability::TraceStatus::Failed,
+            result ? result.value().error
+                   : std::optional<foundation::Error> {result.error()});
+    }
+    recordWorkflowMetrics(
+        impl_->metrics(), outcome, std::chrono::steady_clock::now() - startedAt);
+    return result;
 }
 
 foundation::Result<WorkflowSnapshot> WorkflowRuntime::cancel(

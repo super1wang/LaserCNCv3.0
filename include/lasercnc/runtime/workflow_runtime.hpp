@@ -14,6 +14,11 @@ namespace lasercnc::persistence {
 class PersistenceService;
 }
 
+namespace lasercnc::observability {
+class IMetricsService;
+class ITraceService;
+}
+
 namespace lasercnc::runtime {
 
 class CommandRuntime;
@@ -30,7 +35,9 @@ public:
         QueryRuntime& queries,
         TaskRuntime& tasks,
         ExecutionServices& executionServices,
-        persistence::PersistenceService& persistence);
+        persistence::PersistenceService& persistence,
+        observability::ITraceService& traces,
+        observability::IMetricsService& metrics);
     ~WorkflowRuntime();
 
     WorkflowRuntime(const WorkflowRuntime&) = delete;

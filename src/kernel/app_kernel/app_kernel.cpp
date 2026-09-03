@@ -36,6 +36,7 @@ AppKernel::AppKernel()
     : modules_(services_),
       transactions_(documents_, &persistence_),
       workflowRegistry_(commandRegistry_, queryRegistry_),
+      scriptRegistry_(commandRegistry_, queryRegistry_, workflowRegistry_),
       scheduler_(resources_, persistence_, traces_, metrics_),
       tasks_(taskRegistry_, scheduler_, executionServices_, documents_, persistence_),
       commands_(
@@ -51,7 +52,23 @@ AppKernel::AppKernel()
       queries_(
           queryRegistry_, documents_, capabilities_, executionServices_, traces_, metrics_),
       workflows_(
-          workflowRegistry_, commands_, queries_, tasks_, executionServices_, persistence_)
+          workflowRegistry_,
+          commands_,
+          queries_,
+          tasks_,
+          executionServices_,
+          persistence_,
+          traces_,
+          metrics_),
+      scripts_(
+          scriptRegistry_,
+          commands_,
+          queries_,
+          workflows_,
+          tasks_,
+          executionServices_,
+          traces_,
+          metrics_)
 {
     static_cast<void>(diagnostics_.addExporter(
         std::make_shared<PersistenceDiagnosticExporter>(persistence_)));
@@ -154,7 +171,8 @@ foundation::Result<void> AppKernel::bootstrap()
     }
 
     if((commandRegistry_.size() != 0U || queryRegistry_.size() != 0U
-        || taskRegistry_.size() != 0U || workflowRegistry_.size() != 0U)
+        || taskRegistry_.size() != 0U || workflowRegistry_.size() != 0U
+        || scriptRegistry_.size() != 0U)
        && !executionServices_.configured()) {
         auto stopped = modules_.shutdown(*this);
         state_ = AppKernelState::Failed;
@@ -194,6 +212,21 @@ foundation::Result<void> AppKernel::bootstrap()
             foundation::Severity::Error,
             std::make_shared<const foundation::Error>(
                 stopped.hasValue() ? std::move(workflowsValidated).error()
+                                   : std::move(stopped).error())));
+    }
+
+    auto scriptsValidated = scriptRegistry_.validateAndFreeze();
+    if(!scriptsValidated) {
+        auto stopped = modules_.shutdown(*this);
+        state_ = AppKernelState::Failed;
+        return foundation::Result<void>::failure(foundation::makeError(
+            "Script.RegistryValidationFailed",
+            foundation::ErrorCategory::Validation,
+            "The script registry could not be frozen",
+            foundation::Value {},
+            foundation::Severity::Error,
+            std::make_shared<const foundation::Error>(
+                stopped.hasValue() ? std::move(scriptsValidated).error()
                                    : std::move(stopped).error())));
     }
 
@@ -242,6 +275,7 @@ foundation::Result<void> AppKernel::bootstrap()
         tasks_.start();
     }
     workflows_.start();
+    scripts_.start();
     state_ = AppKernelState::Ready;
     return foundation::Result<void>::success();
 }
@@ -272,20 +306,24 @@ foundation::Result<void> AppKernel::shutdown(std::chrono::milliseconds taskTimeo
     const auto activeCommandCount = commands_.activeExecutionCount();
     const auto activeQueryCount = queries_.activeExecutionCount();
     const auto activeWorkflowCount = workflows_.activeExecutionCount();
-    if(activeCommandCount != 0U || activeQueryCount != 0U || activeWorkflowCount != 0U) {
+    const auto activeScriptCount = scripts_.activeExecutionCount();
+    if(activeCommandCount != 0U || activeQueryCount != 0U || activeWorkflowCount != 0U
+       || activeScriptCount != 0U) {
         return foundation::Result<void>::failure(foundation::makeError(
             "Kernel.ActiveExecutions",
             foundation::ErrorCategory::Conflict,
-            "The application kernel cannot stop while command or query executions are active",
+            "The application kernel cannot stop while runtime executions are active",
             foundation::Value {foundation::Value::Object {
                 {"activeCommandCount", foundation::Value {std::to_string(activeCommandCount)}},
                 {"activeQueryCount", foundation::Value {std::to_string(activeQueryCount)}},
                 {"activeWorkflowCount", foundation::Value {std::to_string(activeWorkflowCount)}},
+                {"activeScriptCount", foundation::Value {std::to_string(activeScriptCount)}},
             }}));
     }
 
     const bool wasConfiguring = state_ == AppKernelState::Configuring;
     state_ = AppKernelState::Stopping;
+    scripts_.stop();
     workflows_.stop();
     commands_.stop();
     queries_.stop();
@@ -405,6 +443,16 @@ const runtime::WorkflowRegistry& AppKernel::workflowRegistry() const noexcept
     return workflowRegistry_;
 }
 
+runtime::ScriptRegistry& AppKernel::scriptRegistry() noexcept
+{
+    return scriptRegistry_;
+}
+
+const runtime::ScriptRegistry& AppKernel::scriptRegistry() const noexcept
+{
+    return scriptRegistry_;
+}
+
 runtime::CommandRuntime& AppKernel::commands() noexcept
 {
     return commands_;
@@ -473,6 +521,16 @@ runtime::WorkflowRuntime& AppKernel::workflows() noexcept
 const runtime::WorkflowRuntime& AppKernel::workflows() const noexcept
 {
     return workflows_;
+}
+
+runtime::ScriptRuntime& AppKernel::scripts() noexcept
+{
+    return scripts_;
+}
+
+const runtime::ScriptRuntime& AppKernel::scripts() const noexcept
+{
+    return scripts_;
 }
 
 observability::LocalTraceService& AppKernel::traces() noexcept
