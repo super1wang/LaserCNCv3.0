@@ -7,6 +7,7 @@
 #include <lasercnc/kernel/app_kernel.hpp>
 #include <lasercnc/observability/log_observability_exporter.hpp>
 #include "kernel_test_module.hpp"
+#include "kernel_crash_contract.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1032,15 +1033,19 @@ int recoverWorkflow(const std::filesystem::path& stateRoot)
 
 int main(int argc, char** argv)
 {
-    if((argc != 3 && argc != 5) || std::string(argv[1]) != "--mode") {
+    if((argc != 3 && argc != 5 && argc != 7) || std::string(argv[1]) != "--mode") {
         std::cerr << "usage: lasercnc_kernel_headless_contract --mode "
                      "roundtrip|task-roundtrip|persistence-seed|persistence-recover|"
-                     "workflow-recovery-seed|workflow-recovery-recover "
-                     "[--state-root path]\n";
+                     "workflow-recovery-seed|workflow-recovery-recover|"
+                     "crash-seed|crash-recover|crash-audit "
+                     "[--state-root path] [--scenario name]\n";
         return 2;
     }
     try {
         const auto mode = std::string(argv[2]);
+        if(argc == 7 && std::string(argv[3]) == "--state-root" && std::string(argv[5]) == "--scenario") {
+            return runKernelCrashContract(mode, std::filesystem::path{argv[4]}, argv[6]);
+        }
         if(mode == "roundtrip") {
             return runRoundTrip();
         }

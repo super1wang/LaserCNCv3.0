@@ -13,7 +13,7 @@ LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9 及 K10A–K10E 收�
 - Phase 7：Tracing、Metrics 与 Diagnostics
 - Phase 8：Snapshot、Journal、SQLite Persistence 与 Crash Recovery
 - Phase 9：Workflow Runtime 与结构化 Script Runtime
-- Kernel 1.0 Closure：K10A–K10E 已验收；K10F 的 F1 软件故障注入已验收，F2–F5 待闭合，不能宣布 Kernel Frozen
+- Kernel 1.0 Closure：K10A–K10E 已验收；K10F 的 F1 软件故障注入已验收，F2A 已建立 Command/Transaction/History 三进程崩溃验证；F2 其他类别及 F3–F5 待闭合，不能宣布 Kernel Frozen
 - 标准：C++20
 - 测试：Catch2 + CTest
 

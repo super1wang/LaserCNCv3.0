@@ -96,6 +96,7 @@ add_test(
 add_executable(
     lasercnc_kernel_headless_contract
     integration/kernel_headless_contract.cpp
+    integration/kernel_crash_contract.cpp
 )
 target_link_libraries(
     lasercnc_kernel_headless_contract
@@ -108,6 +109,18 @@ set_target_properties(
     PROPERTIES CXX_EXTENSIONS OFF
 )
 lcnc_enable_warnings(lasercnc_kernel_headless_contract)
+
+foreach(scenario IN ITEMS command-staged journal-inserted outcome-written transaction-before-commit
+    transaction-committed command-returned undo-inserted undo-committed redo-inserted redo-committed)
+    add_test(NAME integration.kernel_crash_${scenario}
+        COMMAND "${CMAKE_COMMAND}"
+            "-DLCNC_CONTRACT_EXECUTABLE=$<TARGET_FILE:lasercnc_kernel_headless_contract>"
+            "-DLCNC_TEST_BINARY_ROOT=${CMAKE_CURRENT_BINARY_DIR}"
+            "-DLCNC_CRASH_SCENARIO=${scenario}"
+            -P "${PROJECT_SOURCE_DIR}/cmake/RunKernelCrashContract.cmake")
+    set_tests_properties(integration.kernel_crash_${scenario} PROPERTIES
+        TIMEOUT 100 RUN_SERIAL TRUE PASS_REGULAR_EXPRESSION "独立进程崩溃契约通过")
+endforeach()
 
 add_test(
     NAME integration.kernel_headless_cli_roundtrip
