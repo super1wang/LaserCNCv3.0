@@ -30,6 +30,28 @@ CommandKey keyOf(const CommandDescriptor& descriptor)
     return CommandKey {descriptor.name, descriptor.version};
 }
 
+bool validExternalSideEffect(SideEffectLevel sideEffect) noexcept
+{
+    switch(sideEffect) {
+    case SideEffectLevel::FileSystemWrite:
+    case SideEffectLevel::Publish:
+    case SideEffectLevel::MachineControl:
+    case SideEffectLevel::Motion:
+    case SideEffectLevel::LaserControl:
+        return true;
+    case SideEffectLevel::ReadOnly:
+    case SideEffectLevel::DocumentWrite:
+        return false;
+    }
+    return false;
+}
+
+bool hasExternalMetadata(const CommandDescriptor& descriptor) noexcept
+{
+    return descriptor.replayPolicy != ReplayPolicy::Never
+        || !descriptor.effectGuards.empty() || !descriptor.resources.empty();
+}
+
 } // namespace
 
 foundation::Result<void> CommandRegistry::registerHandler(
@@ -77,6 +99,13 @@ foundation::Result<void> CommandRegistry::registerHandler(
             "Command.UndoUnsupported",
             foundation::ErrorCategory::Validation,
             "Undoable commands require the Phase 8 journal contract",
+            key));
+    }
+    if(hasExternalMetadata(descriptor)) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.ExternalMetadataUnsupported",
+            foundation::ErrorCategory::Validation,
+            "Document-write commands cannot declare external-effect metadata",
             key));
     }
 
@@ -139,6 +168,13 @@ foundation::Result<void> CommandRegistry::registerAsyncHandler(
             "Command.UndoUnsupported",
             foundation::ErrorCategory::Validation,
             "Undoable commands require the Phase 8 journal contract",
+            key));
+    }
+    if(hasExternalMetadata(descriptor)) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.ExternalMetadataUnsupported",
+            foundation::ErrorCategory::Validation,
+            "Asynchronous read-only commands cannot declare external-effect metadata",
             key));
     }
 
@@ -210,6 +246,13 @@ foundation::Result<void> CommandRegistry::registerReadOnlyHandler(
             "Synchronous read-only commands do not use the command idempotency store",
             key));
     }
+    if(hasExternalMetadata(descriptor)) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.ExternalMetadataUnsupported",
+            foundation::ErrorCategory::Validation,
+            "Synchronous read-only commands cannot declare external-effect metadata",
+            key));
+    }
 
     std::unique_lock lock(mutex_);
     if(frozen_) {
@@ -221,6 +264,107 @@ foundation::Result<void> CommandRegistry::registerReadOnlyHandler(
     }
     const auto [unused, inserted] = entries_.emplace(
         key, Entry {std::move(descriptor), nullptr, nullptr, std::move(handler)});
+    static_cast<void>(unused);
+    if(!inserted) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.AlreadyRegistered",
+            foundation::ErrorCategory::Conflict,
+            "The exact command name and version are already registered",
+            key));
+    }
+    return foundation::Result<void>::success();
+}
+
+foundation::Result<void> CommandRegistry::registerExternalEffectHandler(
+    CommandDescriptor descriptor,
+    std::shared_ptr<IExternalEffectHandler> handler)
+{
+    const auto key = keyOf(descriptor);
+    if(handler == nullptr) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.InvalidHandler",
+            foundation::ErrorCategory::Validation,
+            "An external-effect command handler is required",
+            key));
+    }
+    if(descriptor.executionMode != ExecutionMode::Synchronous) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.HandlerModeMismatch",
+            foundation::ErrorCategory::Validation,
+            "An external-effect command must execute synchronously",
+            key));
+    }
+    if(!validExecutionScope(descriptor.scope)) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.InvalidScope",
+            foundation::ErrorCategory::Validation,
+            "The command scope is invalid",
+            key));
+    }
+    if(!validExternalSideEffect(descriptor.sideEffect)) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.ExternalSideEffectMismatch",
+            foundation::ErrorCategory::Validation,
+            "An external-effect handler requires an external side-effect level",
+            key));
+    }
+    if(descriptor.undoable) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.UndoUnsupported",
+            foundation::ErrorCategory::Validation,
+            "External side effects cannot create application undo entries",
+            key));
+    }
+    if(!descriptor.idempotent) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.ExternalIdempotencyRequired",
+            foundation::ErrorCategory::Validation,
+            "External side effects require a stable idempotency identity",
+            key));
+    }
+    if(!validReplayPolicy(descriptor.replayPolicy)) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.InvalidReplayPolicy",
+            foundation::ErrorCategory::Validation,
+            "The external-effect replay policy is invalid",
+            key));
+    }
+    if(descriptor.effectGuards.empty()) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.EffectGuardRequired",
+            foundation::ErrorCategory::Validation,
+            "External side effects require at least one declared effect guard",
+            key));
+    }
+    if(descriptor.resources.empty()) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.EffectResourceRequired",
+            foundation::ErrorCategory::Validation,
+            "External side effects require at least one declared resource claim",
+            key));
+    }
+    for(const auto& claim : descriptor.resources) {
+        if(claim.units == 0U) {
+            return foundation::Result<void>::failure(commandError(
+                "Command.InvalidEffectResourceUnits",
+                foundation::ErrorCategory::Validation,
+                "External-effect resource units must be greater than zero",
+                key));
+        }
+    }
+
+    std::unique_lock lock(mutex_);
+    if(frozen_) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.RegistryFrozen",
+            foundation::ErrorCategory::Conflict,
+            "Command registration is closed",
+            key));
+    }
+    const auto [unused, inserted] = entries_.emplace(
+        key,
+        Entry {
+            std::move(descriptor), nullptr, nullptr, nullptr, std::move(handler)});
     static_cast<void>(unused);
     if(!inserted) {
         return foundation::Result<void>::failure(commandError(

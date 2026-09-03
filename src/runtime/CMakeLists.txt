@@ -7,6 +7,8 @@ target_sources(
         execution/capability_service.cpp
         execution/execution_services.cpp
         execution/execution_contract.cpp
+        execution/effect_guard.cpp
+        execution/effect_executor.cpp
         execution/command_registry.cpp
         execution/query_registry.cpp
         messaging/event_bus.cpp
@@ -23,6 +25,7 @@ target_sources(
         observability/diagnostics_service.cpp
         persistence/persistence_service.cpp
         persistence/idempotency_persistence.cpp
+        persistence/effect_persistence.cpp
         persistence/recovery.cpp
         persistence/snapshot_persistence.cpp
         persistence/task_persistence.cpp
@@ -44,6 +47,8 @@ target_sources(
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/capability_service.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/execution_services.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/execution_contract.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/effect_guard.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/effect_executor.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/command.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/command_registry.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/query.hpp"

@@ -8,6 +8,7 @@
 #include <lasercnc/platform/snapshot_store.hpp>
 #include <lasercnc/runtime/transaction.hpp>
 #include <lasercnc/runtime/task.hpp>
+#include <lasercnc/runtime/execution_contract.hpp>
 #include <lasercnc/runtime/workflow.hpp>
 #include <lasercnc/observability/diagnostics_service.hpp>
 #include <lasercnc/state/revision.hpp>
@@ -72,6 +73,26 @@ struct IdempotencyClaim final {
     std::optional<IdempotencyReplay> replay;
 };
 
+enum class ExternalEffectClaimDisposition : std::uint8_t {
+    Acquired,
+    Replayed
+};
+
+struct ExternalEffectClaim final {
+    ExternalEffectClaimDisposition disposition{ExternalEffectClaimDisposition::Acquired};
+    std::optional<foundation::Value> replay;
+    bool resumed{false};
+};
+
+struct ExternalEffectRecord final {
+    kernel::IdempotencyKey idempotencyKey;
+    runtime::ReplayPolicy replayPolicy{runtime::ReplayPolicy::Never};
+    runtime::ExternalEffectState state{runtime::ExternalEffectState::Executing};
+    std::optional<foundation::Value> outcome;
+    std::chrono::system_clock::time_point startedAt;
+    std::chrono::system_clock::time_point updatedAt;
+};
+
 struct WorkflowCheckpoint final {
     runtime::WorkflowRequest request;
     kernel::ContentDigest definitionDigest;
@@ -106,6 +127,19 @@ public:
     [[nodiscard]] foundation::Result<void> releaseCommandClaim(
         const kernel::IdempotencyKey& key,
         const foundation::Value& signature);
+    [[nodiscard]] foundation::Result<ExternalEffectClaim> claimExternalEffect(
+        const kernel::IdempotencyKey& key,
+        const foundation::Value& signature,
+        runtime::ReplayPolicy replayPolicy);
+    [[nodiscard]] foundation::Result<void> completeExternalEffect(
+        const kernel::IdempotencyKey& key,
+        const foundation::Value& signature,
+        const foundation::Value& outcome);
+    [[nodiscard]] foundation::Result<runtime::RecoveryDisposition> interruptExternalEffect(
+        const kernel::IdempotencyKey& key,
+        const foundation::Value& signature);
+    [[nodiscard]] foundation::Result<std::optional<ExternalEffectRecord>> externalEffect(
+        const kernel::IdempotencyKey& key) const;
     [[nodiscard]] foundation::Result<void> acceptTask(
         const runtime::TaskRequest& request,
         const std::optional<state::RevisionSet>& sourceRevisions,

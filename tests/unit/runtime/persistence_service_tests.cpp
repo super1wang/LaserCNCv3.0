@@ -14,13 +14,16 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -407,6 +410,85 @@ public:
     std::atomic_size_t calls{0U};
 };
 
+class TestEffectHandler final : public IExternalEffectHandler {
+public:
+    Result<Value> execute(
+        const CommandRequest&,
+        const ExternalEffectContext& context) override
+    {
+        ++calls;
+        resumed.store(context.resumed, std::memory_order_release);
+        if(fail.load(std::memory_order_acquire)) {
+            return Result<Value>::failure(makeError(
+                "Test.ExternalEffectFailed",
+                ErrorCategory::Infrastructure,
+                "expected external-effect failure"));
+        }
+        return Result<Value>::success(Value {Value::Object {
+            {"published", Value {true}}}});
+    }
+
+    std::atomic_size_t calls{0U};
+    std::atomic_bool fail{false};
+    std::atomic_bool resumed{false};
+};
+
+class TestEffectGuard final : public IEffectGuard {
+public:
+    Result<void> evaluate(
+        const CommandRequest&,
+        const CommandDescriptor&,
+        const EffectGuardContext&) override
+    {
+        ++calls;
+        if(!allow.load(std::memory_order_acquire)) {
+            return Result<void>::failure(makeError(
+                "Test.EffectGuardDenied",
+                ErrorCategory::Authorization,
+                "expected effect guard denial"));
+        }
+        return Result<void>::success();
+    }
+
+    std::atomic_size_t calls{0U};
+    std::atomic_bool allow{true};
+};
+
+class BlockingEffectHandler final : public IExternalEffectHandler {
+public:
+    Result<Value> execute(const CommandRequest&, const ExternalEffectContext&) override
+    {
+        std::unique_lock lock(mutex_);
+        ++calls;
+        entered_ = true;
+        changed_.notify_all();
+        changed_.wait(lock, [&]() { return released_; });
+        return Result<Value>::success(Value {Value::Object {
+            {"published", Value {true}}}});
+    }
+
+    void waitUntilEntered()
+    {
+        std::unique_lock lock(mutex_);
+        changed_.wait(lock, [&]() { return entered_; });
+    }
+
+    void release()
+    {
+        std::lock_guard lock(mutex_);
+        released_ = true;
+        changed_.notify_all();
+    }
+
+    std::atomic_size_t calls{0U};
+
+private:
+    std::mutex mutex_;
+    std::condition_variable changed_;
+    bool entered_{false};
+    bool released_{false};
+};
+
 class FixedDiagnosticCheck final
     : public lasercnc::observability::IDiagnosticCheck {
 public:
@@ -468,6 +550,50 @@ CommandDescriptor persistentAsyncCommandDescriptor()
         false,
         true,
         true};
+}
+
+CommandDescriptor externalEffectDescriptor(
+    const char* name,
+    ReplayPolicy replayPolicy)
+{
+    auto descriptor = CommandDescriptor {
+        validId<CommandName>(name),
+        Version {1U, 0U, 0U},
+        objectSchema("schema.persistence.effect.arguments"),
+        objectSchema("schema.persistence.effect.result"),
+        ExecutionMode::Synchronous,
+        SideEffectLevel::Publish,
+        validId<CapabilityId>("effect.publish"),
+        false,
+        false,
+        true};
+    descriptor.scope = ExecutionScope::Global;
+    descriptor.replayPolicy = replayPolicy;
+    descriptor.effectGuards = {validId<EffectGuardId>("guard.effect.publish")};
+    descriptor.resources = {ResourceClaim {
+        ResourceKind::DiskIO,
+        validId<ResourceId>("resource.effect.publish"),
+        ResourceAccess::Exclusive,
+        1U}};
+    return descriptor;
+}
+
+CommandRequest externalEffectRequest(
+    const char* requestId,
+    const char* command,
+    const SessionId& sessionId,
+    const IdempotencyKey& key)
+{
+    return CommandRequest {
+        validId<RequestId>(requestId),
+        ExecutionContext {sessionId, std::nullopt, std::nullopt},
+        validId<CommandName>(command),
+        Version {1U, 0U, 0U},
+        Value {Value::Object {{"target", Value {"artifact.test"}}}},
+        std::nullopt,
+        validId<CorrelationId>("correlation.effect"),
+        validId<TraceId>("trace.effect"),
+        key};
 }
 
 TaskDescriptor persistentTaskDescriptor()
@@ -1003,6 +1129,14 @@ TEST_CASE("PersistenceService restores a snapshot and replays only its journal t
             [&delivered](const lasercnc::messaging::EventEnvelope&) { ++delivered; });
         REQUIRE(subscription.hasValue());
         REQUIRE(kernel.bootstrap().hasValue());
+        CHECK(kernel.effectGuards().frozen());
+        CHECK(kernel.resources().frozen());
+        auto lateGuard = kernel.effectGuards().registerGuard(
+            validId<EffectGuardId>("guard.effect.late"),
+            std::make_shared<TestEffectGuard>());
+        REQUIRE_FALSE(lateGuard.hasValue());
+        CHECK(std::string(lateGuard.error().code.value())
+              == "EffectGuard.RegistryFrozen");
         CHECK(delivered == 0U);
         auto restored = kernel.documents().snapshot(documentId);
         REQUIRE(restored.hasValue());
@@ -1589,7 +1723,7 @@ TEST_CASE("PersistenceService rolls back migration exceptions and rejects newer 
                         "CREATE TABLE schema_migrations("
                         "version INTEGER PRIMARY KEY NOT NULL,applied_at TEXT NOT NULL)")
                     .hasValue());
-        const std::array parameters {Value {std::int64_t {7}}, Value {"future"}};
+        const std::array parameters {Value {std::int64_t {8}}, Value {"future"}};
         REQUIRE(backend.value()
                     ->execute(
                         "INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)",
@@ -1973,5 +2107,464 @@ TEST_CASE("AppKernel rejects durable workflow definition drift", "[persistence][
               == "Workflow.RecoveryDefinitionMismatch");
         CHECK(kernel.state() == AppKernelState::Failed);
     }
+    removeDatabase(path);
+}
+
+TEST_CASE("External-effect recovery never replays executing work automatically", "[persistence][effect][recovery]")
+{
+    const auto path = uniqueDatabasePath();
+    removeDatabase(path);
+    const Value signature {Value::Object {
+        {"command", Value {"kernel.effect.test"}},
+        {"version", Value {"1.0.0"}}}};
+    const auto safeKey = validId<IdempotencyKey>("effect.safe");
+    const auto idempotentKey = validId<IdempotencyKey>("effect.idempotent");
+    const auto reconcileKey = validId<IdempotencyKey>("effect.reconcile");
+    const auto neverKey = validId<IdempotencyKey>("effect.never");
+
+    {
+        PersistenceService persistence;
+        configureService(persistence, path);
+        REQUIRE(persistence.claimExternalEffect(
+            safeKey, signature, ReplayPolicy::Safe).hasValue());
+        REQUIRE(persistence.claimExternalEffect(
+            idempotentKey, signature, ReplayPolicy::Idempotent).hasValue());
+        REQUIRE(persistence.claimExternalEffect(
+            reconcileKey, signature, ReplayPolicy::ReconcileOnly).hasValue());
+        REQUIRE(persistence.claimExternalEffect(
+            neverKey, signature, ReplayPolicy::Never).hasValue());
+        CHECK(persistence.externalEffect(safeKey).value()->state
+              == ExternalEffectState::Executing);
+    }
+
+    {
+        PersistenceService persistence;
+        configureService(persistence, path);
+        REQUIRE(persistence.externalEffect(safeKey).hasValue());
+        CHECK(persistence.externalEffect(safeKey).value()->state
+              == ExternalEffectState::Interrupted);
+        CHECK(persistence.externalEffect(idempotentKey).value()->state
+              == ExternalEffectState::Interrupted);
+        CHECK(persistence.externalEffect(reconcileKey).value()->state
+              == ExternalEffectState::ReconcileRequired);
+        CHECK(persistence.externalEffect(neverKey).value()->state
+              == ExternalEffectState::Indeterminate);
+
+        auto resumed = persistence.claimExternalEffect(
+            safeKey, signature, ReplayPolicy::Safe);
+        REQUIRE(resumed.hasValue());
+        CHECK(resumed.value().disposition == ExternalEffectClaimDisposition::Acquired);
+        CHECK(resumed.value().resumed);
+        const Value outcome {Value::Object {{"published", Value {true}}}};
+        REQUIRE(persistence.completeExternalEffect(safeKey, signature, outcome).hasValue());
+        auto replayed = persistence.claimExternalEffect(
+            safeKey, signature, ReplayPolicy::Safe);
+        REQUIRE(replayed.hasValue());
+        CHECK(replayed.value().disposition == ExternalEffectClaimDisposition::Replayed);
+        REQUIRE(replayed.value().replay.has_value());
+        CHECK(*replayed.value().replay == outcome);
+
+        auto idempotentRetry = persistence.claimExternalEffect(
+            idempotentKey, signature, ReplayPolicy::Idempotent);
+        REQUIRE(idempotentRetry.hasValue());
+        CHECK(idempotentRetry.value().resumed);
+        auto interrupted = persistence.interruptExternalEffect(idempotentKey, signature);
+        REQUIRE(interrupted.hasValue());
+        CHECK(interrupted.value() == RecoveryDisposition::Interrupted);
+
+        auto reconcile = persistence.claimExternalEffect(
+            reconcileKey, signature, ReplayPolicy::ReconcileOnly);
+        REQUIRE_FALSE(reconcile.hasValue());
+        CHECK(std::string(reconcile.error().code.value())
+              == "Persistence.ExternalEffectReconcileRequired");
+        auto never = persistence.claimExternalEffect(
+            neverKey, signature, ReplayPolicy::Never);
+        REQUIRE_FALSE(never.hasValue());
+        CHECK(std::string(never.error().code.value())
+              == "Persistence.ExternalEffectIndeterminate");
+
+        const Value changedSignature {Value::Object {
+            {"command", Value {"kernel.effect.changed"}}}};
+        auto conflict = persistence.claimExternalEffect(
+            safeKey, changedSignature, ReplayPolicy::Safe);
+        REQUIRE_FALSE(conflict.hasValue());
+        CHECK(std::string(conflict.error().code.value())
+              == "Persistence.ExternalEffectIdentityConflict");
+
+        auto tamper = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+        REQUIRE(tamper.hasValue());
+        const std::array tamperParameters {
+            Value {"never"}, Value {std::string(idempotentKey.value())}};
+        REQUIRE(tamper.value()->execute(
+            "UPDATE external_effects SET replay_policy=? WHERE idempotency_key=?",
+            tamperParameters).hasValue());
+        auto corrupted = persistence.externalEffect(idempotentKey);
+        REQUIRE_FALSE(corrupted.hasValue());
+        CHECK(std::string(corrupted.error().code.value())
+              == "Persistence.ExternalEffectStatePolicyMismatch");
+    }
+    removeDatabase(path);
+}
+
+TEST_CASE("CommandRuntime persists and replays completed external effects", "[runtime][effect][persistence]")
+{
+    const auto path = uniqueDatabasePath();
+    removeDatabase(path);
+    const auto session = validId<SessionId>("session.effect-completed");
+    const auto key = validId<IdempotencyKey>("effect.completed-replay");
+    constexpr auto command = "kernel.effect.publish";
+    {
+        lasercnc::kernel::AppKernel kernel;
+        auto adapter = std::make_shared<JsonconsAdapter>();
+        REQUIRE(kernel.executionServices()
+                    .configure(adapter, std::make_shared<NullLogService>())
+                    .hasValue());
+        auto handler = std::make_shared<TestEffectHandler>();
+        auto guard = std::make_shared<TestEffectGuard>();
+        REQUIRE(kernel.effectGuards().registerGuard(
+            validId<EffectGuardId>("guard.effect.publish"), guard).hasValue());
+        REQUIRE(kernel.commandRegistry().registerExternalEffectHandler(
+            externalEffectDescriptor(command, ReplayPolicy::Idempotent), handler).hasValue());
+        const std::array grants {validId<CapabilityId>("effect.publish")};
+        REQUIRE(kernel.capabilities().replace(session, grants).hasValue());
+        REQUIRE(kernel.resources().configure(
+            ResourceKind::DiskIO,
+            validId<ResourceId>("resource.effect.publish"),
+            1U).hasValue());
+        auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+        REQUIRE(backend.hasValue());
+        REQUIRE(kernel.persistence().configure(
+            std::move(backend).value(),
+            adapter,
+            std::make_shared<Sha256HashService>()).hasValue());
+        REQUIRE(kernel.bootstrap().hasValue());
+
+        auto first = kernel.commands().execute(
+            externalEffectRequest("request.effect.first", command, session, key));
+        REQUIRE(first.hasValue());
+        CHECK_FALSE(first.value().replayed);
+        REQUIRE(first.value().recoveryDisposition.has_value());
+        CHECK(*first.value().recoveryDisposition == RecoveryDisposition::Completed);
+        CHECK(handler->calls == 1U);
+        auto replay = kernel.commands().execute(
+            externalEffectRequest("request.effect.replay", command, session, key));
+        REQUIRE(replay.hasValue());
+        CHECK(replay.value().replayed);
+        CHECK(handler->calls == 1U);
+        CHECK(guard->calls == 2U);
+        auto record = kernel.persistence().externalEffect(key);
+        REQUIRE(record.hasValue());
+        REQUIRE(record.value().has_value());
+        CHECK(record.value()->state == ExternalEffectState::Completed);
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+    {
+        lasercnc::kernel::AppKernel kernel;
+        auto adapter = std::make_shared<JsonconsAdapter>();
+        REQUIRE(kernel.executionServices()
+                    .configure(adapter, std::make_shared<NullLogService>())
+                    .hasValue());
+        auto handler = std::make_shared<TestEffectHandler>();
+        REQUIRE(kernel.effectGuards().registerGuard(
+            validId<EffectGuardId>("guard.effect.publish"),
+            std::make_shared<TestEffectGuard>()).hasValue());
+        REQUIRE(kernel.commandRegistry().registerExternalEffectHandler(
+            externalEffectDescriptor(command, ReplayPolicy::Idempotent), handler).hasValue());
+        const std::array grants {validId<CapabilityId>("effect.publish")};
+        REQUIRE(kernel.capabilities().replace(session, grants).hasValue());
+        auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+        REQUIRE(backend.hasValue());
+        REQUIRE(kernel.persistence().configure(
+            std::move(backend).value(),
+            adapter,
+            std::make_shared<Sha256HashService>()).hasValue());
+        REQUIRE(kernel.bootstrap().hasValue());
+        auto replay = kernel.commands().execute(
+            externalEffectRequest("request.effect.restart", command, session, key));
+        REQUIRE(replay.hasValue());
+        CHECK(replay.value().replayed);
+        CHECK(handler->calls == 0U);
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+    removeDatabase(path);
+}
+
+TEST_CASE("Safe external effects require explicit same-key retry after failure", "[runtime][effect][recovery]")
+{
+    const auto path = uniqueDatabasePath();
+    removeDatabase(path);
+    const auto session = validId<SessionId>("session.effect-retry");
+    const auto key = validId<IdempotencyKey>("effect.explicit-retry");
+    constexpr auto command = "kernel.effect.safe-publish";
+    lasercnc::kernel::AppKernel kernel;
+    auto adapter = std::make_shared<JsonconsAdapter>();
+    REQUIRE(kernel.executionServices()
+                .configure(adapter, std::make_shared<NullLogService>())
+                .hasValue());
+    auto handler = std::make_shared<TestEffectHandler>();
+    handler->fail.store(true, std::memory_order_release);
+    auto guard = std::make_shared<TestEffectGuard>();
+    REQUIRE(kernel.effectGuards().registerGuard(
+        validId<EffectGuardId>("guard.effect.publish"), guard).hasValue());
+    REQUIRE(kernel.commandRegistry().registerExternalEffectHandler(
+        externalEffectDescriptor(command, ReplayPolicy::Safe), handler).hasValue());
+    const std::array grants {validId<CapabilityId>("effect.publish")};
+    REQUIRE(kernel.capabilities().replace(session, grants).hasValue());
+    auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+    REQUIRE(backend.hasValue());
+    REQUIRE(kernel.persistence().configure(
+        std::move(backend).value(),
+        adapter,
+        std::make_shared<Sha256HashService>()).hasValue());
+    REQUIRE(kernel.bootstrap().hasValue());
+
+    auto failed = kernel.commands().execute(
+        externalEffectRequest("request.effect.failed", command, session, key));
+    REQUIRE_FALSE(failed.hasValue());
+    CHECK(std::string(failed.error().code.value()) == "Effect.ExecutionInterrupted");
+    REQUIRE(failed.error().cause != nullptr);
+    CHECK(std::string(failed.error().cause->code.value())
+          == "Test.ExternalEffectFailed");
+    CHECK(kernel.persistence().externalEffect(key).value()->state
+          == ExternalEffectState::Interrupted);
+
+    handler->fail.store(false, std::memory_order_release);
+    auto retried = kernel.commands().execute(
+        externalEffectRequest("request.effect.retry", command, session, key));
+    REQUIRE(retried.hasValue());
+    CHECK_FALSE(retried.value().replayed);
+    CHECK(handler->calls == 2U);
+    CHECK(handler->resumed.load(std::memory_order_acquire));
+    CHECK(kernel.persistence().externalEffect(key).value()->state
+          == ExternalEffectState::Completed);
+    REQUIRE(kernel.shutdown().hasValue());
+    removeDatabase(path);
+}
+
+TEST_CASE("Effect guards fail before durable claim and handler execution", "[runtime][effect][guard]")
+{
+    const auto path = uniqueDatabasePath();
+    removeDatabase(path);
+    const auto session = validId<SessionId>("session.effect-guard");
+    const auto deniedSession = validId<SessionId>("session.effect-no-capability");
+    const auto key = validId<IdempotencyKey>("effect.guard-denied");
+    const auto deniedKey = validId<IdempotencyKey>("effect.capability-denied");
+    constexpr auto command = "kernel.effect.guarded";
+    lasercnc::kernel::AppKernel kernel;
+    auto adapter = std::make_shared<JsonconsAdapter>();
+    REQUIRE(kernel.executionServices()
+                .configure(adapter, std::make_shared<NullLogService>())
+                .hasValue());
+    auto handler = std::make_shared<TestEffectHandler>();
+    auto guard = std::make_shared<TestEffectGuard>();
+    guard->allow.store(false, std::memory_order_release);
+    REQUIRE(kernel.effectGuards().registerGuard(
+        validId<EffectGuardId>("guard.effect.publish"), guard).hasValue());
+    REQUIRE(kernel.commandRegistry().registerExternalEffectHandler(
+        externalEffectDescriptor(command, ReplayPolicy::Never), handler).hasValue());
+    const std::array grants {validId<CapabilityId>("effect.publish")};
+    REQUIRE(kernel.capabilities().replace(session, grants).hasValue());
+    auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+    REQUIRE(backend.hasValue());
+    REQUIRE(kernel.persistence().configure(
+        std::move(backend).value(),
+        adapter,
+        std::make_shared<Sha256HashService>()).hasValue());
+    REQUIRE(kernel.bootstrap().hasValue());
+
+    auto unauthorized = kernel.commands().execute(externalEffectRequest(
+        "request.effect.unauthorized", command, deniedSession, deniedKey));
+    REQUIRE_FALSE(unauthorized.hasValue());
+    CHECK(std::string(unauthorized.error().code.value()) == "Capability.Denied");
+    CHECK(guard->calls == 0U);
+    CHECK_FALSE(kernel.persistence().externalEffect(deniedKey).value().has_value());
+
+    auto denied = kernel.commands().execute(
+        externalEffectRequest("request.effect.denied", command, session, key));
+    REQUIRE_FALSE(denied.hasValue());
+    CHECK(std::string(denied.error().code.value()) == "Test.EffectGuardDenied");
+    CHECK(handler->calls == 0U);
+    CHECK(guard->calls == 1U);
+    auto record = kernel.persistence().externalEffect(key);
+    REQUIRE(record.hasValue());
+    CHECK_FALSE(record.value().has_value());
+    REQUIRE(kernel.shutdown().hasValue());
+    removeDatabase(path);
+}
+
+TEST_CASE("Unsafe external-effect failures become reconcile or indeterminate", "[runtime][effect][recovery]")
+{
+    const auto path = uniqueDatabasePath();
+    removeDatabase(path);
+    const auto session = validId<SessionId>("session.effect-unsafe");
+    constexpr auto reconcileCommand = "kernel.effect.reconcile-only";
+    constexpr auto neverCommand = "kernel.effect.never";
+    const auto reconcileKey = validId<IdempotencyKey>("effect.runtime-reconcile");
+    const auto neverKey = validId<IdempotencyKey>("effect.runtime-never");
+    lasercnc::kernel::AppKernel kernel;
+    auto adapter = std::make_shared<JsonconsAdapter>();
+    REQUIRE(kernel.executionServices()
+                .configure(adapter, std::make_shared<NullLogService>())
+                .hasValue());
+    auto handler = std::make_shared<TestEffectHandler>();
+    handler->fail.store(true, std::memory_order_release);
+    REQUIRE(kernel.effectGuards().registerGuard(
+        validId<EffectGuardId>("guard.effect.publish"),
+        std::make_shared<TestEffectGuard>()).hasValue());
+    REQUIRE(kernel.commandRegistry().registerExternalEffectHandler(
+        externalEffectDescriptor(reconcileCommand, ReplayPolicy::ReconcileOnly),
+        handler).hasValue());
+    REQUIRE(kernel.commandRegistry().registerExternalEffectHandler(
+        externalEffectDescriptor(neverCommand, ReplayPolicy::Never), handler).hasValue());
+    const std::array grants {validId<CapabilityId>("effect.publish")};
+    REQUIRE(kernel.capabilities().replace(session, grants).hasValue());
+    auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+    REQUIRE(backend.hasValue());
+    REQUIRE(kernel.persistence().configure(
+        std::move(backend).value(),
+        adapter,
+        std::make_shared<Sha256HashService>()).hasValue());
+    REQUIRE(kernel.bootstrap().hasValue());
+
+    auto reconcile = kernel.commands().execute(externalEffectRequest(
+        "request.effect.reconcile", reconcileCommand, session, reconcileKey));
+    REQUIRE_FALSE(reconcile.hasValue());
+    CHECK(std::string(reconcile.error().code.value()) == "Effect.ReconcileRequired");
+    CHECK(kernel.persistence().externalEffect(reconcileKey).value()->state
+          == ExternalEffectState::ReconcileRequired);
+    auto reconcileRetry = kernel.commands().execute(externalEffectRequest(
+        "request.effect.reconcile-retry", reconcileCommand, session, reconcileKey));
+    REQUIRE_FALSE(reconcileRetry.hasValue());
+    CHECK(std::string(reconcileRetry.error().code.value()) == "Effect.DurableClaimFailed");
+    REQUIRE(reconcileRetry.error().cause != nullptr);
+    CHECK(std::string(reconcileRetry.error().cause->code.value())
+          == "Persistence.ExternalEffectReconcileRequired");
+
+    auto never = kernel.commands().execute(externalEffectRequest(
+        "request.effect.never", neverCommand, session, neverKey));
+    REQUIRE_FALSE(never.hasValue());
+    CHECK(std::string(never.error().code.value()) == "Effect.Indeterminate");
+    CHECK(kernel.persistence().externalEffect(neverKey).value()->state
+          == ExternalEffectState::Indeterminate);
+    auto neverRetry = kernel.commands().execute(externalEffectRequest(
+        "request.effect.never-retry", neverCommand, session, neverKey));
+    REQUIRE_FALSE(neverRetry.hasValue());
+    CHECK(std::string(neverRetry.error().code.value()) == "Effect.DurableClaimFailed");
+    REQUIRE(neverRetry.error().cause != nullptr);
+    CHECK(std::string(neverRetry.error().cause->code.value())
+          == "Persistence.ExternalEffectIndeterminate");
+    CHECK(handler->calls == 2U);
+    REQUIRE(kernel.shutdown().hasValue());
+    removeDatabase(path);
+}
+
+TEST_CASE("External effects require registered guards and durable persistence at bootstrap", "[kernel][effect][guard]")
+{
+    constexpr auto command = "kernel.effect.bootstrap-validation";
+    const auto path = uniqueDatabasePath();
+    removeDatabase(path);
+    {
+        lasercnc::kernel::AppKernel kernel;
+        auto adapter = std::make_shared<JsonconsAdapter>();
+        REQUIRE(kernel.executionServices()
+                    .configure(adapter, std::make_shared<NullLogService>())
+                    .hasValue());
+        REQUIRE(kernel.commandRegistry().registerExternalEffectHandler(
+            externalEffectDescriptor(command, ReplayPolicy::Never),
+            std::make_shared<TestEffectHandler>()).hasValue());
+        auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+        REQUIRE(backend.hasValue());
+        REQUIRE(kernel.persistence().configure(
+            std::move(backend).value(),
+            adapter,
+            std::make_shared<Sha256HashService>()).hasValue());
+        auto bootstrapped = kernel.bootstrap();
+        REQUIRE_FALSE(bootstrapped.hasValue());
+        CHECK(std::string(bootstrapped.error().code.value())
+              == "Effect.RegistryValidationFailed");
+        REQUIRE(bootstrapped.error().cause != nullptr);
+        CHECK(std::string(bootstrapped.error().cause->code.value())
+              == "EffectGuard.CommandRequirementMissing");
+    }
+    removeDatabase(path);
+    {
+        lasercnc::kernel::AppKernel kernel;
+        auto adapter = std::make_shared<JsonconsAdapter>();
+        REQUIRE(kernel.executionServices()
+                    .configure(adapter, std::make_shared<NullLogService>())
+                    .hasValue());
+        REQUIRE(kernel.effectGuards().registerGuard(
+            validId<EffectGuardId>("guard.effect.publish"),
+            std::make_shared<TestEffectGuard>()).hasValue());
+        REQUIRE(kernel.commandRegistry().registerExternalEffectHandler(
+            externalEffectDescriptor(command, ReplayPolicy::Never),
+            std::make_shared<TestEffectHandler>()).hasValue());
+        auto bootstrapped = kernel.bootstrap();
+        REQUIRE_FALSE(bootstrapped.hasValue());
+        CHECK(std::string(bootstrapped.error().code.value())
+              == "Effect.RegistryValidationFailed");
+        REQUIRE(bootstrapped.error().cause != nullptr);
+        CHECK(std::string(bootstrapped.error().cause->code.value())
+              == "Effect.PersistenceRequired");
+    }
+}
+
+TEST_CASE("External effects acquire guards before exclusive resources and durable claims", "[runtime][effect][resource]")
+{
+    const auto path = uniqueDatabasePath();
+    removeDatabase(path);
+    const auto session = validId<SessionId>("session.effect-resource");
+    const auto firstKey = validId<IdempotencyKey>("effect.resource-first");
+    const auto secondKey = validId<IdempotencyKey>("effect.resource-second");
+    constexpr auto command = "kernel.effect.resource-order";
+    lasercnc::kernel::AppKernel kernel;
+    auto adapter = std::make_shared<JsonconsAdapter>();
+    REQUIRE(kernel.executionServices()
+                .configure(adapter, std::make_shared<NullLogService>())
+                .hasValue());
+    auto handler = std::make_shared<BlockingEffectHandler>();
+    auto guard = std::make_shared<TestEffectGuard>();
+    REQUIRE(kernel.effectGuards().registerGuard(
+        validId<EffectGuardId>("guard.effect.publish"), guard).hasValue());
+    REQUIRE(kernel.commandRegistry().registerExternalEffectHandler(
+        externalEffectDescriptor(command, ReplayPolicy::Idempotent), handler).hasValue());
+    const std::array grants {validId<CapabilityId>("effect.publish")};
+    REQUIRE(kernel.capabilities().replace(session, grants).hasValue());
+    REQUIRE(kernel.resources().configure(
+        ResourceKind::DiskIO,
+        validId<ResourceId>("resource.effect.publish"),
+        1U).hasValue());
+    auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+    REQUIRE(backend.hasValue());
+    REQUIRE(kernel.persistence().configure(
+        std::move(backend).value(),
+        adapter,
+        std::make_shared<Sha256HashService>()).hasValue());
+    REQUIRE(kernel.bootstrap().hasValue());
+
+    std::optional<Result<CommandResponse>> firstResult;
+    std::thread first([&]() {
+        firstResult = kernel.commands().execute(externalEffectRequest(
+            "request.effect.resource-first", command, session, firstKey));
+    });
+    handler->waitUntilEntered();
+    auto second = kernel.commands().execute(externalEffectRequest(
+        "request.effect.resource-second", command, session, secondKey));
+    handler->release();
+    first.join();
+    REQUIRE_FALSE(second.hasValue());
+    CHECK(std::string(second.error().code.value()) == "Effect.ResourceBusy");
+    CHECK(handler->calls == 1U);
+    CHECK(guard->calls == 2U);
+    auto secondRecord = kernel.persistence().externalEffect(secondKey);
+    REQUIRE(secondRecord.hasValue());
+    CHECK_FALSE(secondRecord.value().has_value());
+
+    REQUIRE(firstResult.has_value());
+    REQUIRE(firstResult->hasValue());
+    const auto availability = kernel.resources().snapshot();
+    REQUIRE(availability.size() == 1U);
+    CHECK_FALSE(availability.front().exclusivelyHeld);
+    REQUIRE(kernel.shutdown().hasValue());
     removeDatabase(path);
 }

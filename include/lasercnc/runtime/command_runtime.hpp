@@ -28,6 +28,7 @@ namespace lasercnc::runtime {
 class CapabilityService;
 class CommandRegistry;
 class ExecutionServices;
+class EffectExecutor;
 class TransactionManager;
 class TaskRuntime;
 
@@ -44,6 +45,7 @@ public:
     CommandRuntime(
         CommandRegistry& registry,
         const state::DocumentStore& documents,
+        EffectExecutor& effects,
         TransactionManager& transactions,
         CapabilityService& capabilities,
         messaging::EventBus& events,

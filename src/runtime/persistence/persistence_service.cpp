@@ -409,7 +409,7 @@ foundation::Result<void> PersistenceService::initialize()
         if(!version) {
             return rollback(*backend_, std::move(version).error());
         }
-        if(version.value() > 6) {
+        if(version.value() > 7) {
             return rollback(*backend_, persistenceError(
                 "Persistence.SchemaTooNew",
                 foundation::ErrorCategory::Conflict,
@@ -522,6 +522,25 @@ foundation::Result<void> PersistenceService::initialize()
         if(!workflowStatusIndex) {
             return rollback(*backend_, std::move(workflowStatusIndex).error());
         }
+        auto externalEffects = backend_->execute(
+            "CREATE TABLE IF NOT EXISTS external_effects("
+            "idempotency_key TEXT PRIMARY KEY NOT NULL,signature_payload TEXT NOT NULL,"
+            "signature_digest TEXT NOT NULL,replay_policy TEXT NOT NULL,state TEXT NOT NULL,"
+            "outcome_payload TEXT,outcome_digest TEXT,started_at_ms INTEGER NOT NULL,"
+            "updated_at_ms INTEGER NOT NULL)");
+        if(!externalEffects) {
+            return rollback(*backend_, std::move(externalEffects).error());
+        }
+        auto interruptedEffects = backend_->execute(
+            "UPDATE external_effects SET state=CASE replay_policy "
+            "WHEN 'safe' THEN 'interrupted' "
+            "WHEN 'idempotent' THEN 'interrupted' "
+            "WHEN 'reconcile_only' THEN 'reconcile_required' "
+            "ELSE 'indeterminate' END "
+            "WHERE state='executing'");
+        if(!interruptedEffects) {
+            return rollback(*backend_, std::move(interruptedEffects).error());
+        }
         const std::array migrationParameters {foundation::Value {std::int64_t {1}}};
         auto recorded = backend_->execute(
             "INSERT OR IGNORE INTO schema_migrations(version,applied_at) "
@@ -574,6 +593,15 @@ foundation::Result<void> PersistenceService::initialize()
             workflowMigrationParameters);
         if(!workflowMigration) {
             return rollback(*backend_, std::move(workflowMigration).error());
+        }
+        const std::array externalEffectMigrationParameters {
+            foundation::Value {std::int64_t {7}}};
+        auto externalEffectMigration = backend_->execute(
+            "INSERT OR IGNORE INTO schema_migrations(version,applied_at) "
+            "VALUES(?,CURRENT_TIMESTAMP)",
+            externalEffectMigrationParameters);
+        if(!externalEffectMigration) {
+            return rollback(*backend_, std::move(externalEffectMigration).error());
         }
         auto committed = backend_->commitTransaction();
         if(!committed) {

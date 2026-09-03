@@ -10,6 +10,8 @@
 
 namespace lasercnc::runtime {
 
+class EffectExecutor;
+
 struct ResourceAvailability final {
     ResourceKind kind{ResourceKind::CPU};
     kernel::ResourceId resource;
@@ -29,6 +31,7 @@ public:
     [[nodiscard]] std::vector<ResourceAvailability> snapshot() const;
 
 private:
+    friend class EffectExecutor;
     friend class Scheduler;
 
     struct Key final {

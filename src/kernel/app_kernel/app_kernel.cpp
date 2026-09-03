@@ -37,11 +37,13 @@ AppKernel::AppKernel()
       transactions_(documents_, &persistence_),
       workflowRegistry_(commandRegistry_, queryRegistry_),
       scriptRegistry_(commandRegistry_, queryRegistry_, workflowRegistry_),
+      effects_(effectGuards_, resources_, documents_, persistence_),
       scheduler_(resources_, persistence_, traces_, metrics_),
       tasks_(taskRegistry_, scheduler_, executionServices_, documents_, persistence_),
       commands_(
           commandRegistry_,
           documents_,
+          effects_,
           transactions_,
           capabilities_,
           events_,
@@ -201,6 +203,21 @@ foundation::Result<void> AppKernel::bootstrap()
                 : std::make_shared<const foundation::Error>(std::move(stopped).error())));
     }
 
+    auto effectsValidated = effects_.validate(commandRegistry_.descriptors());
+    if(!effectsValidated) {
+        auto stopped = modules_.shutdown(*this);
+        state_ = AppKernelState::Failed;
+        return foundation::Result<void>::failure(foundation::makeError(
+            "Effect.RegistryValidationFailed",
+            foundation::ErrorCategory::Validation,
+            "The external-effect execution contract could not be frozen",
+            foundation::Value {},
+            foundation::Severity::Error,
+            std::make_shared<const foundation::Error>(
+                stopped.hasValue() ? std::move(effectsValidated).error()
+                                   : std::move(stopped).error())));
+    }
+
     auto workflowsValidated = workflowRegistry_.validateAndFreeze();
     if(!workflowsValidated) {
         auto stopped = modules_.shutdown(*this);
@@ -264,8 +281,10 @@ foundation::Result<void> AppKernel::bootstrap()
     services_.freeze();
     executionServices_.freeze();
     commandRegistry_.freeze();
+    effectGuards_.freeze();
     queryRegistry_.freeze();
     taskRegistry_.freeze();
+    resources_.freeze();
     persistence_.freeze();
     traces_.freeze();
     metrics_.freeze();
@@ -422,6 +441,16 @@ runtime::CommandRegistry& AppKernel::commandRegistry() noexcept
 const runtime::CommandRegistry& AppKernel::commandRegistry() const noexcept
 {
     return commandRegistry_;
+}
+
+runtime::EffectGuardRegistry& AppKernel::effectGuards() noexcept
+{
+    return effectGuards_;
+}
+
+const runtime::EffectGuardRegistry& AppKernel::effectGuards() const noexcept
+{
+    return effectGuards_;
 }
 
 runtime::QueryRegistry& AppKernel::queryRegistry() noexcept

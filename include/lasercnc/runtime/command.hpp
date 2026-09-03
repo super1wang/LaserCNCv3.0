@@ -46,6 +46,9 @@ struct CommandDescriptor final {
     bool idempotent{false};
     ContractStatus status{ContractStatus::Active};
     ExecutionScope scope{ExecutionScope::Document};
+    ReplayPolicy replayPolicy{ReplayPolicy::Never};
+    std::vector<kernel::EffectGuardId> effectGuards;
+    std::vector<ResourceClaim> resources;
 };
 
 struct CommandRequest final {
@@ -86,6 +89,21 @@ public:
         const ReadOnlyCommandContext& context) = 0;
 };
 
+struct ExternalEffectContext final {
+    std::optional<state::Document> document;
+    ResourceContext resources;
+    bool resumed{false};
+};
+
+class IExternalEffectHandler {
+public:
+    virtual ~IExternalEffectHandler() = default;
+
+    [[nodiscard]] virtual foundation::Result<foundation::Value> execute(
+        const CommandRequest& request,
+        const ExternalEffectContext& context) = 0;
+};
+
 struct AsyncCommandPlan final {
     TaskRequest task;
     foundation::Value acceptance;
@@ -107,6 +125,7 @@ struct CommandResponse final {
     bool replayed{false};
     foundation::Version resolvedVersion;
     ContractStatus contractStatus{ContractStatus::Active};
+    std::optional<RecoveryDisposition> recoveryDisposition;
 };
 
 } // namespace lasercnc::runtime

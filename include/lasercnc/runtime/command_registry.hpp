@@ -27,6 +27,9 @@ public:
     [[nodiscard]] foundation::Result<void> registerReadOnlyHandler(
         CommandDescriptor descriptor,
         std::shared_ptr<IReadOnlyCommandHandler> handler);
+    [[nodiscard]] foundation::Result<void> registerExternalEffectHandler(
+        CommandDescriptor descriptor,
+        std::shared_ptr<IExternalEffectHandler> handler);
     [[nodiscard]] foundation::Result<CommandDescriptor> descriptor(
         const CommandKey& key,
         VersionResolution resolution = VersionResolution::Exact) const;
@@ -43,6 +46,7 @@ private:
         std::shared_ptr<ICommandHandler> handler;
         std::shared_ptr<IAsyncCommandHandler> asyncHandler;
         std::shared_ptr<IReadOnlyCommandHandler> readOnlyHandler;
+        std::shared_ptr<IExternalEffectHandler> externalEffectHandler;
     };
 
     [[nodiscard]] foundation::Result<Entry> resolve(

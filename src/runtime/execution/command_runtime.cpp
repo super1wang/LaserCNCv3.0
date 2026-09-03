@@ -9,6 +9,7 @@
 #include <lasercnc/runtime/capability_service.hpp>
 #include <lasercnc/runtime/command_registry.hpp>
 #include <lasercnc/runtime/execution_services.hpp>
+#include <lasercnc/runtime/effect_executor.hpp>
 #include <lasercnc/runtime/transaction_manager.hpp>
 #include <lasercnc/runtime/task_runtime.hpp>
 #include <lasercnc/state/document_store.hpp>
@@ -28,6 +29,12 @@
 
 namespace lasercnc::runtime {
 namespace {
+
+bool isExternalSideEffect(SideEffectLevel sideEffect) noexcept
+{
+    return sideEffect != SideEffectLevel::ReadOnly
+        && sideEffect != SideEffectLevel::DocumentWrite;
+}
 
 foundation::Error commandError(
     const char* code,
@@ -250,6 +257,7 @@ public:
     Impl(
         CommandRegistry& commandRegistry,
         const state::DocumentStore& documentStore,
+        EffectExecutor& effectExecutor,
         TransactionManager& transactionManager,
         CapabilityService& capabilityService,
         messaging::EventBus& eventBus,
@@ -261,6 +269,7 @@ public:
         std::size_t capacity)
         : registry(commandRegistry),
           documents(documentStore),
+          effects(effectExecutor),
           transactions(transactionManager),
           capabilities(capabilityService),
           events(eventBus),
@@ -324,6 +333,13 @@ public:
         }
     }
 
+    bool isExternalEffectRequest(const CommandRequest& request) const
+    {
+        auto entry = registry.resolve(
+            CommandKey {request.command, request.version}, request.versionResolution);
+        return entry && isExternalSideEffect(entry.value().descriptor.sideEffect);
+    }
+
     foundation::Result<CommandResponse> executeOnce(
         const CommandRequest& request,
         std::optional<kernel::SpanId> activeSpanId)
@@ -368,6 +384,50 @@ public:
         if(!authorized.hasValue()) {
             logFailure(services.value(), request, &descriptor.version);
             return foundation::Result<CommandResponse>::failure(std::move(authorized).error());
+        }
+
+        if(isExternalSideEffect(descriptor.sideEffect)) {
+            auto executed = effects.execute(
+                request,
+                descriptor,
+                entry.value().externalEffectHandler,
+                *services.value().schemaValidator);
+            if(!executed) {
+                logFailure(services.value(), request, &descriptor.version);
+                return foundation::Result<CommandResponse>::failure(
+                    std::move(executed).error());
+            }
+            auto effect = std::move(executed).value();
+            CommandResponse response {
+                std::move(effect.result),
+                std::nullopt,
+                std::nullopt,
+                {},
+                effect.replayed,
+                descriptor.version,
+                descriptor.status,
+                effect.disposition};
+            try {
+                auto logged = services.value().logService->write(commandLog(
+                    request,
+                    observability::LogLevel::Info,
+                    effect.replayed ? "replayed" : "success",
+                    &descriptor.version));
+                if(!logged) {
+                    response.postExecutionErrors.push_back(std::move(logged).error());
+                }
+            } catch(const std::exception& exception) {
+                try {
+                    response.postExecutionErrors.push_back(commandError(
+                        "Command.PostExecutionIntegrationFailed",
+                        foundation::ErrorCategory::Internal,
+                        exception.what(),
+                        request));
+                } catch(...) {
+                }
+            } catch(...) {
+            }
+            return foundation::Result<CommandResponse>::success(std::move(response));
         }
 
         if(descriptor.executionMode == ExecutionMode::Synchronous
@@ -774,6 +834,7 @@ public:
 
     CommandRegistry& registry;
     const state::DocumentStore& documents;
+    EffectExecutor& effects;
     TransactionManager& transactions;
     CapabilityService& capabilities;
     messaging::EventBus& events;
@@ -793,6 +854,7 @@ public:
 CommandRuntime::CommandRuntime(
     CommandRegistry& registry,
     const state::DocumentStore& documents,
+    EffectExecutor& effects,
     TransactionManager& transactions,
     CapabilityService& capabilities,
     messaging::EventBus& events,
@@ -805,6 +867,7 @@ CommandRuntime::CommandRuntime(
     : impl_(std::make_unique<Impl>(
           registry,
           documents,
+          effects,
           transactions,
           capabilities,
           events,
@@ -836,7 +899,8 @@ foundation::Result<CommandResponse> CommandRuntime::execute(const CommandRequest
         }
         ActiveExecution active(impl_->activeExecutions);
 
-        if(!request.idempotencyKey.has_value()) {
+        if(!request.idempotencyKey.has_value()
+           || impl_->isExternalEffectRequest(request)) {
             return impl_->executeSafe(request, activeSpanId);
         }
 

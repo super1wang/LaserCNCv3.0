@@ -1,6 +1,7 @@
 #include <lasercnc/runtime/capability_service.hpp>
 #include <lasercnc/runtime/command_registry.hpp>
 #include <lasercnc/runtime/execution_services.hpp>
+#include <lasercnc/runtime/effect_guard.hpp>
 #include <lasercnc/runtime/query_registry.hpp>
 
 #include <catch2/catch_test_macros.hpp>
@@ -92,6 +93,25 @@ public:
     Result<Value> execute(const CommandRequest&, const ReadOnlyCommandContext&) override
     {
         return Result<Value>::success(Value {});
+    }
+};
+
+class ExternalEffectHandler final : public IExternalEffectHandler {
+public:
+    Result<Value> execute(const CommandRequest&, const ExternalEffectContext&) override
+    {
+        return Result<Value>::success(Value {});
+    }
+};
+
+class AllowEffectGuard final : public IEffectGuard {
+public:
+    Result<void> evaluate(
+        const CommandRequest&,
+        const CommandDescriptor&,
+        const EffectGuardContext&) override
+    {
+        return Result<void>::success();
     }
 };
 
@@ -244,7 +264,82 @@ TEST_CASE("CommandRegistry keeps synchronous read-only handlers outside transact
     REQUIRE_FALSE(wrongIdempotency.hasValue());
     CHECK(std::string(wrongIdempotency.error().code.value())
           == "Command.ReadOnlyIdempotencyUnsupported");
+    auto externalMetadata = descriptor;
+    externalMetadata.name = validId<CommandName>("kernel.command.read-only-effect-metadata");
+    externalMetadata.effectGuards = {validId<EffectGuardId>("guard.invalid")};
+    auto metadataRejected = registry.registerReadOnlyHandler(externalMetadata, handler);
+    REQUIRE_FALSE(metadataRejected.hasValue());
+    CHECK(std::string(metadataRejected.error().code.value())
+          == "Command.ExternalMetadataUnsupported");
     CHECK_FALSE(registry.registerReadOnlyHandler(descriptor, nullptr).hasValue());
+}
+
+TEST_CASE("External effect registration requires replay guard resource and stable identity", "[runtime][command][effect]")
+{
+    CommandRegistry registry;
+    auto handler = std::make_shared<ExternalEffectHandler>();
+    auto descriptor = commandDescriptor("kernel.command.external-effect");
+    descriptor.sideEffect = SideEffectLevel::Publish;
+    descriptor.scope = ExecutionScope::Global;
+    descriptor.replayPolicy = ReplayPolicy::ReconcileOnly;
+    descriptor.effectGuards = {validId<EffectGuardId>("guard.publish")};
+    descriptor.resources = {ResourceClaim {
+        ResourceKind::DiskIO,
+        validId<ResourceId>("resource.publish"),
+        ResourceAccess::Exclusive,
+        1U}};
+    REQUIRE(registry.registerExternalEffectHandler(descriptor, handler).hasValue());
+
+    auto noIdentity = descriptor;
+    noIdentity.name = validId<CommandName>("kernel.command.external-no-identity");
+    noIdentity.idempotent = false;
+    auto identityRejected = registry.registerExternalEffectHandler(noIdentity, handler);
+    REQUIRE_FALSE(identityRejected.hasValue());
+    CHECK(std::string(identityRejected.error().code.value())
+          == "Command.ExternalIdempotencyRequired");
+
+    auto noGuard = descriptor;
+    noGuard.name = validId<CommandName>("kernel.command.external-no-guard");
+    noGuard.effectGuards.clear();
+    auto guardRejected = registry.registerExternalEffectHandler(noGuard, handler);
+    REQUIRE_FALSE(guardRejected.hasValue());
+    CHECK(std::string(guardRejected.error().code.value())
+          == "Command.EffectGuardRequired");
+
+    auto noResource = descriptor;
+    noResource.name = validId<CommandName>("kernel.command.external-no-resource");
+    noResource.resources.clear();
+    auto resourceRejected = registry.registerExternalEffectHandler(noResource, handler);
+    REQUIRE_FALSE(resourceRejected.hasValue());
+    CHECK(std::string(resourceRejected.error().code.value())
+          == "Command.EffectResourceRequired");
+
+    auto undoable = descriptor;
+    undoable.name = validId<CommandName>("kernel.command.external-undoable");
+    undoable.undoable = true;
+    CHECK_FALSE(registry.registerExternalEffectHandler(undoable, handler).hasValue());
+    auto invalidSideEffect = descriptor;
+    invalidSideEffect.name = validId<CommandName>("kernel.command.external-invalid-effect");
+    invalidSideEffect.sideEffect = static_cast<SideEffectLevel>(255U);
+    CHECK_FALSE(registry.registerExternalEffectHandler(invalidSideEffect, handler).hasValue());
+    auto zeroUnits = descriptor;
+    zeroUnits.name = validId<CommandName>("kernel.command.external-zero-resource");
+    zeroUnits.resources.front().units = 0U;
+    CHECK_FALSE(registry.registerExternalEffectHandler(zeroUnits, handler).hasValue());
+    CHECK_FALSE(registry.registerExternalEffectHandler(descriptor, nullptr).hasValue());
+}
+
+TEST_CASE("EffectGuardRegistry freezes stable guard identities", "[runtime][effect][guard]")
+{
+    EffectGuardRegistry guards;
+    const auto id = validId<EffectGuardId>("guard.machine-ready");
+    auto guard = std::make_shared<AllowEffectGuard>();
+    REQUIRE(guards.registerGuard(id, guard).hasValue());
+    REQUIRE(guards.guard(id).hasValue());
+    CHECK(guards.ids() == std::vector<EffectGuardId> {id});
+    CHECK_FALSE(guards.registerGuard(id, guard).hasValue());
+    CHECK_FALSE(guards.registerGuard(
+        validId<EffectGuardId>("guard.null"), nullptr).hasValue());
 }
 
 TEST_CASE("QueryRegistry resolves exact compatible and deprecated versions", "[runtime][query]")

@@ -44,4 +44,82 @@ bool contextMatchesScope(
     return false;
 }
 
+std::string_view replayPolicyName(ReplayPolicy policy) noexcept
+{
+    switch(policy) {
+    case ReplayPolicy::Safe: return "safe";
+    case ReplayPolicy::Idempotent: return "idempotent";
+    case ReplayPolicy::ReconcileOnly: return "reconcile_only";
+    case ReplayPolicy::Never: return "never";
+    }
+    return "unknown";
+}
+
+bool validReplayPolicy(ReplayPolicy policy) noexcept
+{
+    switch(policy) {
+    case ReplayPolicy::Safe:
+    case ReplayPolicy::Idempotent:
+    case ReplayPolicy::ReconcileOnly:
+    case ReplayPolicy::Never:
+        return true;
+    }
+    return false;
+}
+
+std::string_view recoveryDispositionName(RecoveryDisposition disposition) noexcept
+{
+    switch(disposition) {
+    case RecoveryDisposition::Completed: return "completed";
+    case RecoveryDisposition::Interrupted: return "interrupted";
+    case RecoveryDisposition::Indeterminate: return "indeterminate";
+    case RecoveryDisposition::ReconcileRequired: return "reconcile_required";
+    }
+    return "unknown";
+}
+
+std::string_view externalEffectStateName(ExternalEffectState state) noexcept
+{
+    switch(state) {
+    case ExternalEffectState::Executing: return "executing";
+    case ExternalEffectState::Completed: return "completed";
+    case ExternalEffectState::Interrupted: return "interrupted";
+    case ExternalEffectState::Indeterminate: return "indeterminate";
+    case ExternalEffectState::ReconcileRequired: return "reconcile_required";
+    }
+    return "unknown";
+}
+
+bool validExternalEffectState(ExternalEffectState state) noexcept
+{
+    switch(state) {
+    case ExternalEffectState::Executing:
+    case ExternalEffectState::Completed:
+    case ExternalEffectState::Interrupted:
+    case ExternalEffectState::Indeterminate:
+    case ExternalEffectState::ReconcileRequired:
+        return true;
+    }
+    return false;
+}
+
+RecoveryDisposition interruptedDisposition(ReplayPolicy policy) noexcept
+{
+    switch(policy) {
+    case ReplayPolicy::Safe:
+    case ReplayPolicy::Idempotent:
+        return RecoveryDisposition::Interrupted;
+    case ReplayPolicy::ReconcileOnly:
+        return RecoveryDisposition::ReconcileRequired;
+    case ReplayPolicy::Never:
+        return RecoveryDisposition::Indeterminate;
+    }
+    return RecoveryDisposition::Indeterminate;
+}
+
+bool explicitRetryAllowed(ReplayPolicy policy) noexcept
+{
+    return policy == ReplayPolicy::Safe || policy == ReplayPolicy::Idempotent;
+}
+
 } // namespace lasercnc::runtime

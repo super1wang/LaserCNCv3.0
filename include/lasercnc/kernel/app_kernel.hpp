@@ -13,6 +13,8 @@
 #include <lasercnc/runtime/command_registry.hpp>
 #include <lasercnc/runtime/command_runtime.hpp>
 #include <lasercnc/runtime/execution_services.hpp>
+#include <lasercnc/runtime/effect_executor.hpp>
+#include <lasercnc/runtime/effect_guard.hpp>
 #include <lasercnc/runtime/query_registry.hpp>
 #include <lasercnc/runtime/query_runtime.hpp>
 #include <lasercnc/runtime/resource_manager.hpp>
@@ -70,6 +72,8 @@ public:
     [[nodiscard]] const messaging::EventBus& events() const noexcept;
     [[nodiscard]] runtime::CommandRegistry& commandRegistry() noexcept;
     [[nodiscard]] const runtime::CommandRegistry& commandRegistry() const noexcept;
+    [[nodiscard]] runtime::EffectGuardRegistry& effectGuards() noexcept;
+    [[nodiscard]] const runtime::EffectGuardRegistry& effectGuards() const noexcept;
     [[nodiscard]] runtime::QueryRegistry& queryRegistry() noexcept;
     [[nodiscard]] const runtime::QueryRegistry& queryRegistry() const noexcept;
     [[nodiscard]] runtime::WorkflowRegistry& workflowRegistry() noexcept;
@@ -115,11 +119,13 @@ private:
     observability::LocalMetricsService metrics_;
     observability::DiagnosticsService diagnostics_;
     runtime::CommandRegistry commandRegistry_;
+    runtime::EffectGuardRegistry effectGuards_;
     runtime::QueryRegistry queryRegistry_;
     runtime::WorkflowRegistry workflowRegistry_;
     runtime::ScriptRegistry scriptRegistry_;
     runtime::TaskRegistry taskRegistry_;
     runtime::ResourceManager resources_;
+    runtime::EffectExecutor effects_;
     std::unique_ptr<platform::ITaskExecutor> taskExecutor_;
     runtime::Scheduler scheduler_;
     runtime::TaskRuntime tasks_;
