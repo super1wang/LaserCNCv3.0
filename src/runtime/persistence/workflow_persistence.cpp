@@ -14,6 +14,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <stdexcept>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -210,18 +211,29 @@ const char* stepStateName(runtime::WorkflowStepState state) noexcept
     return "unknown";
 }
 
-foundation::Value errorValue(const std::optional<foundation::Error>& error)
+constexpr std::size_t maximumErrorChainDepth = 32U;
+
+foundation::Value errorValue(
+    const std::optional<foundation::Error>& error,
+    std::size_t depth = 0U)
 {
     if(!error.has_value()) {
         return foundation::Value {};
     }
-    return foundation::Value {foundation::Value::Object {
+    if(depth >= maximumErrorChainDepth) {
+        throw std::length_error("Workflow error cause chain exceeds 32 nodes");
+    }
+    foundation::Value::Object payload {
         {"category", foundation::Value {static_cast<std::int64_t>(error->category)}},
         {"code", foundation::Value {std::string(error->code.value())}},
         {"details", error->details},
         {"message", foundation::Value {error->message}},
         {"severity", foundation::Value {static_cast<std::int64_t>(error->severity)}},
-    }};
+    };
+    if(error->cause) {
+        payload.emplace("cause", errorValue(*error->cause, depth + 1U));
+    }
+    return foundation::Value {std::move(payload)};
 }
 
 foundation::Value optionalTimeValue(
@@ -427,7 +439,8 @@ foundation::Result<std::optional<std::chrono::system_clock::time_point>> parseOp
 }
 
 foundation::Result<std::optional<foundation::Error>> parseError(
-    const foundation::Value& value)
+    const foundation::Value& value,
+    std::size_t depth = 0U)
 {
     if(value.kind() == foundation::Value::Kind::Null) {
         return foundation::Result<std::optional<foundation::Error>>::success(std::nullopt);
@@ -446,7 +459,8 @@ foundation::Result<std::optional<foundation::Error>> parseError(
     const auto* severity = severityValue == nullptr
         ? nullptr
         : severityValue->getIf<std::int64_t>();
-    if(code == nullptr || code->empty() || message == nullptr || category == nullptr
+    if(depth >= maximumErrorChainDepth || code == nullptr || code->empty()
+       || message == nullptr || category == nullptr
        || severity == nullptr || details == nullptr || *category < 0
        || *category > static_cast<std::int64_t>(foundation::ErrorCategory::Internal)
        || *severity < 0
@@ -457,13 +471,26 @@ foundation::Result<std::optional<foundation::Error>> parseError(
                 foundation::ErrorCategory::Infrastructure,
                 "A workflow error payload is invalid"));
     }
+    std::shared_ptr<const foundation::Error> cause;
+    // Legacy checkpoints have no cause field. Present causes must still be valid and bounded.
+    // 中文翻译：旧检查点没有 cause 字段；新字段一旦存在，必须合法且不超过链深度限制。
+    if(const auto* causeValue = field(*object, "cause")) {
+        auto parsed = parseError(*causeValue, depth + 1U);
+        if(!parsed) {
+            return foundation::Result<std::optional<foundation::Error>>::failure(std::move(parsed).error());
+        }
+        if(parsed.value()) {
+            cause = std::make_shared<const foundation::Error>(std::move(*parsed.value()));
+        }
+    }
     return foundation::Result<std::optional<foundation::Error>>::success(
         foundation::makeError(
             *code,
             static_cast<foundation::ErrorCategory>(*category),
             *message,
             *details,
-            static_cast<foundation::Severity>(*severity)));
+            static_cast<foundation::Severity>(*severity),
+            std::move(cause)));
 }
 
 foundation::Result<runtime::WorkflowState> parseWorkflowState(std::string_view value)

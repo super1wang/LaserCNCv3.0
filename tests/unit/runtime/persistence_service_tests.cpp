@@ -2572,6 +2572,120 @@ TEST_CASE("Workflow checkpoints round trip and fail closed on step tampering", "
     removeDatabase(path);
 }
 
+TEST_CASE("Workflow checkpoint errors preserve bounded cause chains and legacy leaves", "[persistence][workflow][error-chain]")
+{
+    const auto depth = GENERATE(1U, 32U);
+    const auto path = uniqueDatabasePath();
+    const auto request = persistentWorkflowRequest("workflow.error-chain");
+    const auto definition = persistentWorkflowDefinition(false);
+    std::shared_ptr<const Error> cause;
+    for(unsigned int index = 0U; index < depth; ++index) {
+        cause = std::make_shared<const Error>(makeError("Test.Cause" + std::to_string(index),
+            ErrorCategory::Infrastructure, "durable diagnostic", Value{std::to_string(index)}, Severity::Warning, cause));
+    }
+    auto snapshot = persistentWorkflowSnapshot(request, WorkflowState::Failed, WorkflowStepState::Failed, 1U);
+    snapshot.error = *cause;
+    snapshot.steps.front().error = *cause;
+    snapshot.compensationErrors = {*cause};
+    {
+        PersistenceService persistence;
+        configureService(persistence, path);
+        REQUIRE(persistence.saveWorkflowCheckpoint(request, definition, snapshot, {}).hasValue());
+    }
+    {
+        PersistenceService reopened;
+        configureService(reopened, path);
+        const auto checkpoint = reopened.workflowCheckpoint(request.workflowId);
+        REQUIRE(checkpoint.hasValue());
+        REQUIRE(checkpoint.value().has_value());
+        const auto& restored = checkpoint.value()->snapshot;
+        REQUIRE(restored.error.has_value());
+        REQUIRE(restored.steps.front().error.has_value());
+        REQUIRE(restored.compensationErrors.size() == 1U);
+        for(const auto* error : {&*restored.error, &*restored.steps.front().error, &restored.compensationErrors.front()}) {
+            auto remaining = depth;
+            for(auto current = error; current; current = current->cause.get()) {
+                REQUIRE(remaining > 0U);
+                --remaining;
+                CHECK(std::string(current->code.value()) == "Test.Cause" + std::to_string(remaining));
+                CHECK(current->category == ErrorCategory::Infrastructure);
+                CHECK(current->severity == Severity::Warning);
+                CHECK(current->message == "durable diagnostic");
+                CHECK(current->details == Value{std::to_string(remaining)});
+            }
+            CHECK(remaining == 0U);
+        }
+        auto oversized = cause;
+        for(auto index = depth; index < 33U; ++index) {
+            oversized = std::make_shared<const Error>(makeError("Test.TooDeep", ErrorCategory::Internal,
+                "too deep", Value{}, Severity::Error, oversized));
+        }
+        auto rejected = snapshot;
+        rejected.error = *oversized;
+        const auto saved = reopened.saveWorkflowCheckpoint(request, definition, rejected, {});
+        REQUIRE_FALSE(saved.hasValue());
+        CHECK(std::string(saved.error().code.value()) == "Persistence.SaveWorkflowFailed");
+        const auto retained = reopened.workflowCheckpoint(request.workflowId);
+        REQUIRE(retained.hasValue());
+        REQUIRE(retained.value().has_value());
+        REQUIRE(retained.value()->snapshot.error.has_value());
+        CHECK(retained.value()->snapshot.error->code == cause->code);
+        auto raw = SqlitePersistenceBackend::open({path});
+        REQUIRE(raw.hasValue());
+        const auto rows = raw.value()->query("SELECT payload FROM workflow_instances");
+        REQUIRE(rows.hasValue());
+        REQUIRE(rows.value().size() == 1U);
+        const auto& payload = *rows.value().front().at("payload").getIf<std::string>();
+        if(depth == 1U) { CHECK(payload.find("\"cause\"") == std::string::npos); }
+    }
+    removeDatabase(path);
+}
+
+TEST_CASE("Workflow checkpoint rejects malformed and overdeep persisted causes", "[persistence][workflow][error-chain]")
+{
+    const auto malformed = GENERATE(true, false);
+    const auto path = uniqueDatabasePath();
+    const auto request = persistentWorkflowRequest("workflow.invalid-cause");
+    const auto definition = persistentWorkflowDefinition(false);
+    {
+        PersistenceService persistence;
+        configureService(persistence, path);
+        auto snapshot = persistentWorkflowSnapshot(request, WorkflowState::Failed, WorkflowStepState::Failed, 1U);
+        snapshot.error = makeError("Test.Failed", ErrorCategory::Internal, "expected failure");
+        REQUIRE(persistence.saveWorkflowCheckpoint(request, definition, snapshot, {}).hasValue());
+        auto raw = SqlitePersistenceBackend::open({path});
+        REQUIRE(raw.hasValue());
+        auto rows = raw.value()->query("SELECT payload FROM workflow_instances");
+        REQUIRE(rows.hasValue());
+        REQUIRE(rows.value().size() == 1U);
+        JsonconsAdapter json;
+        auto payload = json.deserialize(*rows.value().front().at("payload").getIf<std::string>());
+        REQUIRE(payload.hasValue());
+        auto& error = payload.value().getIf<Value::Object>()->at("error");
+        if(malformed) {
+            error.getIf<Value::Object>()->insert_or_assign("cause", Value{"invalid cause"});
+        } else {
+            const auto leaf = error;
+            for(unsigned int index = 1U; index < 33U; ++index) {
+                auto outer = leaf;
+                outer.getIf<Value::Object>()->insert_or_assign("cause", std::move(error));
+                error = std::move(outer);
+            }
+        }
+        auto encoded = json.serialize(payload.value());
+        REQUIRE(encoded.hasValue());
+        Sha256HashService hashes;
+        auto digest = hashes.digest({reinterpret_cast<const std::byte*>(encoded.value().data()), encoded.value().size()});
+        REQUIRE(digest.hasValue());
+        const std::array parameters{Value{encoded.value()}, Value{std::string(digest.value().value())}};
+        REQUIRE(raw.value()->execute("UPDATE workflow_instances SET payload=?,digest=?", parameters).hasValue());
+        const auto loaded = persistence.workflowCheckpoint(request.workflowId);
+        REQUIRE_FALSE(loaded.hasValue());
+        CHECK(std::string(loaded.error().code.value()) == "Persistence.InvalidWorkflowPayload");
+    }
+    removeDatabase(path);
+}
+
 TEST_CASE("AppKernel restores a running workflow at the same idempotent attempt", "[persistence][workflow][recovery]")
 {
     const auto path = uniqueDatabasePath();

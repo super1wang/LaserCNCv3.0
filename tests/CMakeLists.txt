@@ -111,7 +111,9 @@ set_target_properties(
 lcnc_enable_warnings(lasercnc_kernel_headless_contract)
 
 foreach(scenario IN ITEMS command-staged journal-inserted outcome-written transaction-before-commit
-    transaction-committed command-returned undo-inserted undo-committed redo-inserted redo-committed)
+    transaction-committed command-returned undo-inserted undo-committed redo-inserted redo-committed
+    task-handler workflow-handler workflow-committed effect-safe effect-idempotent effect-reconcile effect-never
+    workflow-effect-reconcile workflow-effect-never)
     add_test(NAME integration.kernel_crash_${scenario}
         COMMAND "${CMAKE_COMMAND}"
             "-DLCNC_CONTRACT_EXECUTABLE=$<TARGET_FILE:lasercnc_kernel_headless_contract>"

@@ -5,12 +5,18 @@ if(NOT DEFINED LCNC_CONTRACT_EXECUTABLE OR NOT DEFINED LCNC_TEST_BINARY_ROOT
     message(FATAL_ERROR "必须提供契约程序、绝对测试构建目录和崩溃场景")
 endif()
 set(scenarios command-staged journal-inserted outcome-written transaction-before-commit
-    transaction-committed command-returned undo-inserted undo-committed redo-inserted redo-committed)
+    transaction-committed command-returned undo-inserted undo-committed redo-inserted redo-committed
+    task-handler workflow-handler workflow-committed effect-safe effect-idempotent effect-reconcile effect-never
+    workflow-effect-reconcile workflow-effect-never)
 if(NOT LCNC_CRASH_SCENARIO IN_LIST scenarios)
     message(FATAL_ERROR "未知崩溃场景")
 endif()
-if(LCNC_CRASH_SCENARIO STREQUAL "command-staged")
+if(LCNC_CRASH_SCENARIO STREQUAL "command-staged" OR LCNC_CRASH_SCENARIO STREQUAL "workflow-handler")
     set(expected_point handler-staged)
+elseif(LCNC_CRASH_SCENARIO STREQUAL "task-handler")
+    set(expected_point task-handler)
+elseif(LCNC_CRASH_SCENARIO MATCHES "effect-")
+    set(expected_point effect-handler)
 elseif(LCNC_CRASH_SCENARIO MATCHES "inserted$")
     set(expected_point journal-inserted)
 elseif(LCNC_CRASH_SCENARIO STREQUAL "outcome-written")
