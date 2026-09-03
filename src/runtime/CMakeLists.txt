@@ -11,6 +11,11 @@ target_sources(
         messaging/event_bus.cpp
         execution/command_runtime.cpp
         execution/query_runtime.cpp
+        task/task.cpp
+        task/task_registry.cpp
+        task/resource_manager.cpp
+        task/scheduler.cpp
+        task/task_runtime.cpp
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS "${PROJECT_SOURCE_DIR}/include"
@@ -27,4 +32,9 @@ target_sources(
             "${PROJECT_SOURCE_DIR}/include/lasercnc/messaging/event_bus.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/command_runtime.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/query_runtime.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/task.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/task_registry.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/resource_manager.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/scheduler.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/task_runtime.hpp"
 )

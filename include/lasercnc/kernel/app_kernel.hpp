@@ -11,8 +11,13 @@
 #include <lasercnc/runtime/execution_services.hpp>
 #include <lasercnc/runtime/query_registry.hpp>
 #include <lasercnc/runtime/query_runtime.hpp>
+#include <lasercnc/runtime/resource_manager.hpp>
+#include <lasercnc/runtime/scheduler.hpp>
+#include <lasercnc/runtime/task_registry.hpp>
+#include <lasercnc/runtime/task_runtime.hpp>
 #include <lasercnc/state/document_store.hpp>
 
+#include <chrono>
 #include <memory>
 
 namespace lasercnc::kernel {
@@ -35,8 +40,11 @@ public:
     AppKernel& operator=(const AppKernel&) = delete;
 
     [[nodiscard]] foundation::Result<void> addModule(std::unique_ptr<IModule> module);
+    [[nodiscard]] foundation::Result<void> configureTaskExecutor(
+        std::unique_ptr<platform::ITaskExecutor> executor);
     [[nodiscard]] foundation::Result<void> bootstrap();
-    [[nodiscard]] foundation::Result<void> shutdown();
+    [[nodiscard]] foundation::Result<void> shutdown(
+        std::chrono::milliseconds taskTimeout = std::chrono::seconds(5));
 
     [[nodiscard]] ServiceRegistry& services() noexcept;
     [[nodiscard]] const ServiceRegistry& services() const noexcept;
@@ -60,6 +68,14 @@ public:
     [[nodiscard]] const runtime::CommandRuntime& commands() const noexcept;
     [[nodiscard]] runtime::QueryRuntime& queries() noexcept;
     [[nodiscard]] const runtime::QueryRuntime& queries() const noexcept;
+    [[nodiscard]] runtime::TaskRegistry& taskRegistry() noexcept;
+    [[nodiscard]] const runtime::TaskRegistry& taskRegistry() const noexcept;
+    [[nodiscard]] runtime::ResourceManager& resources() noexcept;
+    [[nodiscard]] const runtime::ResourceManager& resources() const noexcept;
+    [[nodiscard]] runtime::Scheduler& scheduler() noexcept;
+    [[nodiscard]] const runtime::Scheduler& scheduler() const noexcept;
+    [[nodiscard]] runtime::TaskRuntime& tasks() noexcept;
+    [[nodiscard]] const runtime::TaskRuntime& tasks() const noexcept;
     [[nodiscard]] AppKernelState state() const noexcept;
 
 private:
@@ -74,6 +90,11 @@ private:
     runtime::QueryRegistry queryRegistry_;
     runtime::CommandRuntime commands_;
     runtime::QueryRuntime queries_;
+    runtime::TaskRegistry taskRegistry_;
+    runtime::ResourceManager resources_;
+    std::unique_ptr<platform::ITaskExecutor> taskExecutor_;
+    runtime::Scheduler scheduler_;
+    runtime::TaskRuntime tasks_;
     AppKernelState state_{AppKernelState::Configuring};
 };
 
