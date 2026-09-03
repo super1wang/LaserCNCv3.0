@@ -2,9 +2,9 @@
 
 ## 阶段状态
 
-Phase 8 正在建设。目标是以 Snapshot、状态 Journal、SQLite Control Plane 和原子文件 Data Plane 建立可校验、可重放、可故障注入的 Crash Recovery。本阶段只处理 Application Kernel 持久化语义，不实现 Workflow、Script、CAD/CAM、GUI、设备控制或其他上层模块。
+Phase 8 已验收。Snapshot、状态 Journal、SQLite Control Plane 和原子文件 Data Plane 已形成可校验、可重放、可故障注入的 Crash Recovery 边界。本阶段只处理 Application Kernel 持久化语义，没有实现 Workflow、Script、CAD/CAM、GUI、设备控制或其他上层模块。
 
-当前已完成强内容摘要端口、Windows Adapter、PersistenceService v5 schema migration、状态 Journal、ApplicationTransaction 写前接入、Snapshot 文件/索引、启动恢复重放、持久 Command 幂等、Task History 和 Diagnostics Metadata。完整多配置、重复、Production-only 与独立进程门禁仍未完成，因此本阶段尚未验收。
+已完成强内容摘要端口、Windows Adapter、PersistenceService v5 schema migration、状态 Journal、ApplicationTransaction 写前接入、Snapshot 文件/索引、启动恢复重放、持久 Command 幂等、Task History 和 Diagnostics Metadata，并通过多配置、重复、Production-only、架构扫描与独立进程恢复门禁。
 
 ## 校验和身份
 
@@ -115,7 +115,7 @@ AppKernel 拥有 PersistenceService：配置时在 bootstrap 执行 migration，
 - 当前 SqlitePersistenceBackend 仍是低层参数化单语句/事务原语；只有 Phase 8 PersistenceService 可以编排表结构和持久化事务，领域模块不得散布 SQL。
 - 通用 Value 通道继续拒绝 SQLite BLOB；复合 Value 必须先通过 IValueSerializer 形成版本化文本 payload，再计算 ContentDigest。
 
-## 当前已验收
+## 验收结果
 
 - SnapshotId、ContentDigest 与 IHashService 公共类型无第三方/Windows 类型泄漏；
 - Windows CNG SHA-256 对空内容和 `abc` 标准向量产生已知摘要；
@@ -137,8 +137,13 @@ AppKernel 拥有 PersistenceService：配置时在 bootstrap 执行 migration，
 - Task 原子接受、成功终态、不可变结果、重启中断标记、请求/终态摘要篡改闭锁和终态写失败可见性；
 - Diagnostics 内存优先 exporter、SQLite 顺序历史/latest、重启读取、摘要篡改闭锁和写失败隔离。
 - 独立播种进程以 `_Exit` 跳过析构后，恢复进程可验证 Snapshot + Journal tail、原 Commit 幂等结果、未完成 Task 中断和 Diagnostics 历史，且 handler/Event 不重放。
+- VS2022 x64 Debug 与 Release 均通过 109/109 CTest；Debug 全集连续 20 轮通过，共 2180 次测试执行；
+- Production-only Release 构建通过，未下载 Catch2，且没有测试或 contract target；
+- 最终架构扫描通过，检查 51 个 Kernel 公共头文件和 95 个生产源文件。
 
-## 尚未验收
+## 非本阶段证明范围
 
-- 数据库 busy、只读文件系统和实际进程中断点等更完整故障注入；
-- Release、Debug 重复、Production-only 与最终架构扫描门禁。
+- 当前只支持一个活动 AppKernel Host 独占一个数据库；未实现跨进程 lease，也不证明多个 Host 并发共享写入；
+- 已覆盖 backend/serializer/hash/终态写入失败、文件缺失/截断/篡改、Journal 缺口与独立进程 `_Exit`，但数据库外部 busy 竞争和部署目录只读仍属于更完整的部署故障矩阵，不作为本阶段已通过项；
+- 恢复只重建内核状态，不恢复运行中 handler 栈，不自动重跑中断 Task，也不执行任何文件发布、设备、运动或激光副作用；
+- Workflow/Script 属于 Phase 9；CAD/CAM/GUI/RPC/AI、控制器 SDK 与物理设备均继续延后。
