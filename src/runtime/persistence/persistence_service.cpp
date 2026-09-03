@@ -409,7 +409,7 @@ foundation::Result<void> PersistenceService::initialize()
         if(!version) {
             return rollback(*backend_, std::move(version).error());
         }
-        if(version.value() > 5) {
+        if(version.value() > 6) {
             return rollback(*backend_, persistenceError(
                 "Persistence.SchemaTooNew",
                 foundation::ErrorCategory::Conflict,
@@ -496,6 +496,32 @@ foundation::Result<void> PersistenceService::initialize()
         if(!diagnosticIndex) {
             return rollback(*backend_, std::move(diagnosticIndex).error());
         }
+        auto workflowInstances = backend_->execute(
+            "CREATE TABLE IF NOT EXISTS workflow_instances("
+            "workflow_id TEXT PRIMARY KEY NOT NULL,workflow_name TEXT NOT NULL,"
+            "workflow_major INTEGER NOT NULL,workflow_minor INTEGER NOT NULL,"
+            "workflow_patch INTEGER NOT NULL,definition_digest TEXT NOT NULL,"
+            "status TEXT NOT NULL,payload TEXT NOT NULL,digest TEXT NOT NULL,"
+            "updated_at_ms INTEGER NOT NULL)");
+        if(!workflowInstances) {
+            return rollback(*backend_, std::move(workflowInstances).error());
+        }
+        auto workflowSteps = backend_->execute(
+            "CREATE TABLE IF NOT EXISTS workflow_steps("
+            "workflow_id TEXT NOT NULL,step_id TEXT NOT NULL,status TEXT NOT NULL,"
+            "payload TEXT NOT NULL,digest TEXT NOT NULL,updated_at_ms INTEGER NOT NULL,"
+            "PRIMARY KEY(workflow_id,step_id),"
+            "FOREIGN KEY(workflow_id) REFERENCES workflow_instances(workflow_id) "
+            "ON DELETE CASCADE)");
+        if(!workflowSteps) {
+            return rollback(*backend_, std::move(workflowSteps).error());
+        }
+        auto workflowStatusIndex = backend_->execute(
+            "CREATE INDEX IF NOT EXISTS idx_workflow_instances_status_updated "
+            "ON workflow_instances(status,updated_at_ms)");
+        if(!workflowStatusIndex) {
+            return rollback(*backend_, std::move(workflowStatusIndex).error());
+        }
         const std::array migrationParameters {foundation::Value {std::int64_t {1}}};
         auto recorded = backend_->execute(
             "INSERT OR IGNORE INTO schema_migrations(version,applied_at) "
@@ -539,6 +565,15 @@ foundation::Result<void> PersistenceService::initialize()
             diagnosticMigrationParameters);
         if(!diagnosticMigration) {
             return rollback(*backend_, std::move(diagnosticMigration).error());
+        }
+        const std::array workflowMigrationParameters {
+            foundation::Value {std::int64_t {6}}};
+        auto workflowMigration = backend_->execute(
+            "INSERT OR IGNORE INTO schema_migrations(version,applied_at) "
+            "VALUES(?,CURRENT_TIMESTAMP)",
+            workflowMigrationParameters);
+        if(!workflowMigration) {
+            return rollback(*backend_, std::move(workflowMigration).error());
         }
         auto committed = backend_->commitTransaction();
         if(!committed) {

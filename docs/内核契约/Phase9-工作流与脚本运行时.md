@@ -6,6 +6,8 @@ Phase 9 正在建设。本阶段只实现 Application Kernel 自有的 Workflow 
 
 蓝图要求 Workflow 支持 Variables、Dependency、Condition、Parallel、Wait、Timeout、Retry、Cancellation、Checkpoint 与 Compensation；Script 第一阶段支持 Command、Query、Variables、Result Binding、Wait、Assert、If、ForEach 与 Include。上述语义必须通过已有 CommandRuntime、QueryRuntime、TaskRuntime 和 PersistenceService 组合，不能引入新的业务状态写入入口。
 
+当前已完成 Workflow 类型/Registry、有界推进器、Task 等待、重试/取消/补偿，以及 SQLite v6 检查点和 AppKernel 恢复；Script Runtime、Workflow 观测和独立进程恢复门禁尚未完成，因此 Phase 9 尚未验收。
+
 ## 总体边界
 
 ```text
@@ -95,6 +97,8 @@ Pending -> Running -> Waiting -> Running -> Succeeded
 - 恢复只加载与当前注册定义名称、Version、摘要完全匹配的实例；缺失定义、摘要损坏或图漂移必须 fail-closed。
 - 崩溃时处于 Running 的 Command 依靠稳定 IdempotencyKey 重放同一尝试；无法证明可恢复的步骤必须进入明确 Failed/Compensating，不能猜测成功。
 - 恢复不会自动执行。AppKernel Ready 后由 Host 或调用方显式 `advance()`，保持启动过程无业务副作用。
+
+当前实现由 SQLite v6 `workflow_instances` 与 `workflow_steps` 在同一事务中更新。实例 payload 和每个步骤 payload 均单独计算 SHA-256，读取时同时核对控制面状态、Workflow/Step 身份、Version、定义摘要和完整步骤集合。步骤进入 Running 的检查点必须先成功，才能调用 Command/Query/Task；写入失败会恢复内存中的执行前状态，handler 调用次数保持为零。崩溃留下的 Running 步骤在恢复后重用原 attempt，不能生成新的幂等键。
 
 ## Compensation
 

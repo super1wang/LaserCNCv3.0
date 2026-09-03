@@ -50,7 +50,8 @@ AppKernel::AppKernel()
           metrics_),
       queries_(
           queryRegistry_, documents_, capabilities_, executionServices_, traces_, metrics_),
-      workflows_(workflowRegistry_, commands_, queries_, tasks_, executionServices_)
+      workflows_(
+          workflowRegistry_, commands_, queries_, tasks_, executionServices_, persistence_)
 {
     static_cast<void>(diagnostics_.addExporter(
         std::make_shared<PersistenceDiagnosticExporter>(persistence_)));
@@ -193,6 +194,21 @@ foundation::Result<void> AppKernel::bootstrap()
             foundation::Severity::Error,
             std::make_shared<const foundation::Error>(
                 stopped.hasValue() ? std::move(workflowsValidated).error()
+                                   : std::move(stopped).error())));
+    }
+
+    auto workflowsRestored = workflows_.restore();
+    if(!workflowsRestored) {
+        auto stopped = modules_.shutdown(*this);
+        state_ = AppKernelState::Failed;
+        return foundation::Result<void>::failure(foundation::makeError(
+            "Workflow.KernelRecoveryFailed",
+            foundation::ErrorCategory::Infrastructure,
+            "The application kernel could not recover durable workflows",
+            foundation::Value {},
+            foundation::Severity::Error,
+            std::make_shared<const foundation::Error>(
+                stopped.hasValue() ? std::move(workflowsRestored).error()
                                    : std::move(stopped).error())));
     }
 

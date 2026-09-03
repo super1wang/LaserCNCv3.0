@@ -137,6 +137,8 @@ struct WorkflowStepSnapshot final {
     std::optional<foundation::Value> result;
     std::optional<foundation::Error> error;
     std::uint32_t compensationAttempt{0U};
+    bool replayCurrentAttempt{false};
+    bool replayCompensationAttempt{false};
 };
 
 struct WorkflowSnapshot final {

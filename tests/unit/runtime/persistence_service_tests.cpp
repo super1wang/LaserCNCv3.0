@@ -222,6 +222,57 @@ private:
     std::unique_ptr<lasercnc::platform::IPersistenceBackend> delegate_;
 };
 
+class FailingWorkflowCheckpointBackend final
+    : public lasercnc::platform::IPersistenceBackend {
+public:
+    explicit FailingWorkflowCheckpointBackend(
+        std::unique_ptr<lasercnc::platform::IPersistenceBackend> delegate)
+        : delegate_(std::move(delegate))
+    {
+    }
+
+    Result<std::size_t> execute(
+        std::string_view statement,
+        std::span<const Value> parameters = {}) override
+    {
+        if(failCheckpoint.load(std::memory_order_acquire)
+           && statement.starts_with("INSERT INTO workflow_instances")) {
+            return Result<std::size_t>::failure(makeError(
+                "Test.WorkflowCheckpointFailed",
+                ErrorCategory::Infrastructure,
+                "expected workflow checkpoint failure"));
+        }
+        return delegate_->execute(statement, parameters);
+    }
+
+    Result<std::vector<lasercnc::platform::PersistenceRow>> query(
+        std::string_view statement,
+        std::span<const Value> parameters = {}) override
+    {
+        return delegate_->query(statement, parameters);
+    }
+
+    Result<void> beginTransaction() override
+    {
+        return delegate_->beginTransaction();
+    }
+
+    Result<void> commitTransaction() override
+    {
+        return delegate_->commitTransaction();
+    }
+
+    Result<void> rollbackTransaction() override
+    {
+        return delegate_->rollbackTransaction();
+    }
+
+    std::atomic_bool failCheckpoint{false};
+
+private:
+    std::unique_ptr<lasercnc::platform::IPersistenceBackend> delegate_;
+};
+
 class ReentrantSerializer final : public IValueSerializer {
 public:
     ReentrantSerializer(DocumentStore& documents, DocumentId documentId)
@@ -426,6 +477,85 @@ TaskDescriptor persistentTaskDescriptor()
         Version {1U, 0U, 0U},
         objectSchema("schema.persistence.async-task.input"),
         objectSchema("schema.persistence.async-task.result")};
+}
+
+WorkflowDefinition persistentWorkflowDefinition(bool commandStep)
+{
+    WorkflowStep step {
+        validId<WorkflowStepId>("step.persistence"),
+        commandStep ? WorkflowStepKind::Command : WorkflowStepKind::Assign,
+        {},
+        std::nullopt,
+        std::nullopt,
+        std::nullopt,
+        commandStep
+            ? Value {}
+            : Value {Value::Object {{"checkpoint", Value {true}}}},
+        {},
+        commandStep ? "commandResult" : "assigned",
+        std::nullopt,
+        WorkflowRetryPolicy {},
+        std::nullopt};
+    if(commandStep) {
+        step.command = WorkflowCommandCall {
+            validId<CommandName>("kernel.persistence.create"),
+            Version {1U, 0U, 0U},
+            Value {Value::Object {
+                {"data", Value {"workflow"}},
+                {"id", Value {"object.workflow-recovered"}},
+            }}};
+    }
+    return WorkflowDefinition {
+        WorkflowDescriptor {
+            validId<WorkflowName>("workflow.persistence.test"),
+            Version {1U, 0U, 0U},
+            objectSchema("schema.persistence.workflow.input"),
+            objectSchema("schema.persistence.workflow.result")},
+        {std::move(step)},
+        Value {Value::Object {}}};
+}
+
+WorkflowRequest persistentWorkflowRequest(const char* id)
+{
+    return WorkflowRequest {
+        validId<WorkflowId>(id),
+        validId<WorkflowName>("workflow.persistence.test"),
+        Value {Value::Object {}},
+        validId<SessionId>("session.workflow-persistence"),
+        validId<ProjectId>("project.workflow-persistence"),
+        validId<DocumentId>("document.workflow-persistence"),
+        validId<CorrelationId>("correlation.workflow-persistence"),
+        validId<TraceId>("trace.workflow-persistence"),
+        std::nullopt,
+        std::nullopt};
+}
+
+WorkflowSnapshot persistentWorkflowSnapshot(
+    const WorkflowRequest& request,
+    WorkflowState workflowState,
+    WorkflowStepState stepState,
+    std::uint32_t attempt = 0U)
+{
+    return WorkflowSnapshot {
+        request.workflowId,
+        request.workflow,
+        Version {1U, 0U, 0U},
+        workflowState,
+        request.input,
+        {WorkflowStepSnapshot {
+            validId<WorkflowStepId>("step.persistence"),
+            stepState,
+            attempt,
+            std::nullopt,
+            stepState == WorkflowStepState::Running
+                ? std::optional {std::chrono::system_clock::now()}
+                : std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            std::nullopt}},
+        std::nullopt,
+        std::nullopt,
+        {}};
 }
 
 CommandRequest persistentCommandRequest(
@@ -1461,7 +1591,7 @@ TEST_CASE("PersistenceService rolls back migration exceptions and rejects newer 
                         "CREATE TABLE schema_migrations("
                         "version INTEGER PRIMARY KEY NOT NULL,applied_at TEXT NOT NULL)")
                     .hasValue());
-        const std::array parameters {Value {std::int64_t {6}}, Value {"future"}};
+        const std::array parameters {Value {std::int64_t {7}}, Value {"future"}};
         REQUIRE(backend.value()
                     ->execute(
                         "INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)",
@@ -1609,4 +1739,241 @@ TEST_CASE("AppKernel initializes and freezes configured persistence", "[kernel][
     }
     removeDatabase(path);
     removeDatabase(latePath);
+}
+
+TEST_CASE("Workflow checkpoints round trip and fail closed on step tampering", "[persistence][workflow]")
+{
+    const auto path = uniqueDatabasePath();
+    removeDatabase(path);
+    const auto request = persistentWorkflowRequest("workflow.checkpoint-roundtrip");
+    const auto definition = persistentWorkflowDefinition(false);
+    {
+        PersistenceService persistence;
+        configureService(persistence, path);
+        const auto snapshot = persistentWorkflowSnapshot(
+            request, WorkflowState::Pending, WorkflowStepState::Pending);
+        REQUIRE(persistence
+                    .saveWorkflowCheckpoint(request, definition, snapshot, {})
+                    .hasValue());
+        auto loaded = persistence.workflowCheckpoint(request.workflowId);
+        REQUIRE(loaded.hasValue());
+        REQUIRE(loaded.value().has_value());
+        CHECK(loaded.value()->request.workflowId == request.workflowId);
+        CHECK(loaded.value()->snapshot.state == WorkflowState::Pending);
+        CHECK(loaded.value()->snapshot.steps.size() == 1U);
+        auto digest = persistence.workflowDefinitionDigest(definition);
+        REQUIRE(digest.hasValue());
+        CHECK(loaded.value()->definitionDigest == digest.value());
+
+        auto completed = snapshot;
+        completed.state = WorkflowState::Succeeded;
+        completed.steps[0].state = WorkflowStepState::Succeeded;
+        completed.steps[0].attempt = 1U;
+        completed.steps[0].result = Value {Value::Object {{"checkpoint", Value {true}}}};
+        completed.result = Value {Value::Object {}};
+        REQUIRE(persistence
+                    .saveWorkflowCheckpoint(
+                        request,
+                        definition,
+                        completed,
+                        {validId<WorkflowStepId>("step.persistence")})
+                    .hasValue());
+        auto all = persistence.workflowCheckpoints();
+        REQUIRE(all.hasValue());
+        REQUIRE(all.value().size() == 1U);
+        CHECK(all.value()[0].snapshot.state == WorkflowState::Succeeded);
+        REQUIRE(all.value()[0].completionOrder.size() == 1U);
+    }
+    {
+        auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+        REQUIRE(backend.hasValue());
+        const std::array parameters {
+            Value {"{}"}, Value {std::string(request.workflowId.value())}};
+        REQUIRE(backend.value()
+                    ->execute(
+                        "UPDATE workflow_steps SET payload=? WHERE workflow_id=?",
+                        parameters)
+                    .hasValue());
+    }
+    {
+        PersistenceService reopened;
+        configureService(reopened, path);
+        auto corrupted = reopened.workflowCheckpoint(request.workflowId);
+        REQUIRE_FALSE(corrupted.hasValue());
+        CHECK(std::string(corrupted.error().code.value())
+              == "Persistence.WorkflowStepDigestMismatch");
+    }
+    removeDatabase(path);
+}
+
+TEST_CASE("AppKernel restores a running workflow at the same idempotent attempt", "[persistence][workflow][recovery]")
+{
+    const auto path = uniqueDatabasePath();
+    const auto snapshotDirectory = uniqueSnapshotDirectory();
+    removeDatabase(path);
+    removeSnapshotDirectory(snapshotDirectory);
+    const auto request = persistentWorkflowRequest("workflow.running-recovery");
+    const auto definition = persistentWorkflowDefinition(true);
+    {
+        PersistenceService seed;
+        configureService(seed, path);
+        auto running = persistentWorkflowSnapshot(
+            request, WorkflowState::Running, WorkflowStepState::Running, 1U);
+        REQUIRE(seed.saveWorkflowCheckpoint(request, definition, running, {}).hasValue());
+    }
+    {
+        lasercnc::kernel::AppKernel kernel;
+        auto handler = std::make_shared<PersistentCreateHandler>();
+        configureRuntimeKernel(
+            kernel,
+            path,
+            snapshotDirectory,
+            request.sessionId,
+            handler);
+        REQUIRE(kernel.addDocument(request.projectId, request.documentId).hasValue());
+        REQUIRE(kernel.workflowRegistry().registerDefinition(definition).hasValue());
+        REQUIRE(kernel.bootstrap().hasValue());
+
+        auto recovered = kernel.workflows().snapshot(request.workflowId);
+        REQUIRE(recovered.hasValue());
+        CHECK(recovered.value().state == WorkflowState::Running);
+        REQUIRE(recovered.value().steps.size() == 1U);
+        CHECK(recovered.value().steps[0].state == WorkflowStepState::Waiting);
+        CHECK(recovered.value().steps[0].attempt == 1U);
+        CHECK(recovered.value().steps[0].replayCurrentAttempt);
+
+        auto completed = kernel.workflows().advance(request.workflowId);
+        REQUIRE(completed.hasValue());
+        CHECK(completed.value().state == WorkflowState::Succeeded);
+        CHECK(completed.value().steps[0].attempt == 1U);
+        CHECK(handler->calls == 1U);
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+    {
+        lasercnc::kernel::AppKernel kernel;
+        auto handler = std::make_shared<PersistentCreateHandler>();
+        configureRuntimeKernel(
+            kernel,
+            path,
+            snapshotDirectory,
+            request.sessionId,
+            handler);
+        REQUIRE(kernel.addDocument(request.projectId, request.documentId).hasValue());
+        REQUIRE(kernel.workflowRegistry().registerDefinition(definition).hasValue());
+        REQUIRE(kernel.bootstrap().hasValue());
+        auto recovered = kernel.workflows().snapshot(request.workflowId);
+        REQUIRE(recovered.hasValue());
+        CHECK(recovered.value().state == WorkflowState::Succeeded);
+        CHECK(handler->calls == 0U);
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+    removeDatabase(path);
+    removeSnapshotDirectory(snapshotDirectory);
+}
+
+TEST_CASE("Workflow checkpoint failure prevents handler execution", "[persistence][workflow][failure]")
+{
+    const auto path = uniqueDatabasePath();
+    removeDatabase(path);
+    const auto request = persistentWorkflowRequest("workflow.checkpoint-failure");
+    const auto definition = persistentWorkflowDefinition(true);
+    {
+        lasercnc::kernel::AppKernel kernel;
+        auto adapter = std::make_shared<JsonconsAdapter>();
+        REQUIRE(kernel.executionServices()
+                    .configure(adapter, std::make_shared<NullLogService>())
+                    .hasValue());
+        REQUIRE(kernel.capabilities()
+                    .replace(
+                        request.sessionId,
+                        std::array {validId<CapabilityId>("document.write")})
+                    .hasValue());
+        auto handler = std::make_shared<PersistentCreateHandler>();
+        REQUIRE(kernel.commandRegistry()
+                    .registerHandler(persistentCommandDescriptor(), handler)
+                    .hasValue());
+        REQUIRE(kernel.workflowRegistry().registerDefinition(definition).hasValue());
+        REQUIRE(kernel.addDocument(request.projectId, request.documentId).hasValue());
+        auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+        REQUIRE(backend.hasValue());
+        auto failing = std::make_unique<FailingWorkflowCheckpointBackend>(
+            std::move(backend).value());
+        auto* observed = failing.get();
+        REQUIRE(kernel.persistence()
+                    .configure(
+                        std::move(failing),
+                        adapter,
+                        std::make_shared<Sha256HashService>())
+                    .hasValue());
+        REQUIRE(kernel.bootstrap().hasValue());
+        REQUIRE(kernel.workflows().startWorkflow(request).hasValue());
+
+        observed->failCheckpoint.store(true, std::memory_order_release);
+        auto failed = kernel.workflows().advance(request.workflowId);
+        REQUIRE_FALSE(failed.hasValue());
+        CHECK(std::string(failed.error().code.value())
+              == "Test.WorkflowCheckpointFailed");
+        CHECK(handler->calls == 0U);
+        auto unchanged = kernel.workflows().snapshot(request.workflowId);
+        REQUIRE(unchanged.hasValue());
+        CHECK(unchanged.value().steps[0].state == WorkflowStepState::Pending);
+        CHECK(unchanged.value().steps[0].attempt == 0U);
+
+        observed->failCheckpoint.store(false, std::memory_order_release);
+        auto completed = kernel.workflows().advance(request.workflowId);
+        REQUIRE(completed.hasValue());
+        CHECK(completed.value().state == WorkflowState::Succeeded);
+        CHECK(handler->calls == 1U);
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+    removeDatabase(path);
+}
+
+TEST_CASE("AppKernel rejects durable workflow definition drift", "[persistence][workflow][recovery]")
+{
+    const auto path = uniqueDatabasePath();
+    removeDatabase(path);
+    const auto request = persistentWorkflowRequest("workflow.definition-drift");
+    auto original = persistentWorkflowDefinition(false);
+    {
+        PersistenceService seed;
+        configureService(seed, path);
+        REQUIRE(seed
+                    .saveWorkflowCheckpoint(
+                        request,
+                        original,
+                        persistentWorkflowSnapshot(
+                            request,
+                            WorkflowState::Pending,
+                            WorkflowStepState::Pending),
+                        {})
+                    .hasValue());
+    }
+    {
+        lasercnc::kernel::AppKernel kernel;
+        auto adapter = std::make_shared<JsonconsAdapter>();
+        REQUIRE(kernel.executionServices()
+                    .configure(adapter, std::make_shared<NullLogService>())
+                    .hasValue());
+        auto changed = persistentWorkflowDefinition(false);
+        changed.steps[0].valueTemplate = Value {Value::Object {{"checkpoint", Value {false}}}};
+        REQUIRE(kernel.workflowRegistry().registerDefinition(std::move(changed)).hasValue());
+        auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+        REQUIRE(backend.hasValue());
+        REQUIRE(kernel.persistence()
+                    .configure(
+                        std::move(backend).value(),
+                        adapter,
+                        std::make_shared<Sha256HashService>())
+                    .hasValue());
+        auto bootstrapped = kernel.bootstrap();
+        REQUIRE_FALSE(bootstrapped.hasValue());
+        CHECK(std::string(bootstrapped.error().code.value())
+              == "Workflow.KernelRecoveryFailed");
+        REQUIRE(bootstrapped.error().cause != nullptr);
+        CHECK(std::string(bootstrapped.error().cause->code.value())
+              == "Workflow.RecoveryDefinitionMismatch");
+        CHECK(kernel.state() == AppKernelState::Failed);
+    }
+    removeDatabase(path);
 }

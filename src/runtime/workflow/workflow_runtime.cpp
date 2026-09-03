@@ -6,6 +6,7 @@
 #include <lasercnc/runtime/query_runtime.hpp>
 #include <lasercnc/runtime/task_runtime.hpp>
 #include <lasercnc/runtime/workflow_registry.hpp>
+#include <lasercnc/persistence/persistence_service.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -278,12 +279,14 @@ public:
         CommandRuntime& commands,
         QueryRuntime& queries,
         TaskRuntime& tasks,
-        ExecutionServices& executionServices)
+        ExecutionServices& executionServices,
+        persistence::PersistenceService& persistence)
         : registry_(registry),
           commands_(commands),
           queries_(queries),
           tasks_(tasks),
-          executionServices_(executionServices)
+          executionServices_(executionServices),
+          persistence_(persistence)
     {
     }
 
@@ -305,6 +308,7 @@ public:
         mutable std::mutex mutex;
         bool advancing{false};
         bool cancellationRequested{false};
+        bool checkpointDirty{false};
     };
 
     foundation::Result<WorkflowSnapshot> startWorkflow(WorkflowRequest request)
@@ -371,8 +375,27 @@ public:
             std::move(request),
             std::move(definition).value(),
             std::move(snapshot));
-        const auto initialSnapshot = instance->snapshot;
         const auto id = instance->snapshot.workflowId;
+        const auto initialSnapshot = instance->snapshot;
+        if(persistence_.configured()) {
+            auto existing = persistence_.workflowCheckpoint(initialSnapshot.workflowId);
+            if(!existing) {
+                return foundation::Result<WorkflowSnapshot>::failure(
+                    std::move(existing).error());
+            }
+            if(existing.value().has_value()) {
+                return foundation::Result<WorkflowSnapshot>::failure(runtimeError(
+                    "Workflow.InstanceAlreadyExists",
+                    foundation::ErrorCategory::Conflict,
+                    "A durable workflow instance with the same stable id already exists",
+                    &id));
+            }
+            auto saved = persist(*instance);
+            if(!saved) {
+                return foundation::Result<WorkflowSnapshot>::failure(
+                    std::move(saved).error());
+            }
+        }
         {
             std::unique_lock lock(instancesMutex_);
             const auto [unused, inserted] = instances_.emplace(id, instance);
@@ -410,11 +433,23 @@ public:
         bool alreadyAdvancing = false;
         {
             std::lock_guard lock(instance->mutex);
+            if(instance->checkpointDirty) {
+                auto saved = persist(*instance);
+                if(!saved) {
+                    return foundation::Result<WorkflowSnapshot>::failure(
+                        std::move(saved).error());
+                }
+            }
             if(isTerminal(instance->snapshot.state)) {
                 return foundation::Result<WorkflowSnapshot>::success(instance->snapshot);
             }
             instance->cancellationRequested = true;
             instance->snapshot.state = WorkflowState::CancelRequested;
+            auto saved = persist(*instance);
+            if(!saved) {
+                return foundation::Result<WorkflowSnapshot>::failure(
+                    std::move(saved).error());
+            }
             alreadyAdvancing = instance->advancing;
             for(const auto& step : instance->snapshot.steps) {
                 if(step.taskId.has_value()) {
@@ -448,6 +483,13 @@ public:
         const auto instance = instanceResult.value();
         {
             std::lock_guard lock(instance->mutex);
+            if(instance->checkpointDirty) {
+                auto saved = persist(*instance);
+                if(!saved) {
+                    return foundation::Result<WorkflowSnapshot>::failure(
+                        std::move(saved).error());
+                }
+            }
             if(isTerminal(instance->snapshot.state)) {
                 return foundation::Result<WorkflowSnapshot>::success(instance->snapshot);
             }
@@ -481,6 +523,8 @@ public:
             foundation::Value::Object variables;
             bool compensation = false;
             bool stateChangedWithoutExecution = false;
+            std::optional<WorkflowStepSnapshot> beforeExecution;
+            std::optional<WorkflowState> beforeWorkflowState;
             {
                 std::lock_guard lock(instance->mutex);
                 if(isTerminal(instance->snapshot.state)) {
@@ -496,6 +540,11 @@ public:
                             foundation::ErrorCategory::Internal,
                             "Workflow variables are not an object",
                             &workflowId));
+                    auto saved = persist(*instance);
+                    if(!saved) {
+                        return foundation::Result<WorkflowSnapshot>::failure(
+                            std::move(saved).error());
+                    }
                     return foundation::Result<WorkflowSnapshot>::success(instance->snapshot);
                 }
 
@@ -517,6 +566,11 @@ public:
                         ? WorkflowState::Compensating
                         : WorkflowState::Cancelled;
                     if(instance->snapshot.state == WorkflowState::Cancelled) {
+                        auto saved = persist(*instance);
+                        if(!saved) {
+                            return foundation::Result<WorkflowSnapshot>::failure(
+                                std::move(saved).error());
+                        }
                         return foundation::Result<WorkflowSnapshot>::success(instance->snapshot);
                     }
                 }
@@ -525,13 +579,24 @@ public:
                     const auto selected = nextCompensationLocked(*instance);
                     if(!selected.has_value()) {
                         instance->snapshot.state = WorkflowState::Compensated;
+                        auto saved = persist(*instance);
+                        if(!saved) {
+                            return foundation::Result<WorkflowSnapshot>::failure(
+                                std::move(saved).error());
+                        }
                         return foundation::Result<WorkflowSnapshot>::success(instance->snapshot);
                     }
                     operation = *selected;
                     compensation = true;
                     auto& stepSnapshot = stepSnapshotLocked(*instance, operation->stepId);
+                    beforeExecution = stepSnapshot;
+                    beforeWorkflowState = instance->snapshot.state;
                     stepSnapshot.state = WorkflowStepState::Running;
-                    ++stepSnapshot.compensationAttempt;
+                    if(stepSnapshot.replayCompensationAttempt) {
+                        stepSnapshot.replayCompensationAttempt = false;
+                    } else {
+                        ++stepSnapshot.compensationAttempt;
+                    }
                     attempt = stepSnapshot.compensationAttempt;
                     variables = *variableObject;
                 } else {
@@ -545,6 +610,11 @@ public:
                                 foundation::ErrorCategory::Timeout,
                                 "The workflow deadline was exceeded",
                                 &workflowId));
+                        auto saved = persist(*instance);
+                        if(!saved) {
+                            return foundation::Result<WorkflowSnapshot>::failure(
+                                std::move(saved).error());
+                        }
                         continue;
                     }
 
@@ -557,7 +627,9 @@ public:
                             && step.kind == WorkflowStepKind::Command
                             && (!stepSnapshot.nextAttemptAt.has_value()
                                 || now >= *stepSnapshot.nextAttemptAt);
-                        if((!pending && !waitingTask && !waitingRetry)
+                        const bool waitingReplay = stepSnapshot.state == WorkflowStepState::Waiting
+                            && stepSnapshot.replayCurrentAttempt;
+                        if((!pending && !waitingTask && !waitingRetry && !waitingReplay)
                            || observedThisAdvance.contains(step.stepId)
                            || !dependenciesCompleteLocked(*instance, step)) {
                             continue;
@@ -581,9 +653,12 @@ public:
                         }
 
                         operation = step;
-                        if(!waitingTask) {
+                        beforeExecution = stepSnapshot;
+                        beforeWorkflowState = instance->snapshot.state;
+                        if(!waitingTask && !stepSnapshot.replayCurrentAttempt) {
                             ++stepSnapshot.attempt;
                         }
+                        stepSnapshot.replayCurrentAttempt = false;
                         attempt = stepSnapshot.attempt;
                         stepSnapshot.state = WorkflowStepState::Running;
                         stepSnapshot.nextAttemptAt.reset();
@@ -596,10 +671,20 @@ public:
 
                     if(instance->snapshot.state == WorkflowState::Compensating
                        || instance->snapshot.state == WorkflowState::Failed) {
+                        auto saved = persist(*instance);
+                        if(!saved) {
+                            return foundation::Result<WorkflowSnapshot>::failure(
+                                std::move(saved).error());
+                        }
                         continue;
                     }
                     if(!operation.has_value()) {
                         if(stateChangedWithoutExecution) {
+                            auto saved = persist(*instance);
+                            if(!saved) {
+                                return foundation::Result<WorkflowSnapshot>::failure(
+                                    std::move(saved).error());
+                            }
                             continue;
                         }
                         if(allStepsCompleteLocked(*instance)) {
@@ -612,11 +697,21 @@ public:
                                     : instance->definition.steps.back().stepId);
                             if(!result) {
                                 failLocked(*instance, std::move(result).error());
+                                auto saved = persist(*instance);
+                                if(!saved) {
+                                    return foundation::Result<WorkflowSnapshot>::failure(
+                                        std::move(saved).error());
+                                }
                                 continue;
                             }
                             auto services = executionServices_.snapshot();
                             if(!services) {
                                 failLocked(*instance, std::move(services).error());
+                                auto saved = persist(*instance);
+                                if(!saved) {
+                                    return foundation::Result<WorkflowSnapshot>::failure(
+                                        std::move(saved).error());
+                                }
                                 continue;
                             }
                             auto valid = services.value().schemaValidator->validate(
@@ -632,6 +727,11 @@ public:
                                         nullptr,
                                         std::make_shared<const foundation::Error>(
                                             std::move(valid).error())));
+                                auto saved = persist(*instance);
+                                if(!saved) {
+                                    return foundation::Result<WorkflowSnapshot>::failure(
+                                        std::move(saved).error());
+                                }
                                 continue;
                             }
                             instance->snapshot.result = std::move(result).value();
@@ -639,9 +739,26 @@ public:
                         } else {
                             instance->snapshot.state = WorkflowState::Waiting;
                         }
+                        auto saved = persist(*instance);
+                        if(!saved) {
+                            return foundation::Result<WorkflowSnapshot>::failure(
+                                std::move(saved).error());
+                        }
                         return foundation::Result<WorkflowSnapshot>::success(instance->snapshot);
                     }
                     instance->snapshot.state = WorkflowState::Running;
+                }
+                auto saved = persist(*instance);
+                if(!saved) {
+                    if(operation.has_value() && beforeExecution.has_value()
+                       && beforeWorkflowState.has_value()) {
+                        stepSnapshotLocked(*instance, operation->stepId) =
+                            std::move(*beforeExecution);
+                        instance->snapshot.state = *beforeWorkflowState;
+                        instance->checkpointDirty = false;
+                    }
+                    return foundation::Result<WorkflowSnapshot>::failure(
+                        std::move(saved).error());
                 }
             }
 
@@ -657,6 +774,11 @@ public:
                 if(compensation) {
                     if(outcome.state == WorkflowStepState::Succeeded) {
                         stepSnapshot.state = WorkflowStepState::Compensated;
+                        auto saved = persist(*instance);
+                        if(!saved) {
+                            return foundation::Result<WorkflowSnapshot>::failure(
+                                std::move(saved).error());
+                        }
                         continue;
                     }
                     stepSnapshot.state = WorkflowStepState::CompensationFailed;
@@ -665,6 +787,11 @@ public:
                         instance->snapshot.compensationErrors.push_back(*outcome.error);
                     }
                     instance->snapshot.state = WorkflowState::CompensationFailed;
+                    auto saved = persist(*instance);
+                    if(!saved) {
+                        return foundation::Result<WorkflowSnapshot>::failure(
+                            std::move(saved).error());
+                    }
                     return foundation::Result<WorkflowSnapshot>::success(instance->snapshot);
                 }
 
@@ -684,6 +811,11 @@ public:
                     stepSnapshot.state = WorkflowStepState::Waiting;
                     stepSnapshot.taskId = outcome.taskId;
                     instance->snapshot.state = WorkflowState::Waiting;
+                    auto saved = persist(*instance);
+                    if(!saved) {
+                        return foundation::Result<WorkflowSnapshot>::failure(
+                            std::move(saved).error());
+                    }
                     continue;
                 }
                 if(outcome.state == WorkflowStepState::Succeeded) {
@@ -722,6 +854,11 @@ public:
                     if(operation->compensation.has_value()) {
                         instance->completionOrder.push_back(operation->stepId);
                     }
+                    auto saved = persist(*instance);
+                    if(!saved) {
+                        return foundation::Result<WorkflowSnapshot>::failure(
+                            std::move(saved).error());
+                    }
                     continue;
                 }
 
@@ -738,11 +875,21 @@ public:
                     stepSnapshot.error = error;
                     stepSnapshot.nextAttemptAt = now + operation->retry.backoff;
                     instance->snapshot.state = WorkflowState::Waiting;
+                    auto saved = persist(*instance);
+                    if(!saved) {
+                        return foundation::Result<WorkflowSnapshot>::failure(
+                            std::move(saved).error());
+                    }
                     continue;
                 }
                 stepSnapshot.state = WorkflowStepState::Failed;
                 stepSnapshot.error = error;
                 failLocked(*instance, error);
+                auto saved = persist(*instance);
+                if(!saved) {
+                    return foundation::Result<WorkflowSnapshot>::failure(
+                        std::move(saved).error());
+                }
                 cancelTasks = true;
             }
             if(cancelTasks) {
@@ -759,6 +906,106 @@ public:
     void stop() noexcept
     {
         accepting_.store(false, std::memory_order_release);
+    }
+
+    foundation::Result<void> restore()
+    {
+        if(!persistence_.configured()) {
+            return foundation::Result<void>::success();
+        }
+        auto checkpoints = persistence_.workflowCheckpoints();
+        if(!checkpoints) {
+            return foundation::Result<void>::failure(std::move(checkpoints).error());
+        }
+        std::map<kernel::WorkflowId, std::shared_ptr<Instance>> restored;
+        for(auto& checkpoint : checkpoints.value()) {
+            auto definition = registry_.resolve(checkpoint.snapshot.workflow);
+            if(!definition) {
+                return foundation::Result<void>::failure(runtimeError(
+                    "Workflow.RecoveryDefinitionNotFound",
+                    foundation::ErrorCategory::NotFound,
+                    "A durable workflow definition is not registered",
+                    &checkpoint.snapshot.workflowId,
+                    nullptr,
+                    std::make_shared<const foundation::Error>(
+                        std::move(definition).error())));
+            }
+            auto digest = persistence_.workflowDefinitionDigest(definition.value());
+            if(!digest) {
+                return foundation::Result<void>::failure(std::move(digest).error());
+            }
+            if(digest.value() != checkpoint.definitionDigest
+               || definition.value().descriptor.version != checkpoint.snapshot.version
+               || definition.value().steps.size() != checkpoint.snapshot.steps.size()) {
+                return foundation::Result<void>::failure(runtimeError(
+                    "Workflow.RecoveryDefinitionMismatch",
+                    foundation::ErrorCategory::Conflict,
+                    "A durable workflow does not match its registered definition",
+                    &checkpoint.snapshot.workflowId));
+            }
+            for(std::size_t index = 0U; index < definition.value().steps.size(); ++index) {
+                if(definition.value().steps[index].stepId
+                   != checkpoint.snapshot.steps[index].stepId) {
+                    return foundation::Result<void>::failure(runtimeError(
+                        "Workflow.RecoveryDefinitionMismatch",
+                        foundation::ErrorCategory::Conflict,
+                        "A durable workflow step set does not match its registered definition",
+                        &checkpoint.snapshot.workflowId));
+                }
+            }
+            auto uniqueCompletion = checkpoint.completionOrder;
+            std::ranges::sort(uniqueCompletion);
+            if(std::ranges::adjacent_find(uniqueCompletion) != uniqueCompletion.end()
+               || std::ranges::any_of(checkpoint.completionOrder, [&](const auto& completed) {
+                      return std::ranges::none_of(
+                          definition.value().steps,
+                          [&](const auto& step) { return step.stepId == completed; });
+                  })) {
+                return foundation::Result<void>::failure(runtimeError(
+                    "Workflow.RecoveryCompletionOrderInvalid",
+                    foundation::ErrorCategory::Infrastructure,
+                    "A durable workflow completion order is invalid",
+                    &checkpoint.snapshot.workflowId));
+            }
+            for(auto& step : checkpoint.snapshot.steps) {
+                if(step.state != WorkflowStepState::Running) {
+                    continue;
+                }
+                if(checkpoint.snapshot.state == WorkflowState::Compensating
+                   && step.compensationAttempt != 0U) {
+                    step.state = WorkflowStepState::Succeeded;
+                    step.replayCompensationAttempt = true;
+                } else {
+                    step.state = WorkflowStepState::Waiting;
+                    step.replayCurrentAttempt = true;
+                }
+            }
+            auto instance = std::make_shared<Instance>(
+                std::move(checkpoint.request),
+                std::move(definition).value(),
+                std::move(checkpoint.snapshot));
+            instance->completionOrder = std::move(checkpoint.completionOrder);
+            instance->cancellationRequested =
+                instance->snapshot.state == WorkflowState::CancelRequested;
+            const auto [unused, inserted] = restored.emplace(
+                instance->snapshot.workflowId, std::move(instance));
+            static_cast<void>(unused);
+            if(!inserted) {
+                return foundation::Result<void>::failure(runtimeError(
+                    "Workflow.RecoveryDuplicateInstance",
+                    foundation::ErrorCategory::Conflict,
+                    "Durable workflow identities must be unique"));
+            }
+        }
+        std::unique_lock lock(instancesMutex_);
+        if(!instances_.empty()) {
+            return foundation::Result<void>::failure(runtimeError(
+                "Workflow.RecoveryAlreadyLoaded",
+                foundation::ErrorCategory::Conflict,
+                "Workflow recovery may only load an empty runtime"));
+        }
+        instances_ = std::move(restored);
+        return foundation::Result<void>::success();
     }
 
     std::size_t activeExecutionCount() const noexcept
@@ -1190,11 +1437,27 @@ private:
         }
     }
 
+    foundation::Result<void> persist(Instance& instance)
+    {
+        if(!persistence_.configured()) {
+            instance.checkpointDirty = false;
+            return foundation::Result<void>::success();
+        }
+        auto saved = persistence_.saveWorkflowCheckpoint(
+            instance.request,
+            instance.definition,
+            instance.snapshot,
+            instance.completionOrder);
+        instance.checkpointDirty = !saved.hasValue();
+        return saved;
+    }
+
     WorkflowRegistry& registry_;
     CommandRuntime& commands_;
     QueryRuntime& queries_;
     TaskRuntime& tasks_;
     ExecutionServices& executionServices_;
+    persistence::PersistenceService& persistence_;
     mutable std::shared_mutex instancesMutex_;
     std::map<kernel::WorkflowId, std::shared_ptr<Instance>> instances_;
     std::atomic_bool accepting_{false};
@@ -1206,8 +1469,10 @@ WorkflowRuntime::WorkflowRuntime(
     CommandRuntime& commands,
     QueryRuntime& queries,
     TaskRuntime& tasks,
-    ExecutionServices& executionServices)
-    : impl_(std::make_unique<Impl>(registry, commands, queries, tasks, executionServices))
+    ExecutionServices& executionServices,
+    persistence::PersistenceService& persistence)
+    : impl_(std::make_unique<Impl>(
+          registry, commands, queries, tasks, executionServices, persistence))
 {
 }
 
@@ -1254,6 +1519,11 @@ void WorkflowRuntime::start() noexcept
 void WorkflowRuntime::stop() noexcept
 {
     impl_->stop();
+}
+
+foundation::Result<void> WorkflowRuntime::restore()
+{
+    return impl_->restore();
 }
 
 } // namespace lasercnc::runtime

@@ -8,6 +8,7 @@
 #include <lasercnc/platform/snapshot_store.hpp>
 #include <lasercnc/runtime/transaction.hpp>
 #include <lasercnc/runtime/task.hpp>
+#include <lasercnc/runtime/workflow.hpp>
 #include <lasercnc/observability/diagnostics_service.hpp>
 #include <lasercnc/state/revision.hpp>
 
@@ -71,6 +72,14 @@ struct IdempotencyClaim final {
     std::optional<IdempotencyReplay> replay;
 };
 
+struct WorkflowCheckpoint final {
+    runtime::WorkflowRequest request;
+    kernel::ContentDigest definitionDigest;
+    runtime::WorkflowSnapshot snapshot;
+    std::vector<kernel::WorkflowStepId> completionOrder;
+    std::chrono::system_clock::time_point updatedAt;
+};
+
 class PersistenceService final {
 public:
     [[nodiscard]] foundation::Result<void> configure(
@@ -110,6 +119,16 @@ public:
     [[nodiscard]] foundation::Result<std::vector<observability::DiagnosticReport>> diagnosticHistory(
         const kernel::DiagnosticId& diagnosticId) const;
     [[nodiscard]] foundation::Result<std::vector<observability::DiagnosticReport>> latestDiagnostics() const;
+    [[nodiscard]] foundation::Result<kernel::ContentDigest> workflowDefinitionDigest(
+        const runtime::WorkflowDefinition& definition) const;
+    [[nodiscard]] foundation::Result<void> saveWorkflowCheckpoint(
+        const runtime::WorkflowRequest& request,
+        const runtime::WorkflowDefinition& definition,
+        const runtime::WorkflowSnapshot& snapshot,
+        const std::vector<kernel::WorkflowStepId>& completionOrder);
+    [[nodiscard]] foundation::Result<std::optional<WorkflowCheckpoint>> workflowCheckpoint(
+        const kernel::WorkflowId& workflowId) const;
+    [[nodiscard]] foundation::Result<std::vector<WorkflowCheckpoint>> workflowCheckpoints() const;
 
     [[nodiscard]] bool configured() const;
     [[nodiscard]] bool ready() const;

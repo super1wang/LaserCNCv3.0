@@ -29,6 +29,7 @@ target_sources(
         workflow/workflow.cpp
         workflow/workflow_registry.cpp
         workflow/workflow_runtime.cpp
+        persistence/workflow_persistence.cpp
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS "${PROJECT_SOURCE_DIR}/include"

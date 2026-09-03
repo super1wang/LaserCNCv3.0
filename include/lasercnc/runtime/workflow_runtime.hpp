@@ -10,6 +10,10 @@ namespace lasercnc::kernel {
 class AppKernel;
 }
 
+namespace lasercnc::persistence {
+class PersistenceService;
+}
+
 namespace lasercnc::runtime {
 
 class CommandRuntime;
@@ -25,7 +29,8 @@ public:
         CommandRuntime& commands,
         QueryRuntime& queries,
         TaskRuntime& tasks,
-        ExecutionServices& executionServices);
+        ExecutionServices& executionServices,
+        persistence::PersistenceService& persistence);
     ~WorkflowRuntime();
 
     WorkflowRuntime(const WorkflowRuntime&) = delete;
@@ -49,6 +54,7 @@ private:
 
     void start() noexcept;
     void stop() noexcept;
+    [[nodiscard]] foundation::Result<void> restore();
 
     std::unique_ptr<Impl> impl_;
 };
