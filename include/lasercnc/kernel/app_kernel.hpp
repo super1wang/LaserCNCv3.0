@@ -42,10 +42,10 @@ public:
     [[nodiscard]] const ServiceRegistry& services() const noexcept;
     [[nodiscard]] ModuleRuntime& modules() noexcept;
     [[nodiscard]] const ModuleRuntime& modules() const noexcept;
-    [[nodiscard]] state::DocumentStore& documents() noexcept;
+    [[nodiscard]] foundation::Result<void> addDocument(
+        ProjectId projectId,
+        DocumentId documentId);
     [[nodiscard]] const state::DocumentStore& documents() const noexcept;
-    [[nodiscard]] runtime::TransactionManager& transactions() noexcept;
-    [[nodiscard]] const runtime::TransactionManager& transactions() const noexcept;
     [[nodiscard]] runtime::ExecutionServices& executionServices() noexcept;
     [[nodiscard]] const runtime::ExecutionServices& executionServices() const noexcept;
     [[nodiscard]] runtime::CapabilityService& capabilities() noexcept;

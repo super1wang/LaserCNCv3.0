@@ -10,7 +10,7 @@ Phase 4 建立 Kernel 自有的业务状态与一致性边界，不引入领域�
 - `DocumentStore` 统一拥有活动文档的可变状态，以及同一项目内跨文档共享的 ProjectRevision。
 - 对外只返回按值复制的 `Document` 不可变快照；快照包含稳定身份、RevisionSet 和只读 ObjectRegistry。
 - ObjectRegistry 的插入、替换和删除入口保持私有，只开放按稳定 ID 查询和确定性枚举。调用方不能取得活动对象的可变引用、裸指针或位置索引。
-- `DocumentStore::addDocument` 只是装载/组合生命周期入口，只创建 revision 0 的空文档，不是业务内容写入口。
+- `DocumentStore::addDocument` 只是内部装载原语，只创建 revision 0 的空文档，不是业务内容写入口；AppKernel 仅在 Configuring 阶段通过 `addDocument` 暴露该动作，Ready 后只提供 const DocumentStore 快照访问。
 
 任何文档对象写入必须进入 `ApplicationTransaction`。当前没有绕过事务直接修改活动 Document 或 ObjectRegistry 的公共 API。
 
@@ -42,7 +42,7 @@ RevisionSet 固定覆盖六类一致性范围：Project、Document、Geometry、
 5. commit 先构造确定性的 before/after change set、下一组 Revision、CommittedDomainEvent 和回执；所有可能失败的准备完成后，才在 DocumentStore 独占锁内用无抛出的 swap 原子替换对象状态并更新 Revision。
 6. 空净变更不能推进 Revision，也不能释放事件；rollback、析构放弃、并发冲突、文档消失和 Revision 溢出均不得改变活动 Document。
 7. 并发事务提交在 DocumentStore 内串行化；基于同一旧快照的竞争提交只能有一个成功，其余返回 Revision Conflict。
-8. `TransactionManager` 与 `DocumentStore` 必须比活动事务存活更久；调用方必须在销毁 AppKernel 前提交、回滚或释放全部事务，显式 shutdown 会在仍有活动事务时拒绝执行。AppKernel 生命周期与单个 `ApplicationTransaction` 均只允许由一个调用线程驱动。
+8. `TransactionManager` 与 `DocumentStore` 必须比活动事务存活更久；AppKernel 不向 Host 公开 TransactionManager，CommandRuntime 是运行期唯一事务入口。调用方必须在销毁 AppKernel 前完成所有执行，显式 shutdown 会在仍有活动事务时拒绝执行。
 
 Application Transaction 与 SQLite transaction 不是同一概念。前者负责内存业务状态、修订、变更材料和领域事件一致性；后者目前只是一项底层持久化原语。
 

@@ -387,24 +387,15 @@ TEST_CASE("Concurrent transaction commits serialize with exactly one winner", "[
     CHECK(fixture.manager.activeTransactionCount() == 0U);
 }
 
-TEST_CASE("AppKernel owns document and transaction services", "[kernel][runtime][transaction]")
+TEST_CASE("AppKernel exposes document loading only during composition", "[kernel][state]")
 {
     lasercnc::kernel::AppKernel kernel;
     const auto project = validId<ProjectId>("project.kernel");
     const auto document = validId<DocumentId>("document.kernel");
-    REQUIRE(kernel.documents().addDocument(project, document).hasValue());
-
-    auto begun = kernel.transactions().begin(
-        validId<TransactionId>("transaction.kernel"), document);
-    REQUIRE(begun.hasValue());
-    CHECK(kernel.transactions().activeTransactionCount() == 1U);
-
-    auto refused = kernel.shutdown();
-    REQUIRE_FALSE(refused.hasValue());
-    CHECK(std::string(refused.error().code.value()) == "Kernel.ActiveTransactions");
-    CHECK(kernel.state() == lasercnc::kernel::AppKernelState::Configuring);
-
-    REQUIRE(begun.value()->rollback().hasValue());
-    CHECK(kernel.shutdown().hasValue());
-    CHECK(kernel.state() == lasercnc::kernel::AppKernelState::Stopped);
+    REQUIRE(kernel.addDocument(project, document).hasValue());
+    REQUIRE(kernel.bootstrap().hasValue());
+    CHECK(kernel.documents().contains(document));
+    auto late = kernel.addDocument(project, validId<DocumentId>("document.late"));
+    REQUIRE_FALSE(late.hasValue());
+    CHECK(std::string(late.error().code.value()) == "Kernel.DocumentLoadNotConfiguring");
 }

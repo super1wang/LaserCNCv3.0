@@ -181,6 +181,24 @@ public:
     std::atomic_size_t calls{0U};
 };
 
+class BlockingQueryHandler final : public IQueryHandler {
+public:
+    BlockingQueryHandler(std::promise<void>& enteredPromise, std::shared_future<void> releaseFuture)
+        : entered(enteredPromise), release(std::move(releaseFuture))
+    {
+    }
+
+    Result<Value> execute(const QueryRequest&, const QueryContext&) override
+    {
+        entered.set_value();
+        release.wait();
+        return Result<Value>::success(Value {Value::Object {}});
+    }
+
+    std::promise<void>& entered;
+    std::shared_future<void> release;
+};
+
 class FailingHandler final : public ICommandHandler {
 public:
     explicit FailingHandler(bool shouldThrow) : throws(shouldThrow) {}
@@ -284,7 +302,7 @@ struct RuntimeFixture final {
           document(validId<DocumentId>("document.runtime")),
           session(validId<SessionId>("session.runtime"))
     {
-        REQUIRE(kernel.documents().addDocument(project, document).hasValue());
+        REQUIRE(kernel.addDocument(project, document).hasValue());
         REQUIRE(kernel.executionServices().configure(validator, log).hasValue());
         const std::array grants {
             validId<CapabilityId>("document.read"),
@@ -336,6 +354,8 @@ TEST_CASE("AppKernel runs one headless command and query chain", "[runtime][comm
     CHECK(fixture.kernel.commandRegistry().frozen());
     CHECK(fixture.kernel.queryRegistry().frozen());
     CHECK(fixture.kernel.executionServices().frozen());
+    CHECK_FALSE(fixture.kernel.executionServices().configure(
+        fixture.validator, fixture.log).hasValue());
     CHECK(fixture.kernel.commands().accepting());
     CHECK(fixture.kernel.queries().accepting());
     CHECK_FALSE(fixture.kernel.commandRegistry().registerHandler(
@@ -508,6 +528,10 @@ TEST_CASE("Concurrent duplicate idempotency requests share one in-flight executi
             "kernel.slow-create", "unused", key));
     });
     enteredFuture.wait();
+    auto refused = fixture.kernel.shutdown();
+    REQUIRE_FALSE(refused.hasValue());
+    CHECK(std::string(refused.error().code.value()) == "Kernel.ActiveTransactions");
+    CHECK(fixture.kernel.state() == lasercnc::kernel::AppKernelState::Ready);
     auto second = std::async(std::launch::async, [&]() {
         return fixture.kernel.commands().execute(commandRequest(
             "request.concurrent.second", fixture.project, fixture.document, fixture.session,
@@ -584,4 +608,39 @@ TEST_CASE("AppKernel refuses registered runtimes without execution services", "[
           == "Runtime.ExecutionServicesNotConfigured");
     CHECK(kernel.state() == lasercnc::kernel::AppKernelState::Failed);
     CHECK_FALSE(kernel.commands().accepting());
+}
+
+TEST_CASE("AppKernel refuses shutdown while a query execution is active", "[kernel][runtime][query]")
+{
+    RuntimeFixture fixture;
+    std::promise<void> entered;
+    auto enteredFuture = entered.get_future();
+    std::promise<void> release;
+    auto handler = std::make_shared<BlockingQueryHandler>(
+        entered, release.get_future().share());
+    REQUIRE(fixture.kernel.queryRegistry().registerHandler(
+        queryDescriptor("kernel.blocking-query", false), handler).hasValue());
+    REQUIRE(fixture.kernel.bootstrap().hasValue());
+
+    auto running = std::async(std::launch::async, [&]() {
+        return fixture.kernel.queries().execute(QueryRequest {
+            validId<RequestId>("request.blocking-query"),
+            fixture.session,
+            fixture.project,
+            std::nullopt,
+            validId<QueryName>("kernel.blocking-query"),
+            Value {Value::Object {}},
+            validId<CorrelationId>("correlation.blocking-query"),
+            validId<TraceId>("trace.blocking-query")});
+    });
+    enteredFuture.wait();
+    CHECK(fixture.kernel.queries().activeExecutionCount() == 1U);
+    auto refused = fixture.kernel.shutdown();
+    REQUIRE_FALSE(refused.hasValue());
+    CHECK(std::string(refused.error().code.value()) == "Kernel.ActiveExecutions");
+    CHECK(fixture.kernel.state() == lasercnc::kernel::AppKernelState::Ready);
+
+    release.set_value();
+    REQUIRE(running.get().hasValue());
+    REQUIRE(fixture.kernel.shutdown().hasValue());
 }

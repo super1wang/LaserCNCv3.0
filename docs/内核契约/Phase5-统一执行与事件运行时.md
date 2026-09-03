@@ -1,6 +1,6 @@
 # Phase 5 统一执行与事件运行时
 
-状态：进行中。
+状态：已验收。
 
 Phase 5 建立所有 Headless、CLI、未来 GUI/Script/AI 必须共用的 Command、Query 与 Event Kernel 入口。本阶段不实现任何 CAD、CAM、Machine、Process 或其他领域命令。
 
@@ -51,7 +51,23 @@ Phase 5 建立所有 Headless、CLI、未来 GUI/Script/AI 必须共用的 Comma
 - 已注册 Command/Query 但未配置 Schema/Log 端口时 bootstrap fail-closed，并清理已启动模块；
 - shutdown 前检查活动 Transaction、Command 和 Query；生命周期本身不支持并发驱动。
 
-## 本阶段剩余工作
+## Headless/CLI 进程契约
 
-- 建立无领域代码的 Headless/CLI 测试入口，验证发现、命令执行、查询执行、jsoncons Schema、spdlog 日志与 CTest 共用同一 Runtime；
-- 补齐完整 Release、重复执行、production-only 和架构边界门禁，再更新阶段交付文档。
+`integration.kernel_headless_cli_roundtrip` 从独立进程启动测试专用组合根，并通过参数选择固定 roundtrip 模式。它验证：
+
+- Command/Query descriptor 发现；
+- JSON 文本经 jsoncons Adapter 进入 Kernel Value；
+- 参数和结果 Schema 使用真实 jsoncons backend；
+- CommandRuntime 完成 Capability、ExpectedRevision、事务、事件和幂等链；
+- QueryRuntime 从提交后的不可变快照读取；
+- spdlog 生成非空 JSONL，最终结果重新序列化到标准输出。
+
+该可执行文件只在 `LCNC_BUILD_TESTING=ON` 时生成，测试 handler 只位于 `tests/integration`。它证明 CLI 形态的进程调用与 Headless 调用共用同一 Runtime，不是生产 CLI Host，也没有暴露通用对象写命令。用户限定的内核阶段内不新增 CLI11 或上层模块；真正的产品 CLI 只负责适配协议，未来不得另建执行通道。
+
+## 阶段边界
+
+- 异步 Command、TaskRuntime、Scheduler、Cancellation 和资源仲裁属于 Phase 6；
+- Trace 目前只传播 TraceId，Trace/Metrics/Diagnostics 实现属于 Phase 7；
+- 幂等持久化、Event Journal、Snapshot 和 Crash Recovery 属于 Phase 8；
+- Workflow/Script 属于 Phase 9；
+- CAD、CAM、Machine、Process、Qt GUI、产品 CLI、RPC 和 AI 等上层/Host 不在本阶段实现。

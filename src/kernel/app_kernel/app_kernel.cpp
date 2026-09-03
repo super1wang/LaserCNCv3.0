@@ -143,24 +143,22 @@ const ModuleRuntime& AppKernel::modules() const noexcept
     return modules_;
 }
 
-state::DocumentStore& AppKernel::documents() noexcept
+foundation::Result<void> AppKernel::addDocument(
+    ProjectId projectId,
+    DocumentId documentId)
 {
-    return documents_;
+    if(state_ != AppKernelState::Configuring) {
+        return foundation::Result<void>::failure(foundation::makeError(
+            "Kernel.DocumentLoadNotConfiguring",
+            foundation::ErrorCategory::Conflict,
+            "Documents can only be attached while the application kernel is configuring"));
+    }
+    return documents_.addDocument(std::move(projectId), std::move(documentId));
 }
 
 const state::DocumentStore& AppKernel::documents() const noexcept
 {
     return documents_;
-}
-
-runtime::TransactionManager& AppKernel::transactions() noexcept
-{
-    return transactions_;
-}
-
-const runtime::TransactionManager& AppKernel::transactions() const noexcept
-{
-    return transactions_;
 }
 
 runtime::ExecutionServices& AppKernel::executionServices() noexcept

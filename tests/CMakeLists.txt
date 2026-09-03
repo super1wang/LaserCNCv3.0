@@ -71,3 +71,27 @@ add_test(
         "-DLCNC_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
         -P "${PROJECT_SOURCE_DIR}/cmake/VerifyKernelBoundaries.cmake"
 )
+
+add_executable(
+    lasercnc_kernel_headless_contract
+    integration/kernel_headless_contract.cpp
+)
+target_link_libraries(
+    lasercnc_kernel_headless_contract
+    PRIVATE LaserCNC::Infrastructure
+)
+target_compile_features(lasercnc_kernel_headless_contract PRIVATE cxx_std_20)
+set_target_properties(
+    lasercnc_kernel_headless_contract
+    PROPERTIES CXX_EXTENSIONS OFF
+)
+lcnc_enable_warnings(lasercnc_kernel_headless_contract)
+
+add_test(
+    NAME integration.kernel_headless_cli_roundtrip
+    COMMAND lasercnc_kernel_headless_contract --mode roundtrip
+)
+set_tests_properties(
+    integration.kernel_headless_cli_roundtrip
+    PROPERTIES PASS_REGULAR_EXPRESSION "verified"
+)
