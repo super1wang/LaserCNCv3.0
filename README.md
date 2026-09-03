@@ -1,6 +1,6 @@
 # LaserCNC v3.0
 
-LaserCNC v3.0 的 Application Kernel 已按设计推进至 Phase 9 并完成自动化验收。仓库按 Command-First、Automation-First、Headless-First 和 Infrastructure-Adapter 原则建设；CAD、CAM、Machine、Process、Qt GUI、产品 RPC/CLI 与 AI 等上层模块仍未开始，需在新的明确阶段范围内推进。
+LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9，当前按《Kernel 1.0 最终收口设计规划》推进 K10A–K10F。仓库坚持 Command-First、Automation-First、Headless-First 和 Infrastructure-Adapter；CAD、CAM、Machine、Process、Qt GUI、产品 RPC/CLI 与 AI 等上层模块仍未开始。
 
 ## 已完成阶段
 
@@ -13,12 +13,14 @@ LaserCNC v3.0 的 Application Kernel 已按设计推进至 Phase 9 并完成自�
 - Phase 7：Tracing、Metrics 与 Diagnostics
 - Phase 8：Snapshot、Journal、SQLite Persistence 与 Crash Recovery
 - Phase 9：Workflow Runtime 与结构化 Script Runtime
+- Kernel 1.0 Closure：K10A Execution Contract 1.0 进行中
 - 标准：C++20
 - 测试：Catch2 + CTest
 
 详细状态见 [内核开发路线图](docs/内核开发路线图.md)，强制边界见
 [内核架构规则](docs/内核架构规则.md)。原始设计依据保存在
-[最终架构设计方案](LaserCNC%20Application%20Kernel%20最终架构设计方案.md)。
+[最终架构设计方案](LaserCNC%20Application%20Kernel%20最终架构设计方案.md)，收口范围见
+[Kernel 1.0 最终收口设计规划](docs/Kernel%201.0%20最终收口设计规划.md)。
 
 ## Windows 构建
 

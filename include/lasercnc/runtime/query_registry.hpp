@@ -22,7 +22,8 @@ public:
         QueryDescriptor descriptor,
         std::shared_ptr<IQueryHandler> handler);
     [[nodiscard]] foundation::Result<QueryDescriptor> descriptor(
-        const kernel::QueryName& name) const;
+        const QueryKey& key,
+        VersionResolution resolution = VersionResolution::Exact) const;
     [[nodiscard]] std::vector<QueryDescriptor> descriptors() const;
     [[nodiscard]] std::size_t size() const;
     [[nodiscard]] bool frozen() const;
@@ -36,11 +37,13 @@ private:
         std::shared_ptr<IQueryHandler> handler;
     };
 
-    [[nodiscard]] foundation::Result<Entry> resolve(const kernel::QueryName& name) const;
+    [[nodiscard]] foundation::Result<Entry> resolve(
+        const QueryKey& key,
+        VersionResolution resolution) const;
     void freeze();
 
     mutable std::shared_mutex mutex_;
-    std::map<kernel::QueryName, Entry> entries_;
+    std::map<QueryKey, Entry> entries_;
     bool frozen_{false};
 };
 

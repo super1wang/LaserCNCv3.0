@@ -288,6 +288,7 @@ CommandRequest commandRequest(
         project,
         document,
         validId<CommandName>(command),
+        Version {1U, 0U, 0U},
         Value {Value::Object {
             {"data", Value {"payload"}},
             {"id", Value {objectId}},
@@ -310,6 +311,7 @@ QueryRequest queryRequest(
         project,
         document,
         validId<QueryName>("kernel.object.get"),
+        Version {1U, 0U, 0U},
         Value {Value::Object {{"id", Value {objectId}}}},
         validId<CorrelationId>("correlation.query"),
         validId<TraceId>("trace.query")};
@@ -457,6 +459,71 @@ TEST_CASE("AppKernel runs one headless command and query chain", "[runtime][comm
         fixture.project, fixture.document, fixture.session, "object.runtime")).hasValue());
 }
 
+TEST_CASE("Command and query requests resolve compatible deprecated contracts explicitly", "[runtime][command][query][version]")
+{
+    RuntimeFixture fixture;
+    fixture.create = std::make_shared<CreateObjectHandler>();
+    fixture.query = std::make_shared<ObjectQueryHandler>();
+
+    auto commandOne = commandDescriptor("kernel.versioned.create");
+    auto commandOneTwo = commandOne;
+    commandOneTwo.version = Version {1U, 2U, 0U};
+    commandOneTwo.status = ContractStatus::Deprecated;
+    REQUIRE(fixture.kernel.commandRegistry().registerHandler(
+        commandOne, fixture.create).hasValue());
+    REQUIRE(fixture.kernel.commandRegistry().registerHandler(
+        commandOneTwo, fixture.create).hasValue());
+
+    auto queryOne = queryDescriptor("kernel.versioned.get");
+    auto queryOneOne = queryOne;
+    queryOneOne.version = Version {1U, 1U, 0U};
+    queryOneOne.status = ContractStatus::Deprecated;
+    REQUIRE(fixture.kernel.queryRegistry().registerHandler(
+        queryOne, fixture.query).hasValue());
+    REQUIRE(fixture.kernel.queryRegistry().registerHandler(
+        queryOneOne, fixture.query).hasValue());
+    REQUIRE(fixture.kernel.bootstrap().hasValue());
+
+    auto unsupported = commandRequest(
+        "request.version.unsupported",
+        fixture.project,
+        fixture.document,
+        fixture.session,
+        "kernel.versioned.create",
+        "object.version.unsupported");
+    unsupported.version = Version {1U, 3U, 0U};
+    auto unsupportedResult = fixture.kernel.commands().execute(unsupported);
+    REQUIRE_FALSE(unsupportedResult.hasValue());
+    CHECK(std::string(unsupportedResult.error().code.value()) == "Command.UnsupportedVersion");
+    CHECK(fixture.create->calls == 0U);
+
+    auto compatible = commandRequest(
+        "request.version.compatible",
+        fixture.project,
+        fixture.document,
+        fixture.session,
+        "kernel.versioned.create",
+        "object.versioned");
+    compatible.versionResolution = VersionResolution::Compatible;
+    auto command = fixture.kernel.commands().execute(compatible);
+    REQUIRE(command.hasValue());
+    CHECK(command.value().resolvedVersion == Version {1U, 2U, 0U});
+    CHECK(command.value().contractStatus == ContractStatus::Deprecated);
+
+    auto queryRequestValue = queryRequest(
+        fixture.project, fixture.document, fixture.session, "object.versioned");
+    queryRequestValue.query = validId<QueryName>("kernel.versioned.get");
+    queryRequestValue.versionResolution = VersionResolution::Compatible;
+    auto query = fixture.kernel.queries().execute(queryRequestValue);
+    REQUIRE(query.hasValue());
+    CHECK(query.value().resolvedVersion == Version {1U, 1U, 0U});
+    CHECK(query.value().contractStatus == ContractStatus::Deprecated);
+    CHECK(fixture.create->calls == 1U);
+    CHECK(fixture.query->calls == 1U);
+
+    REQUIRE(fixture.kernel.shutdown().hasValue());
+}
+
 TEST_CASE("CommandRuntime enforces schema capability project and revision before writes", "[runtime][command]")
 {
     RuntimeFixture fixture;
@@ -572,6 +639,21 @@ TEST_CASE("CommandRuntime idempotency replays one commit and rejects key rebindi
     CHECK(fixture.create->calls == 1U);
     CHECK(eventCount == 1U);
     CHECK(fixture.kernel.commands().idempotencyRecordCount() == 1U);
+
+    auto resolutionChanged = commandRequest(
+        "request.idempotency.resolution-conflict",
+        fixture.project,
+        fixture.document,
+        fixture.session,
+        "kernel.object.create",
+        "object.idempotent",
+        key);
+    resolutionChanged.versionResolution = VersionResolution::Compatible;
+    auto resolutionConflict = fixture.kernel.commands().execute(resolutionChanged);
+    REQUIRE_FALSE(resolutionConflict.hasValue());
+    CHECK(std::string(resolutionConflict.error().code.value())
+          == "Command.IdempotencyKeyConflict");
+    CHECK(fixture.create->calls == 1U);
 
     auto rebound = fixture.kernel.commands().execute(commandRequest(
         "request.idempotency.conflict", fixture.project, fixture.document, fixture.session,
@@ -699,6 +781,7 @@ TEST_CASE("AppKernel refuses shutdown while a query execution is active", "[kern
             fixture.project,
             std::nullopt,
             validId<QueryName>("kernel.blocking-query"),
+            Version {1U, 0U, 0U},
             Value {Value::Object {}},
             validId<CorrelationId>("correlation.blocking-query"),
             validId<TraceId>("trace.blocking-query")});

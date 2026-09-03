@@ -395,6 +395,7 @@ CommandRequest persistenceCommand(
         requiredId<ProjectId>("project.persistence-contract"),
         requiredId<DocumentId>("document.persistence-contract"),
         requiredId<CommandName>("kernel.persistence.object.put"),
+        Version {1U, 0U, 0U},
         Value {Value::Object {
             {"data", Value {data}}, {"id", Value {objectId}}}},
         expected,
@@ -414,6 +415,7 @@ Result<Value> queryPersistentObject(
         requiredId<ProjectId>("project.persistence-contract"),
         requiredId<DocumentId>("document.persistence-contract"),
         requiredId<QueryName>("kernel.persistence.object.get"),
+        Version {1U, 0U, 0U},
         Value {Value::Object {{"id", Value {objectId}}}},
         requiredId<CorrelationId>("correlation.persistence-contract"),
         requiredId<TraceId>("trace.persistence-contract")});
@@ -538,6 +540,7 @@ int runRoundTrip()
         project,
         document,
         requiredId<CommandName>("kernel.contract.object.put"),
+        Version {1U, 0U, 0U},
         std::move(parsedArguments).value(),
         Revision {0U},
         requiredId<CorrelationId>("correlation.cli"),
@@ -562,6 +565,7 @@ int runRoundTrip()
         project,
         document,
         requiredId<QueryName>("kernel.contract.object.get"),
+        Version {1U, 0U, 0U},
         std::move(queryArguments).value(),
         requiredId<CorrelationId>("correlation.cli"),
         requiredId<TraceId>("trace.cli")});
@@ -685,6 +689,7 @@ int runTaskRoundTrip()
         project,
         document,
         requiredId<CommandName>("kernel.contract.compute.accept"),
+        Version {1U, 0U, 0U},
         std::move(parsed).value(),
         Revision {0U},
         requiredId<CorrelationId>("correlation.cli.task"),

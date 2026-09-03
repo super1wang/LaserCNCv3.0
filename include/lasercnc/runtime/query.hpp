@@ -5,6 +5,7 @@
 #include <lasercnc/foundation/value.hpp>
 #include <lasercnc/foundation/version.hpp>
 #include <lasercnc/kernel/identifiers.hpp>
+#include <lasercnc/runtime/execution_contract.hpp>
 #include <lasercnc/state/document.hpp>
 
 #include <optional>
@@ -20,6 +21,7 @@ struct QueryDescriptor final {
     kernel::CapabilityId capability;
     bool requiresDocument{true};
     bool deterministic{false};
+    ContractStatus status{ContractStatus::Active};
 };
 
 struct QueryRequest final {
@@ -28,10 +30,12 @@ struct QueryRequest final {
     kernel::ProjectId projectId;
     std::optional<kernel::DocumentId> documentId;
     kernel::QueryName query;
+    foundation::Version version;
     foundation::Value arguments;
     kernel::CorrelationId correlationId;
     kernel::TraceId traceId;
     std::optional<kernel::SpanId> parentSpanId;
+    VersionResolution versionResolution{VersionResolution::Exact};
 };
 
 struct QueryContext final {
@@ -51,6 +55,8 @@ struct QueryResponse final {
     foundation::Value result;
     std::optional<state::RevisionSet> revisions;
     std::vector<foundation::Error> postExecutionErrors;
+    foundation::Version resolvedVersion;
+    ContractStatus contractStatus{ContractStatus::Active};
 };
 
 } // namespace lasercnc::runtime

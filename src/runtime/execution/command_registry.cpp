@@ -13,15 +13,21 @@ foundation::Error commandError(
     const char* code,
     foundation::ErrorCategory category,
     const char* message,
-    const kernel::CommandName& name)
+    const CommandKey& key)
 {
     return foundation::makeError(
         code,
         category,
         message,
         foundation::Value {foundation::Value::Object {
-            {"command", foundation::Value {std::string(name.value())}},
+            {"command", foundation::Value {std::string(key.name.value())}},
+            {"version", foundation::Value {key.version.toString()}},
         }});
+}
+
+CommandKey keyOf(const CommandDescriptor& descriptor)
+{
+    return CommandKey {descriptor.name, descriptor.version};
 }
 
 } // namespace
@@ -30,33 +36,34 @@ foundation::Result<void> CommandRegistry::registerHandler(
     CommandDescriptor descriptor,
     std::shared_ptr<ICommandHandler> handler)
 {
+    const auto key = keyOf(descriptor);
     if(handler == nullptr) {
         return foundation::Result<void>::failure(commandError(
             "Command.InvalidHandler",
             foundation::ErrorCategory::Validation,
             "A command handler is required",
-            descriptor.name));
+            key));
     }
     if(descriptor.executionMode != ExecutionMode::Synchronous) {
         return foundation::Result<void>::failure(commandError(
             "Command.HandlerModeMismatch",
             foundation::ErrorCategory::Validation,
             "A synchronous command requires an ICommandHandler",
-            descriptor.name));
+            key));
     }
     if(descriptor.sideEffect != SideEffectLevel::DocumentWrite) {
         return foundation::Result<void>::failure(commandError(
             "Command.SideEffectUnsupported",
             foundation::ErrorCategory::Validation,
             "Phase 5 command handlers must use the document transaction boundary",
-            descriptor.name));
+            key));
     }
     if(descriptor.undoable) {
         return foundation::Result<void>::failure(commandError(
             "Command.UndoUnsupported",
             foundation::ErrorCategory::Validation,
             "Undoable commands require the Phase 8 journal contract",
-            descriptor.name));
+            key));
     }
 
     std::unique_lock lock(mutex_);
@@ -65,18 +72,17 @@ foundation::Result<void> CommandRegistry::registerHandler(
             "Command.RegistryFrozen",
             foundation::ErrorCategory::Conflict,
             "Command registration is closed",
-            descriptor.name));
+            key));
     }
-    const auto name = descriptor.name;
     const auto [unused, inserted] = entries_.emplace(
-        name, Entry {std::move(descriptor), std::move(handler), nullptr});
+        key, Entry {std::move(descriptor), std::move(handler), nullptr});
     static_cast<void>(unused);
     if(!inserted) {
         return foundation::Result<void>::failure(commandError(
             "Command.AlreadyRegistered",
             foundation::ErrorCategory::Conflict,
-            "A command with the same stable name is already registered",
-            name));
+            "The exact command name and version are already registered",
+            key));
     }
     return foundation::Result<void>::success();
 }
@@ -85,33 +91,34 @@ foundation::Result<void> CommandRegistry::registerAsyncHandler(
     CommandDescriptor descriptor,
     std::shared_ptr<IAsyncCommandHandler> handler)
 {
+    const auto key = keyOf(descriptor);
     if(handler == nullptr) {
         return foundation::Result<void>::failure(commandError(
             "Command.InvalidHandler",
             foundation::ErrorCategory::Validation,
             "An asynchronous command handler is required",
-            descriptor.name));
+            key));
     }
     if(descriptor.executionMode != ExecutionMode::Asynchronous) {
         return foundation::Result<void>::failure(commandError(
             "Command.HandlerModeMismatch",
             foundation::ErrorCategory::Validation,
             "An asynchronous command requires an IAsyncCommandHandler",
-            descriptor.name));
+            key));
     }
     if(descriptor.sideEffect != SideEffectLevel::ReadOnly) {
         return foundation::Result<void>::failure(commandError(
             "Command.AsyncSideEffectUnsupported",
             foundation::ErrorCategory::Validation,
             "Asynchronous commands may only prepare read-only background computation",
-            descriptor.name));
+            key));
     }
     if(descriptor.undoable) {
         return foundation::Result<void>::failure(commandError(
             "Command.UndoUnsupported",
             foundation::ErrorCategory::Validation,
             "Undoable commands require the Phase 8 journal contract",
-            descriptor.name));
+            key));
     }
 
     std::unique_lock lock(mutex_);
@@ -120,26 +127,26 @@ foundation::Result<void> CommandRegistry::registerAsyncHandler(
             "Command.RegistryFrozen",
             foundation::ErrorCategory::Conflict,
             "Command registration is closed",
-            descriptor.name));
+            key));
     }
-    const auto name = descriptor.name;
     const auto [unused, inserted] = entries_.emplace(
-        name, Entry {std::move(descriptor), nullptr, std::move(handler)});
+        key, Entry {std::move(descriptor), nullptr, std::move(handler)});
     static_cast<void>(unused);
     if(!inserted) {
         return foundation::Result<void>::failure(commandError(
             "Command.AlreadyRegistered",
             foundation::ErrorCategory::Conflict,
-            "A command with the same stable name is already registered",
-            name));
+            "The exact command name and version are already registered",
+            key));
     }
     return foundation::Result<void>::success();
 }
 
 foundation::Result<CommandDescriptor> CommandRegistry::descriptor(
-    const kernel::CommandName& name) const
+    const CommandKey& key,
+    VersionResolution resolution) const
 {
-    auto entry = resolve(name);
+    auto entry = resolve(key, resolution);
     if(!entry.hasValue()) {
         return foundation::Result<CommandDescriptor>::failure(std::move(entry).error());
     }
@@ -171,18 +178,42 @@ bool CommandRegistry::frozen() const
 }
 
 foundation::Result<CommandRegistry::Entry> CommandRegistry::resolve(
-    const kernel::CommandName& name) const
+    const CommandKey& key,
+    VersionResolution resolution) const
 {
     std::shared_lock lock(mutex_);
-    const auto entry = entries_.find(name);
-    if(entry == entries_.end()) {
+    const auto exact = entries_.find(key);
+    if(resolution == VersionResolution::Exact && exact != entries_.end()) {
+        return foundation::Result<Entry>::success(exact->second);
+    }
+
+    const auto first = entries_.lower_bound(CommandKey {key.name, foundation::Version {}});
+    if(first == entries_.end() || first->first.name != key.name) {
         return foundation::Result<Entry>::failure(commandError(
             "Command.NotFound",
             foundation::ErrorCategory::NotFound,
             "The command is not registered",
-            name));
+            key));
     }
-    return foundation::Result<Entry>::success(entry->second);
+    if(resolution == VersionResolution::Compatible) {
+        const Entry* compatible = nullptr;
+        for(auto current = first;
+            current != entries_.end() && current->first.name == key.name;
+            ++current) {
+            if(current->first.version.major == key.version.major
+               && current->first.version >= key.version) {
+                compatible = &current->second;
+            }
+        }
+        if(compatible != nullptr) {
+            return foundation::Result<Entry>::success(*compatible);
+        }
+    }
+    return foundation::Result<Entry>::failure(commandError(
+        "Command.UnsupportedVersion",
+        foundation::ErrorCategory::Validation,
+        "The requested command version is not supported",
+        key));
 }
 
 void CommandRegistry::freeze()

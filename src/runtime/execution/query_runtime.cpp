@@ -33,6 +33,9 @@ foundation::Error queryError(
         foundation::Value {foundation::Value::Object {
             {"requestId", foundation::Value {std::string(request.requestId.value())}},
             {"query", foundation::Value {std::string(request.query.value())}},
+            {"requestedVersion", foundation::Value {request.version.toString()}},
+            {"versionResolution", foundation::Value {
+                request.versionResolution == VersionResolution::Exact ? "exact" : "compatible"}},
         }},
         foundation::Severity::Error,
         std::move(cause));
@@ -63,6 +66,10 @@ void startQuerySpan(
             "query.execute",
             foundation::Value::Object {
                 {"query", foundation::Value {std::string(request.query.value())}},
+                {"requestedVersion", foundation::Value {request.version.toString()}},
+                {"versionResolution", foundation::Value {
+                    request.versionResolution == VersionResolution::Exact
+                        ? "exact" : "compatible"}},
             }});
         if(started && started.value() != nullptr) {
             span = std::move(started).value();
@@ -103,6 +110,9 @@ observability::LogRecord queryLog(
     foundation::Value::Object data {
         {"query", foundation::Value {std::string(request.query.value())}},
         {"outcome", foundation::Value {outcome}},
+        {"requestedVersion", foundation::Value {request.version.toString()}},
+        {"versionResolution", foundation::Value {
+            request.versionResolution == VersionResolution::Exact ? "exact" : "compatible"}},
     };
     if(version != nullptr) {
         data.emplace("version", foundation::Value {version->toString()});
@@ -170,7 +180,8 @@ public:
 
     foundation::Result<QueryResponse> executeOnce(const QueryRequest& request)
     {
-        auto entry = registry.resolve(request.query);
+        auto entry = registry.resolve(
+            QueryKey {request.query, request.version}, request.versionResolution);
         if(!entry.hasValue()) {
             return foundation::Result<QueryResponse>::failure(std::move(entry).error());
         }
@@ -257,7 +268,9 @@ public:
             context.document.has_value()
                 ? std::optional<state::RevisionSet> {context.document->revisions()}
                 : std::nullopt,
-            {}};
+            {},
+            descriptor.version,
+            descriptor.status};
         try {
             auto logged = services.value().logService->write(queryLog(
                 request, observability::LogLevel::Info, "success", &descriptor.version));

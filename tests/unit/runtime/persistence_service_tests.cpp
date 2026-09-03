@@ -572,6 +572,7 @@ CommandRequest persistentCommandRequest(
         projectId,
         documentId,
         validId<CommandName>("kernel.persistence.create"),
+        Version {1U, 0U, 0U},
         Value {Value::Object {
             {"data", Value {"durable"}}, {"id", Value {objectId}}}},
         std::nullopt,
@@ -657,6 +658,7 @@ CommandRequest persistentAsyncCommandRequest(
         projectId,
         documentId,
         validId<CommandName>("kernel.persistence.async-command"),
+        Version {1U, 0U, 0U},
         Value {Value::Object {{"input", Value {"durable"}}}},
         std::nullopt,
         validId<CorrelationId>("correlation.persistence.async"),

@@ -25,7 +25,8 @@ public:
         CommandDescriptor descriptor,
         std::shared_ptr<IAsyncCommandHandler> handler);
     [[nodiscard]] foundation::Result<CommandDescriptor> descriptor(
-        const kernel::CommandName& name) const;
+        const CommandKey& key,
+        VersionResolution resolution = VersionResolution::Exact) const;
     [[nodiscard]] std::vector<CommandDescriptor> descriptors() const;
     [[nodiscard]] std::size_t size() const;
     [[nodiscard]] bool frozen() const;
@@ -40,11 +41,13 @@ private:
         std::shared_ptr<IAsyncCommandHandler> asyncHandler;
     };
 
-    [[nodiscard]] foundation::Result<Entry> resolve(const kernel::CommandName& name) const;
+    [[nodiscard]] foundation::Result<Entry> resolve(
+        const CommandKey& key,
+        VersionResolution resolution) const;
     void freeze();
 
     mutable std::shared_mutex mutex_;
-    std::map<kernel::CommandName, Entry> entries_;
+    std::map<CommandKey, Entry> entries_;
     bool frozen_{false};
 };
 

@@ -42,6 +42,7 @@ target_sources(
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/transaction_manager.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/capability_service.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/execution_services.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/execution_contract.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/command.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/command_registry.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/query.hpp"

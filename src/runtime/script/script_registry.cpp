@@ -285,9 +285,9 @@ foundation::Result<void> ScriptRegistry::validateAndFreeze()
         static_cast<void>(unused);
         auto operations = visitNodes(definition.nodes, [&](const ScriptNode& node) {
             if(node.command.has_value()) {
-                auto descriptor = commands_.descriptor(node.command->command);
-                if(!descriptor || descriptor.value().version != node.command->version
-                   || !descriptor.value().idempotent) {
+                auto descriptor = commands_.descriptor(CommandKey {
+                    node.command->command, node.command->version});
+                if(!descriptor || !descriptor.value().idempotent) {
                     return foundation::Result<void>::failure(scriptError(
                         "Script.InvalidCommandReference",
                         foundation::ErrorCategory::Validation,
@@ -297,8 +297,9 @@ foundation::Result<void> ScriptRegistry::validateAndFreeze()
                 }
             }
             if(node.query.has_value()) {
-                auto descriptor = queries_.descriptor(node.query->query);
-                if(!descriptor || descriptor.value().version != node.query->version) {
+                auto descriptor = queries_.descriptor(QueryKey {
+                    node.query->query, node.query->version});
+                if(!descriptor) {
                     return foundation::Result<void>::failure(scriptError(
                         "Script.InvalidQueryReference",
                         foundation::ErrorCategory::Validation,

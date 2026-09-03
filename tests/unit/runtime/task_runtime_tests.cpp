@@ -679,6 +679,7 @@ TEST_CASE("Asynchronous commands use CommandRuntime to accept one read-only task
         project,
         document,
         validId<CommandName>("command.async-compute"),
+        Version {1U, 0U, 0U},
         Value {Value::Object {}},
         Revision {0U},
         validId<CorrelationId>("correlation.async-command"),

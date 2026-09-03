@@ -5,6 +5,7 @@
 #include <lasercnc/foundation/value.hpp>
 #include <lasercnc/foundation/version.hpp>
 #include <lasercnc/kernel/identifiers.hpp>
+#include <lasercnc/runtime/execution_contract.hpp>
 #include <lasercnc/state/revision.hpp>
 #include <lasercnc/runtime/transaction.hpp>
 #include <lasercnc/runtime/task.hpp>
@@ -43,6 +44,7 @@ struct CommandDescriptor final {
     bool undoable{false};
     bool deterministic{false};
     bool idempotent{false};
+    ContractStatus status{ContractStatus::Active};
 };
 
 struct CommandRequest final {
@@ -51,12 +53,14 @@ struct CommandRequest final {
     kernel::ProjectId projectId;
     kernel::DocumentId documentId;
     kernel::CommandName command;
+    foundation::Version version;
     foundation::Value arguments;
     std::optional<state::Revision> expectedRevision;
     kernel::CorrelationId correlationId;
     kernel::TraceId traceId;
     std::optional<kernel::IdempotencyKey> idempotencyKey;
     std::optional<kernel::SpanId> parentSpanId;
+    VersionResolution versionResolution{VersionResolution::Exact};
 
     friend bool operator==(const CommandRequest&, const CommandRequest&) = default;
 };
@@ -89,6 +93,8 @@ struct CommandResponse final {
     std::optional<kernel::TaskId> taskId;
     std::vector<foundation::Error> postExecutionErrors;
     bool replayed{false};
+    foundation::Version resolvedVersion;
+    ContractStatus contractStatus{ContractStatus::Active};
 };
 
 } // namespace lasercnc::runtime

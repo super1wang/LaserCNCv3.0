@@ -282,20 +282,19 @@ foundation::Result<void> WorkflowRegistry::validateAndFreeze()
         static_cast<void>(unused);
         for(const auto& step : definition.steps) {
             if(step.command.has_value()) {
-                auto descriptor = commands_.descriptor(step.command->command);
+                auto descriptor = commands_.descriptor(CommandKey {
+                    step.command->command, step.command->version});
                 if(!descriptor) {
+                    const auto unsupported = std::string(descriptor.error().code.value())
+                        == "Command.UnsupportedVersion";
                     return foundation::Result<void>::failure(workflowError(
-                        "Workflow.CommandNotFound",
-                        foundation::ErrorCategory::NotFound,
-                        "A workflow command is not registered",
-                        definition.descriptor.name,
-                        &step.stepId));
-                }
-                if(descriptor.value().version != step.command->version) {
-                    return foundation::Result<void>::failure(workflowError(
-                        "Workflow.CommandVersionMismatch",
-                        foundation::ErrorCategory::Conflict,
-                        "A workflow command version does not match the registry",
+                        unsupported ? "Workflow.CommandVersionMismatch"
+                                    : "Workflow.CommandNotFound",
+                        unsupported ? foundation::ErrorCategory::Conflict
+                                    : foundation::ErrorCategory::NotFound,
+                        unsupported
+                            ? "A workflow command version does not match the registry"
+                            : "A workflow command is not registered",
                         definition.descriptor.name,
                         &step.stepId));
                 }
@@ -309,28 +308,28 @@ foundation::Result<void> WorkflowRegistry::validateAndFreeze()
                 }
             }
             if(step.query.has_value()) {
-                auto descriptor = queries_.descriptor(step.query->query);
+                auto descriptor = queries_.descriptor(QueryKey {
+                    step.query->query, step.query->version});
                 if(!descriptor) {
+                    const auto unsupported = std::string(descriptor.error().code.value())
+                        == "Query.UnsupportedVersion";
                     return foundation::Result<void>::failure(workflowError(
-                        "Workflow.QueryNotFound",
-                        foundation::ErrorCategory::NotFound,
-                        "A workflow query is not registered",
-                        definition.descriptor.name,
-                        &step.stepId));
-                }
-                if(descriptor.value().version != step.query->version) {
-                    return foundation::Result<void>::failure(workflowError(
-                        "Workflow.QueryVersionMismatch",
-                        foundation::ErrorCategory::Conflict,
-                        "A workflow query version does not match the registry",
+                        unsupported ? "Workflow.QueryVersionMismatch"
+                                    : "Workflow.QueryNotFound",
+                        unsupported ? foundation::ErrorCategory::Conflict
+                                    : foundation::ErrorCategory::NotFound,
+                        unsupported
+                            ? "A workflow query version does not match the registry"
+                            : "A workflow query is not registered",
                         definition.descriptor.name,
                         &step.stepId));
                 }
             }
             if(step.compensation.has_value()) {
-                auto descriptor = commands_.descriptor(step.compensation->command.command);
-                if(!descriptor || descriptor.value().version != step.compensation->command.version
-                   || !descriptor.value().idempotent
+                auto descriptor = commands_.descriptor(CommandKey {
+                    step.compensation->command.command,
+                    step.compensation->command.version});
+                if(!descriptor || !descriptor.value().idempotent
                    || descriptor.value().executionMode != ExecutionMode::Synchronous) {
                     return foundation::Result<void>::failure(workflowError(
                         "Workflow.InvalidCompensationCommand",

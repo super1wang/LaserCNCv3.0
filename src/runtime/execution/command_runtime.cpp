@@ -42,6 +42,9 @@ foundation::Error commandError(
         foundation::Value {foundation::Value::Object {
             {"requestId", foundation::Value {std::string(request.requestId.value())}},
             {"command", foundation::Value {std::string(request.command.value())}},
+            {"requestedVersion", foundation::Value {request.version.toString()}},
+            {"versionResolution", foundation::Value {
+                request.versionResolution == VersionResolution::Exact ? "exact" : "compatible"}},
         }},
         foundation::Severity::Error,
         std::move(cause));
@@ -74,6 +77,10 @@ void startCommandSpan(
             "command.execute",
             foundation::Value::Object {
                 {"command", foundation::Value {std::string(request.command.value())}},
+                {"requestedVersion", foundation::Value {request.version.toString()}},
+                {"versionResolution", foundation::Value {
+                    request.versionResolution == VersionResolution::Exact
+                        ? "exact" : "compatible"}},
             }});
         if(started && started.value() != nullptr) {
             activeSpanId = spanId;
@@ -111,6 +118,8 @@ struct RequestSignature final {
     kernel::ProjectId projectId;
     kernel::DocumentId documentId;
     kernel::CommandName command;
+    foundation::Version version;
+    VersionResolution versionResolution{VersionResolution::Exact};
     foundation::Value arguments;
     std::optional<state::Revision> expectedRevision;
 
@@ -124,6 +133,8 @@ RequestSignature signatureOf(const CommandRequest& request)
         request.projectId,
         request.documentId,
         request.command,
+        request.version,
+        request.versionResolution,
         request.arguments,
         request.expectedRevision};
 }
@@ -139,10 +150,13 @@ foundation::Value persistentSignature(
         {"expectedProjectRevision", request.expectedRevision.has_value()
             ? foundation::Value {std::to_string(request.expectedRevision->value())}
             : foundation::Value {}},
-        {"format", foundation::Value {"lasercnc.command-signature"}},
+        {"format", foundation::Value {"lasercnc.command-signature.v2"}},
         {"projectId", foundation::Value {std::string(request.projectId.value())}},
         {"sessionId", foundation::Value {std::string(request.sessionId.value())}},
-        {"version", foundation::Value {descriptor.version.toString()}},
+        {"requestedVersion", foundation::Value {request.version.toString()}},
+        {"resolvedVersion", foundation::Value {descriptor.version.toString()}},
+        {"versionResolution", foundation::Value {
+            request.versionResolution == VersionResolution::Exact ? "exact" : "compatible"}},
     }};
 }
 
@@ -188,6 +202,9 @@ observability::LogRecord commandLog(
     foundation::Value::Object data {
         {"command", foundation::Value {std::string(request.command.value())}},
         {"outcome", foundation::Value {outcome}},
+        {"requestedVersion", foundation::Value {request.version.toString()}},
+        {"versionResolution", foundation::Value {
+            request.versionResolution == VersionResolution::Exact ? "exact" : "compatible"}},
     };
     if(version != nullptr) {
         data.emplace("version", foundation::Value {version->toString()});
@@ -305,7 +322,8 @@ public:
         const CommandRequest& request,
         std::optional<kernel::SpanId> activeSpanId)
     {
-        auto entry = registry.resolve(request.command);
+        auto entry = registry.resolve(
+            CommandKey {request.command, request.version}, request.versionResolution);
         if(!entry.hasValue()) {
             return foundation::Result<CommandResponse>::failure(std::move(entry).error());
         }
@@ -386,7 +404,9 @@ public:
                     std::move(replay.commit),
                     std::move(replay.taskId),
                     {},
-                    true});
+                    true,
+                    descriptor.version,
+                    descriptor.status});
             }
             durableLease = std::make_unique<PersistentIdempotencyLease>(
                 persistence, *request.idempotencyKey, std::move(signature));
@@ -443,7 +463,13 @@ public:
                     plan.acceptance};
             }
             CommandResponse response {
-                std::move(plan.acceptance), std::nullopt, taskId, {}, false};
+                std::move(plan.acceptance),
+                std::nullopt,
+                taskId,
+                {},
+                false,
+                descriptor.version,
+                descriptor.status};
             auto submitted = tasks.submit(
                 std::move(plan.task), std::move(durableIdempotency));
             if(!submitted) {
@@ -571,7 +597,13 @@ public:
 
         std::optional<CommandResponse> response;
         response.emplace(CommandResponse {
-            std::move(handled).value(), std::move(committed).value(), std::nullopt, {}, false});
+            std::move(handled).value(),
+            std::move(committed).value(),
+            std::nullopt,
+            {},
+            false,
+            descriptor.version,
+            descriptor.status});
         try {
             for(const auto& event : response->commit->events) {
                 auto delivery = events.publish(event, request.correlationId, request.traceId);
