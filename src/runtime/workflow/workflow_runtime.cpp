@@ -1054,6 +1054,7 @@ public:
                     "A durable workflow completion order is invalid",
                     &checkpoint.snapshot.workflowId));
             }
+            bool resumedMainAttempt = false;
             for(auto& step : checkpoint.snapshot.steps) {
                 if(step.state != WorkflowStepState::Running) {
                     continue;
@@ -1065,7 +1066,11 @@ public:
                 } else {
                     step.state = WorkflowStepState::Waiting;
                     step.replayCurrentAttempt = true;
+                    resumedMainAttempt = true;
                 }
+            }
+            if(resumedMainAttempt && checkpoint.snapshot.state == WorkflowState::Running) {
+                checkpoint.snapshot.state = WorkflowState::Waiting;
             }
             auto instance = std::make_shared<Instance>(
                 std::move(checkpoint.request),

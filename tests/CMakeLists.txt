@@ -125,3 +125,18 @@ set_tests_properties(
         PASS_REGULAR_EXPRESSION "独立进程持久化恢复契约通过"
         RUN_SERIAL TRUE
 )
+
+add_test(
+    NAME integration.kernel_workflow_process_recovery
+    COMMAND
+        "${CMAKE_COMMAND}"
+        "-DLCNC_CONTRACT_EXECUTABLE=$<TARGET_FILE:lasercnc_kernel_headless_contract>"
+        "-DLCNC_STATE_ROOT=${CMAKE_CURRENT_BINARY_DIR}/workflow-process-contract"
+        -P "${PROJECT_SOURCE_DIR}/cmake/RunWorkflowRecoveryContract.cmake"
+)
+set_tests_properties(
+    integration.kernel_workflow_process_recovery
+    PROPERTIES
+        PASS_REGULAR_EXPRESSION "独立进程工作流恢复契约通过"
+        RUN_SERIAL TRUE
+)

@@ -1836,7 +1836,7 @@ TEST_CASE("AppKernel restores a running workflow at the same idempotent attempt"
 
         auto recovered = kernel.workflows().snapshot(request.workflowId);
         REQUIRE(recovered.hasValue());
-        CHECK(recovered.value().state == WorkflowState::Running);
+        CHECK(recovered.value().state == WorkflowState::Waiting);
         REQUIRE(recovered.value().steps.size() == 1U);
         CHECK(recovered.value().steps[0].state == WorkflowStepState::Waiting);
         CHECK(recovered.value().steps[0].attempt == 1U);

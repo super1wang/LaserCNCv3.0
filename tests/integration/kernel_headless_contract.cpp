@@ -231,6 +231,63 @@ bool containsObservabilityJsonl(const std::filesystem::path& path)
         && content.find("metric.observation") != std::string::npos;
 }
 
+Schema contractSchema(const char* id, SchemaKind kind)
+{
+    auto created = Schema::create(
+        requiredId<SchemaId>(id), Version {1U, 0U, 0U}, kind);
+    if(!created) {
+        throw std::logic_error("Static workflow schema is invalid");
+    }
+    return std::move(created).value();
+}
+
+WorkflowDefinition persistenceWorkflowDefinition()
+{
+    WorkflowStep write {
+        requiredId<WorkflowStepId>("step.persistence.write"),
+        WorkflowStepKind::Command,
+        {},
+        std::nullopt,
+        WorkflowCommandCall {
+            requiredId<CommandName>("kernel.persistence.object.put"),
+            Version {1U, 0U, 0U},
+            Value {Value::Object {
+                {"data", Value {"workflow-recovered"}},
+                {"id", Value {"object.persistence.workflow"}},
+            }}},
+        std::nullopt,
+        Value {},
+        {},
+        "writeResult",
+        std::nullopt,
+        WorkflowRetryPolicy {},
+        std::nullopt,
+        {}};
+    return WorkflowDefinition {
+        WorkflowDescriptor {
+            requiredId<WorkflowName>("kernel.persistence.workflow"),
+            Version {1U, 0U, 0U},
+            contractSchema("schema.persistence.workflow.input", SchemaKind::Object),
+            contractSchema("schema.persistence.workflow.result", SchemaKind::Any)},
+        {std::move(write)},
+        Value {Value::Object {{"$ref", Value {"writeResult.id"}}}}};
+}
+
+WorkflowRequest persistenceWorkflowRequest()
+{
+    return WorkflowRequest {
+        requiredId<WorkflowId>("workflow.persistence.interrupted"),
+        requiredId<WorkflowName>("kernel.persistence.workflow"),
+        Value {Value::Object {}},
+        requiredId<SessionId>("session.persistence-contract"),
+        requiredId<ProjectId>("project.persistence-contract"),
+        requiredId<DocumentId>("document.persistence-contract"),
+        requiredId<CorrelationId>("correlation.persistence-workflow"),
+        requiredId<TraceId>("trace.persistence-workflow"),
+        std::nullopt,
+        std::nullopt};
+}
+
 Result<void> configurePersistenceContract(
     lasercnc::kernel::AppKernel& kernel,
     const std::filesystem::path& stateRoot,
@@ -296,6 +353,11 @@ Result<void> configurePersistenceContract(
         std::make_shared<GetObjectHandler>());
     if(!query) {
         return query;
+    }
+    auto workflow = kernel.workflowRegistry().registerDefinition(
+        persistenceWorkflowDefinition());
+    if(!workflow) {
+        return workflow;
     }
     auto diagnostic = kernel.diagnostics().registerCheck(
         requiredId<DiagnosticId>("kernel.contract.persistence"),
@@ -823,13 +885,139 @@ int recoverPersistence(const std::filesystem::path& stateRoot)
     return 0;
 }
 
+int seedWorkflowRecovery(const std::filesystem::path& stateRoot)
+{
+    lasercnc::kernel::AppKernel kernel;
+    const auto project = requiredId<ProjectId>("project.persistence-contract");
+    const auto document = requiredId<DocumentId>("document.persistence-contract");
+    auto added = kernel.addDocument(project, document);
+    if(!added) {
+        return fail("workflow seed document", added.error());
+    }
+    auto handler = std::make_shared<PutObjectHandler>();
+    auto configured = configurePersistenceContract(kernel, stateRoot, handler);
+    if(!configured) {
+        return fail("workflow seed configure", configured.error());
+    }
+    auto bootstrapped = kernel.bootstrap();
+    if(!bootstrapped) {
+        return fail("workflow seed bootstrap", bootstrapped.error());
+    }
+    auto documentSnapshot = kernel.documents().snapshot(document);
+    if(!documentSnapshot) {
+        return fail("workflow seed document snapshot", documentSnapshot.error());
+    }
+    auto captured = kernel.persistence().captureSnapshot(
+        requiredId<SnapshotId>("snapshot.persistence-workflow"),
+        documentSnapshot.value());
+    if(!captured) {
+        return fail("workflow seed snapshot", captured.error());
+    }
+
+    const auto request = persistenceWorkflowRequest();
+    auto started = kernel.workflows().startWorkflow(request);
+    if(!started) {
+        return fail("workflow seed start", started.error());
+    }
+    auto interrupted = started.value();
+    interrupted.state = WorkflowState::Running;
+    interrupted.steps.front().state = WorkflowStepState::Running;
+    interrupted.steps.front().attempt = 1U;
+    auto checkpointed = kernel.persistence().saveWorkflowCheckpoint(
+        request, persistenceWorkflowDefinition(), interrupted, {});
+    if(!checkpointed) {
+        return fail("workflow seed running checkpoint", checkpointed.error());
+    }
+    if(handler->calls.load() != 0U) {
+        std::cerr << "workflow seed: handler ran before the interrupted checkpoint\n";
+        return 1;
+    }
+    std::cout << "workflow-recovery-seeded\n" << std::flush;
+    std::_Exit(EXIT_SUCCESS);
+}
+
+int recoverWorkflow(const std::filesystem::path& stateRoot)
+{
+    lasercnc::kernel::AppKernel kernel;
+    auto handler = std::make_shared<PutObjectHandler>();
+    auto configured = configurePersistenceContract(kernel, stateRoot, handler);
+    if(!configured) {
+        return fail("workflow recovery configure", configured.error());
+    }
+    std::size_t eventCount = 0U;
+    auto subscription = kernel.events().subscribe(
+        requiredId<SubscriptionId>("subscription.workflow-recovery"),
+        EventFilter {
+            EventKind::Domain,
+            requiredId<EventName>("kernel.contract.object-created")},
+        DeliveryMode::Immediate,
+        [&](const EventEnvelope&) { ++eventCount; });
+    if(!subscription) {
+        return fail("workflow recovery subscription", subscription.error());
+    }
+    auto bootstrapped = kernel.bootstrap();
+    if(!bootstrapped) {
+        return fail("workflow recovery bootstrap", bootstrapped.error());
+    }
+    const auto request = persistenceWorkflowRequest();
+    auto restored = kernel.workflows().snapshot(request.workflowId);
+    if(!restored) {
+        return fail("workflow recovery snapshot", restored.error());
+    }
+    if(restored.value().state != WorkflowState::Waiting
+       || restored.value().steps.front().state != WorkflowStepState::Waiting
+       || restored.value().steps.front().attempt != 1U
+       || handler->calls.load() != 0U) {
+        std::cerr << "workflow recovery: interrupted attempt was not restored safely state="
+                  << static_cast<int>(restored.value().state)
+                  << " step=" << static_cast<int>(restored.value().steps.front().state)
+                  << " attempt=" << restored.value().steps.front().attempt
+                  << " calls=" << handler->calls.load() << '\n';
+        return 1;
+    }
+    auto completed = kernel.workflows().advance(request.workflowId);
+    if(!completed) {
+        return fail("workflow recovery advance", completed.error());
+    }
+    if(completed.value().state != WorkflowState::Succeeded
+       || completed.value().steps.front().attempt != 1U
+       || handler->calls.load() != 1U || eventCount != 1U) {
+        std::cerr << "workflow recovery: attempt was not completed exactly once\n";
+        return 1;
+    }
+    auto object = queryPersistentObject(
+        kernel, "request.persistence.query-workflow", "object.persistence.workflow");
+    if(!object) {
+        return fail("workflow recovery object", object.error());
+    }
+    auto replay = kernel.workflows().advance(request.workflowId);
+    if(!replay || replay.value().state != WorkflowState::Succeeded
+       || handler->calls.load() != 1U || eventCount != 1U) {
+        std::cerr << "workflow recovery: terminal advance replayed a side effect\n";
+        return 1;
+    }
+    const auto* result = object.value().getIf<Value::Object>();
+    const auto* data = result == nullptr ? nullptr : result->at("data").getIf<std::string>();
+    if(data == nullptr || *data != "workflow-recovered") {
+        std::cerr << "workflow recovery: recovered command result is invalid\n";
+        return 1;
+    }
+    auto stopped = kernel.shutdown();
+    if(!stopped) {
+        return fail("workflow recovery shutdown", stopped.error());
+    }
+    std::cout << "workflow-recovery-completed\n";
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
 {
     if((argc != 3 && argc != 5) || std::string(argv[1]) != "--mode") {
         std::cerr << "usage: lasercnc_kernel_headless_contract --mode "
-                     "roundtrip|task-roundtrip|persistence-seed|persistence-recover "
+                     "roundtrip|task-roundtrip|persistence-seed|persistence-recover|"
+                     "workflow-recovery-seed|workflow-recovery-recover "
                      "[--state-root path]\n";
         return 2;
     }
@@ -846,6 +1034,12 @@ int main(int argc, char** argv)
             return mode == "persistence-seed"
                 ? seedPersistence(std::filesystem::path {argv[4]})
                 : recoverPersistence(std::filesystem::path {argv[4]});
+        }
+        if((mode == "workflow-recovery-seed" || mode == "workflow-recovery-recover")
+           && argc == 5 && std::string(argv[3]) == "--state-root") {
+            return mode == "workflow-recovery-seed"
+                ? seedWorkflowRecovery(std::filesystem::path {argv[4]})
+                : recoverWorkflow(std::filesystem::path {argv[4]});
         }
         std::cerr << "unknown mode\n";
         return 2;
