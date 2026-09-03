@@ -16,6 +16,9 @@ target_sources(
         task/resource_manager.cpp
         task/scheduler.cpp
         task/task_runtime.cpp
+        observability/local_trace_service.cpp
+        observability/local_metrics_service.cpp
+        observability/diagnostics_service.cpp
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS "${PROJECT_SOURCE_DIR}/include"
@@ -37,4 +40,7 @@ target_sources(
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/resource_manager.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/scheduler.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/task_runtime.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/observability/trace_service.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/observability/metrics_service.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/observability/diagnostics_service.hpp"
 )

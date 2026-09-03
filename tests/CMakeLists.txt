@@ -30,6 +30,7 @@ add_executable(
     unit/kernel/command_query_runtime_tests.cpp
     unit/kernel/module_runtime_tests.cpp
     unit/kernel/infrastructure_ports_tests.cpp
+    unit/runtime/observability_tests.cpp
 )
 
 target_link_libraries(

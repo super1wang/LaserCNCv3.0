@@ -1,0 +1,252 @@
+#include <lasercnc/observability/trace_service.hpp>
+
+#include <lasercnc/foundation/error.hpp>
+
+#include <algorithm>
+#include <atomic>
+#include <exception>
+#include <functional>
+#include <map>
+#include <mutex>
+#include <utility>
+
+namespace lasercnc::observability {
+namespace {
+
+foundation::Error traceError(
+    const char* code,
+    foundation::ErrorCategory category,
+    const char* message,
+    const kernel::SpanId& spanId)
+{
+    return foundation::makeError(
+        code,
+        category,
+        message,
+        foundation::Value {foundation::Value::Object {
+            {"spanId", foundation::Value {std::string(spanId.value())}},
+        }});
+}
+
+} // namespace
+
+struct LocalTraceService::Core final {
+    Core(std::size_t records, std::size_t failures)
+        : recordCapacity(std::max<std::size_t>(records, 1U)),
+          failureCapacity(std::max<std::size_t>(failures, 1U))
+    {
+    }
+
+    std::mutex mutex;
+    std::map<kernel::SpanId, TraceSpanRecord> active;
+    std::vector<TraceSpanRecord> completed;
+    std::vector<std::shared_ptr<ITraceExporter>> exporters;
+    std::vector<foundation::Error> failures;
+    std::size_t recordCapacity;
+    std::size_t failureCapacity;
+    bool frozen{false};
+};
+
+LocalTraceService::LocalTraceService(
+    std::size_t recordCapacity,
+    std::size_t failureCapacity)
+    : core_(std::make_shared<Core>(recordCapacity, failureCapacity))
+{
+}
+LocalTraceService::~LocalTraceService() = default;
+
+foundation::Result<void> LocalTraceService::addExporter(
+    std::shared_ptr<ITraceExporter> exporter)
+{
+    if(exporter == nullptr) {
+        return foundation::Result<void>::failure(foundation::makeError(
+            "Trace.InvalidExporter",
+            foundation::ErrorCategory::Validation,
+            "A trace exporter is required"));
+    }
+    std::lock_guard lock(core_->mutex);
+    if(core_->frozen) {
+        return foundation::Result<void>::failure(foundation::makeError(
+            "Trace.ExportersFrozen",
+            foundation::ErrorCategory::Conflict,
+            "Trace exporters are frozen"));
+    }
+    core_->exporters.push_back(std::move(exporter));
+    return foundation::Result<void>::success();
+}
+
+void LocalTraceService::freeze()
+{
+    std::lock_guard lock(core_->mutex);
+    core_->frozen = true;
+}
+
+bool LocalTraceService::frozen() const
+{
+    std::lock_guard lock(core_->mutex);
+    return core_->frozen;
+}
+
+foundation::Result<std::unique_ptr<ITraceSpan>> LocalTraceService::startSpan(
+    TraceSpanStart start)
+{
+    if(start.name.empty()) {
+        return foundation::Result<std::unique_ptr<ITraceSpan>>::failure(traceError(
+            "Trace.InvalidSpanName",
+            foundation::ErrorCategory::Validation,
+            "A trace span name is required",
+            start.spanId));
+    }
+    const auto spanId = start.spanId;
+    const auto traceId = start.traceId;
+    {
+        std::lock_guard lock(core_->mutex);
+        const auto completed = std::find_if(
+            core_->completed.begin(),
+            core_->completed.end(),
+            [&spanId](const TraceSpanRecord& record) { return record.spanId == spanId; });
+        if(core_->active.contains(spanId) || completed != core_->completed.end()) {
+            return foundation::Result<std::unique_ptr<ITraceSpan>>::failure(traceError(
+                "Trace.SpanIdAlreadyExists",
+                foundation::ErrorCategory::Conflict,
+                "A trace span id can only be used once",
+                spanId));
+        }
+        const auto now = std::chrono::system_clock::now();
+        core_->active.emplace(
+            spanId,
+            TraceSpanRecord {
+                std::move(start.traceId),
+                start.spanId,
+                std::move(start.parentSpanId),
+                std::move(start.name),
+                now,
+                now,
+                TraceStatus::Running,
+                std::move(start.attributes),
+                std::nullopt});
+    }
+
+    using Completion = std::function<void(TraceStatus, std::optional<foundation::Error>)>;
+    Completion completion = [core = core_, spanId](
+                                TraceStatus status,
+                                std::optional<foundation::Error> error) {
+        std::optional<TraceSpanRecord> completed;
+        std::vector<std::shared_ptr<ITraceExporter>> exporters;
+        {
+            std::lock_guard lock(core->mutex);
+            const auto found = core->active.find(spanId);
+            if(found == core->active.end()) {
+                return;
+            }
+            found->second.finishedAt = std::chrono::system_clock::now();
+            found->second.status = status;
+            found->second.error = std::move(error);
+            completed = std::move(found->second);
+            core->active.erase(found);
+            if(core->completed.size() >= core->recordCapacity) {
+                core->completed.erase(core->completed.begin());
+            }
+            core->completed.push_back(*completed);
+            exporters = core->exporters;
+        }
+
+        std::vector<foundation::Error> failures;
+        for(const auto& exporter : exporters) {
+            try {
+                auto exported = exporter->exportSpan(*completed);
+                if(!exported) {
+                    failures.push_back(std::move(exported).error());
+                }
+            } catch(const std::exception& exception) {
+                failures.push_back(traceError(
+                    "Trace.ExporterThrew",
+                    foundation::ErrorCategory::Internal,
+                    exception.what(),
+                    spanId));
+            } catch(...) {
+                failures.push_back(traceError(
+                    "Trace.ExporterThrew",
+                    foundation::ErrorCategory::Internal,
+                    "A trace exporter raised an unknown exception",
+                    spanId));
+            }
+        }
+        if(!failures.empty()) {
+            std::lock_guard lock(core->mutex);
+            for(auto& failure : failures) {
+                if(core->failures.size() >= core->failureCapacity) {
+                    core->failures.erase(core->failures.begin());
+                }
+                core->failures.push_back(std::move(failure));
+            }
+        }
+    };
+
+    class Span final : public ITraceSpan {
+    public:
+        Span(kernel::TraceId traceId, kernel::SpanId spanId, Completion completion)
+            : traceId_(std::move(traceId)),
+              spanId_(std::move(spanId)),
+              completion_(std::move(completion))
+        {
+        }
+
+        ~Span() override
+        {
+            if(!ended_.exchange(true, std::memory_order_acq_rel)) {
+                try {
+                    completion_(TraceStatus::Failed, traceError(
+                        "Trace.SpanAbandoned",
+                        foundation::ErrorCategory::Internal,
+                        "A trace span was destroyed before explicit completion",
+                        spanId_));
+                } catch(...) {
+                }
+            }
+        }
+
+        const kernel::TraceId& traceId() const noexcept override { return traceId_; }
+        const kernel::SpanId& spanId() const noexcept override { return spanId_; }
+
+        void end(TraceStatus status, std::optional<foundation::Error> error) noexcept override
+        {
+            if(ended_.exchange(true, std::memory_order_acq_rel)) {
+                return;
+            }
+            try {
+                completion_(status, std::move(error));
+            } catch(...) {
+            }
+        }
+
+    private:
+        kernel::TraceId traceId_;
+        kernel::SpanId spanId_;
+        Completion completion_;
+        std::atomic_bool ended_{false};
+    };
+
+    return foundation::Result<std::unique_ptr<ITraceSpan>>::success(
+        std::make_unique<Span>(traceId, spanId, std::move(completion)));
+}
+
+std::vector<TraceSpanRecord> LocalTraceService::records() const
+{
+    std::lock_guard lock(core_->mutex);
+    return core_->completed;
+}
+
+std::vector<foundation::Error> LocalTraceService::exporterFailures() const
+{
+    std::lock_guard lock(core_->mutex);
+    return core_->failures;
+}
+
+std::size_t LocalTraceService::activeSpanCount() const
+{
+    std::lock_guard lock(core_->mutex);
+    return core_->active.size();
+}
+
+} // namespace lasercnc::observability
