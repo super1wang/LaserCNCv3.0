@@ -31,6 +31,7 @@ add_executable(
     unit/kernel/module_runtime_tests.cpp
     unit/kernel/infrastructure_ports_tests.cpp
     unit/runtime/observability_tests.cpp
+    unit/runtime/workflow_registry_tests.cpp
 )
 
 target_link_libraries(

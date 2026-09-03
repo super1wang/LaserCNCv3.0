@@ -26,6 +26,8 @@ target_sources(
         persistence/snapshot_persistence.cpp
         persistence/task_persistence.cpp
         persistence/diagnostic_persistence.cpp
+        workflow/workflow.cpp
+        workflow/workflow_registry.cpp
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS "${PROJECT_SOURCE_DIR}/include"
@@ -52,4 +54,6 @@ target_sources(
             "${PROJECT_SOURCE_DIR}/include/lasercnc/observability/log_observability_exporter.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/observability/diagnostics_service.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/persistence/persistence_service.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/workflow.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/workflow_registry.hpp"
 )

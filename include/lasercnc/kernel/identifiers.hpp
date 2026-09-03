@@ -29,6 +29,11 @@ struct SnapshotIdTag;
 struct ContentDigestTag;
 struct IdempotencyKeyTag;
 struct SubscriptionIdTag;
+struct WorkflowNameTag;
+struct WorkflowIdTag;
+struct WorkflowStepIdTag;
+struct ScriptNameTag;
+struct ScriptExecutionIdTag;
 
 using ServiceId = foundation::StrongId<ServiceIdTag>;
 using ModuleId = foundation::StrongId<ModuleIdTag>;
@@ -55,5 +60,10 @@ using SnapshotId = foundation::StrongId<SnapshotIdTag>;
 using ContentDigest = foundation::StrongId<ContentDigestTag>;
 using IdempotencyKey = foundation::StrongId<IdempotencyKeyTag>;
 using SubscriptionId = foundation::StrongId<SubscriptionIdTag>;
+using WorkflowName = foundation::StrongId<WorkflowNameTag>;
+using WorkflowId = foundation::StrongId<WorkflowIdTag>;
+using WorkflowStepId = foundation::StrongId<WorkflowStepIdTag>;
+using ScriptName = foundation::StrongId<ScriptNameTag>;
+using ScriptExecutionId = foundation::StrongId<ScriptExecutionIdTag>;
 
 } // namespace lasercnc::kernel

@@ -19,6 +19,7 @@
 #include <lasercnc/runtime/scheduler.hpp>
 #include <lasercnc/runtime/task_registry.hpp>
 #include <lasercnc/runtime/task_runtime.hpp>
+#include <lasercnc/runtime/workflow_registry.hpp>
 #include <lasercnc/state/document_store.hpp>
 
 #include <chrono>
@@ -68,6 +69,8 @@ public:
     [[nodiscard]] const runtime::CommandRegistry& commandRegistry() const noexcept;
     [[nodiscard]] runtime::QueryRegistry& queryRegistry() noexcept;
     [[nodiscard]] const runtime::QueryRegistry& queryRegistry() const noexcept;
+    [[nodiscard]] runtime::WorkflowRegistry& workflowRegistry() noexcept;
+    [[nodiscard]] const runtime::WorkflowRegistry& workflowRegistry() const noexcept;
     [[nodiscard]] runtime::CommandRuntime& commands() noexcept;
     [[nodiscard]] const runtime::CommandRuntime& commands() const noexcept;
     [[nodiscard]] runtime::QueryRuntime& queries() noexcept;
@@ -104,6 +107,7 @@ private:
     observability::DiagnosticsService diagnostics_;
     runtime::CommandRegistry commandRegistry_;
     runtime::QueryRegistry queryRegistry_;
+    runtime::WorkflowRegistry workflowRegistry_;
     runtime::TaskRegistry taskRegistry_;
     runtime::ResourceManager resources_;
     std::unique_ptr<platform::ITaskExecutor> taskExecutor_;

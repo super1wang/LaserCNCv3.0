@@ -35,6 +35,7 @@ private:
 AppKernel::AppKernel()
     : modules_(services_),
       transactions_(documents_, &persistence_),
+      workflowRegistry_(commandRegistry_, queryRegistry_),
       scheduler_(resources_, persistence_, traces_, metrics_),
       tasks_(taskRegistry_, scheduler_, executionServices_, documents_, persistence_),
       commands_(
@@ -151,7 +152,7 @@ foundation::Result<void> AppKernel::bootstrap()
     }
 
     if((commandRegistry_.size() != 0U || queryRegistry_.size() != 0U
-        || taskRegistry_.size() != 0U)
+        || taskRegistry_.size() != 0U || workflowRegistry_.size() != 0U)
        && !executionServices_.configured()) {
         auto stopped = modules_.shutdown(*this);
         state_ = AppKernelState::Failed;
@@ -192,6 +193,24 @@ foundation::Result<void> AppKernel::bootstrap()
                 foundation::Severity::Error,
                 std::make_shared<const foundation::Error>(std::move(scheduled).error())));
         }
+    }
+
+    auto workflowsValidated = workflowRegistry_.validateAndFreeze();
+    if(!workflowsValidated) {
+        if(taskExecutor_ != nullptr) {
+            static_cast<void>(scheduler_.shutdown(std::chrono::seconds(5)));
+        }
+        auto stopped = modules_.shutdown(*this);
+        state_ = AppKernelState::Failed;
+        return foundation::Result<void>::failure(foundation::makeError(
+            "Workflow.RegistryValidationFailed",
+            foundation::ErrorCategory::Validation,
+            "The workflow registry could not be frozen",
+            foundation::Value {},
+            foundation::Severity::Error,
+            std::make_shared<const foundation::Error>(
+                stopped.hasValue() ? std::move(workflowsValidated).error()
+                                   : std::move(stopped).error())));
     }
 
     services_.freeze();
@@ -356,6 +375,16 @@ runtime::QueryRegistry& AppKernel::queryRegistry() noexcept
 const runtime::QueryRegistry& AppKernel::queryRegistry() const noexcept
 {
     return queryRegistry_;
+}
+
+runtime::WorkflowRegistry& AppKernel::workflowRegistry() noexcept
+{
+    return workflowRegistry_;
+}
+
+const runtime::WorkflowRegistry& AppKernel::workflowRegistry() const noexcept
+{
+    return workflowRegistry_;
 }
 
 runtime::CommandRuntime& AppKernel::commands() noexcept
