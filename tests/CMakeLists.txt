@@ -63,6 +63,7 @@ add_executable(
     unit/runtime/task_runtime_tests.cpp
     unit/runtime/persistence_service_tests.cpp
     unit/runtime/history_runtime_tests.cpp
+    unit/runtime/asset_state_tests.cpp
 )
 target_link_libraries(
     lasercnc_infrastructure_tests
@@ -82,6 +83,14 @@ add_test(
         "${CMAKE_COMMAND}"
         "-DLCNC_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
         -P "${PROJECT_SOURCE_DIR}/cmake/VerifyKernelBoundaries.cmake"
+)
+
+add_test(
+    NAME architecture.occt_boundary_negative_probes
+    COMMAND "${CMAKE_COMMAND}"
+        "-DLCNC_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+        "-DLCNC_TEST_BINARY_ROOT=${CMAKE_CURRENT_BINARY_DIR}/architecture-probes"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_occt_boundary.cmake"
 )
 
 add_executable(

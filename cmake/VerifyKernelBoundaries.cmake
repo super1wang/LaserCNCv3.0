@@ -19,6 +19,8 @@ set(forbidden_public_api_patterns
     "opentelemetry::"
     "QWidget"
     "TopoDS_"
+    "TDF_"
+    "TDocStd_"
 )
 
 foreach(header IN LISTS kernel_public_headers)

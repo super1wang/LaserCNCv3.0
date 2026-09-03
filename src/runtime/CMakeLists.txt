@@ -27,6 +27,7 @@ target_sources(
         observability/diagnostics_service.cpp
         persistence/persistence_service.cpp
         persistence/object_record_codec.cpp
+        assets/asset_validation.cpp
         persistence/document_persistence.cpp
         persistence/idempotency_persistence.cpp
         persistence/effect_persistence.cpp
@@ -72,6 +73,7 @@ target_sources(
             "${PROJECT_SOURCE_DIR}/include/lasercnc/observability/log_observability_exporter.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/observability/diagnostics_service.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/persistence/persistence_service.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/asset_validation.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/workflow.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/workflow_registry.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/workflow_runtime.hpp"

@@ -1,6 +1,6 @@
 # LaserCNC v3.0
 
-LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9、K10A Execution Contract 1.0、K10B Runtime Project / Document Lifecycle、K10C History / Undo / Redo 与 K10D Module Governance / Execution Gateway；K10E 正在推进 Object Type / Asset Boundary，已建立对象类型基础组件。仓库坚持 Command-First、Automation-First、Headless-First 和 Infrastructure-Adapter；CAD、CAM、Machine、Process、Qt GUI、产品 RPC/CLI 与 AI 等上层模块仍未开始。
+LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9 及 K10A–K10E 收口节点，具备版本化执行、文档生命周期、History、模块治理与 ExecutionGateway、对象类型和资产状态准入。下一阶段为 K10F 可靠性认证，Kernel 1.0 尚未 Frozen。仓库坚持 Command-First、Automation-First、Headless-First 和 Infrastructure-Adapter；CAD、CAM、Machine、Process、Qt GUI、产品 RPC/CLI 与 AI 等上层模块仍未开始。
 
 ## 已完成阶段
 
@@ -13,7 +13,7 @@ LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9、K10A Execution Cont
 - Phase 7：Tracing、Metrics 与 Diagnostics
 - Phase 8：Snapshot、Journal、SQLite Persistence 与 Crash Recovery
 - Phase 9：Workflow Runtime 与结构化 Script Runtime
-- Kernel 1.0 Closure：K10A、K10B、K10C、K10D 已验收；K10E 进行中（对象类型闭环与不可变 AssetStore 组件已实现，资产引用状态准入待完成）
+- Kernel 1.0 Closure：K10A–K10E 已验收；K10F 可靠性认证待闭合，不能宣布 Kernel Frozen
 - 标准：C++20
 - 测试：Catch2 + CTest
 

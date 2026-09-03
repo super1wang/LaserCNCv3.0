@@ -4,6 +4,7 @@
 #include <lasercnc/foundation/value.hpp>
 #include <lasercnc/foundation/version.hpp>
 #include <lasercnc/kernel/identifiers.hpp>
+#include <lasercnc/state/asset_ref.hpp>
 
 #include <cstddef>
 #include <map>
@@ -21,6 +22,7 @@ struct ObjectRecord final {
     kernel::ObjectTypeId type;
     foundation::Value data;
     foundation::Version schemaVersion{1U, 0U, 0U};
+    std::vector<AssetRef> assets;
 
     friend bool operator==(const ObjectRecord&, const ObjectRecord&) = default;
 };

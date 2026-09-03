@@ -83,7 +83,7 @@ foundation::Value snapshotValue(
         {"projectId", foundation::Value {std::string(document.projectId().value())}},
         {"revisions", revisionsValue(document.revisions())},
         {"snapshotId", foundation::Value {std::string(snapshotId.value())}},
-        {"version", foundation::Value {std::int64_t {2}}},
+        {"version", foundation::Value {std::int64_t {3}}},
     }};
 }
 
@@ -242,7 +242,7 @@ foundation::Result<void> validateSnapshotPayload(
     const auto revisions = root->find("revisions");
     const auto objects = root->find("objects");
     if(!matchesText("format", "lasercnc.document-snapshot")
-       || versionNumber == nullptr || (*versionNumber != 1 && *versionNumber != 2)
+       || versionNumber == nullptr || (*versionNumber != 1 && *versionNumber != 2 && *versionNumber != 3)
        || !matchesText("snapshotId", record.snapshotId.value())
        || !matchesText("projectId", record.projectId.value())
        || !matchesText("documentId", record.documentId.value())

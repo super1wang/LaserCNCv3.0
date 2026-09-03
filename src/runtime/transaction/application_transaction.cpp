@@ -319,6 +319,30 @@ foundation::Result<void> ApplicationTransaction::migrateObject(
     }
 }
 
+foundation::Result<void> ApplicationTransaction::replaceObjectAssets(
+    const kernel::ObjectId& objectId, std::vector<state::AssetRef> assets)
+{
+    auto active = ensureActive();
+    if(!active) {
+        return active;
+    }
+    try {
+        const auto* source = stagedObjects_.find(objectId);
+        if(source == nullptr) {
+            return fail(foundation::makeError(
+                "Document.ObjectNotFound", foundation::ErrorCategory::NotFound,
+                "The object selected for asset replacement was not found"));
+        }
+        auto target = *source;
+        target.assets = std::move(assets);
+        return restoreObject(std::move(target));
+    } catch(const std::exception& exception) {
+        return fail(unexpectedFailure(transactionId_, "replaceObjectAssets", exception.what()));
+    } catch(...) {
+        return fail(unexpectedFailure(transactionId_, "replaceObjectAssets", "Unknown failure"));
+    }
+}
+
 foundation::Result<void> ApplicationTransaction::removeObject(
     const kernel::ObjectId& objectId)
 {

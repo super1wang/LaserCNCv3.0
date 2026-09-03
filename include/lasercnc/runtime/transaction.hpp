@@ -95,6 +95,8 @@ public:
     [[nodiscard]] foundation::Result<void> migrateObject(
         const kernel::ObjectId& objectId,
         foundation::Version targetVersion);
+    [[nodiscard]] foundation::Result<void> replaceObjectAssets(
+        const kernel::ObjectId& objectId, std::vector<state::AssetRef> assets);
     [[nodiscard]] foundation::Result<void> removeObject(const kernel::ObjectId& objectId);
     [[nodiscard]] foundation::Result<void> touchRevision(state::RevisionScope scope);
     [[nodiscard]] foundation::Result<void> collectEvent(

@@ -3,6 +3,7 @@
 #include <lasercnc/foundation/error.hpp>
 #include <lasercnc/persistence/persistence_service.hpp>
 #include <lasercnc/runtime/document_runtime.hpp>
+#include <lasercnc/runtime/asset_validation.hpp>
 #include <lasercnc/runtime/history_runtime.hpp>
 
 #include <array>
@@ -45,12 +46,14 @@ TransactionManager::TransactionManager(
     persistence::PersistenceService* persistence,
     DocumentRuntime* documentRuntime,
     HistoryRuntime* historyRuntime,
-    const state::ObjectTypeRegistry* objectTypes) noexcept
+    const state::ObjectTypeRegistry* objectTypes,
+    const platform::IAssetStore* assetStore) noexcept
     : documents_(documents),
       persistence_(persistence),
       documentRuntime_(documentRuntime),
       historyRuntime_(historyRuntime),
-      objectTypes_(objectTypes)
+      objectTypes_(objectTypes),
+      assetStore_(assetStore)
 {
 }
 
@@ -166,12 +169,24 @@ foundation::Result<TransactionCommit> TransactionManager::commit(
 {
     // Validate the complete candidate before locks, journal writes or history changes.
     // 中文翻译：完整候选状态在加锁、写日志和变更历史之前校验。
+    auto candidate = transaction.stagedObjects_.all();
     if(objectTypes_ != nullptr) {
         auto admitted = objectTypes_->validateObjects(
-            transaction.stagedObjects_.all(), persistence_ != nullptr && persistence_->configured());
+            candidate, persistence_ != nullptr && persistence_->configured());
         if(!admitted) {
             return foundation::Result<TransactionCommit>::failure(std::move(admitted).error());
         }
+    }
+    // Journal and history also retain removed/replaced assets in before-images.
+    // 中文翻译：Journal 与 History 的前像仍会持有被移除或替换的资产引用。
+    for(const auto& change : changes) {
+        if(change.before.has_value()) {
+            candidate.push_back(*change.before);
+        }
+    }
+    auto assetsAdmitted = validateObjectAssets(candidate, assetStore_);
+    if(!assetsAdmitted) {
+        return foundation::Result<TransactionCommit>::failure(std::move(assetsAdmitted).error());
     }
     std::lock_guard commitLock(commitMutex_);
     std::optional<TransactionCommit> receipt;

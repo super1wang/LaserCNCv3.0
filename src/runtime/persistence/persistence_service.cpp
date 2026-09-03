@@ -162,7 +162,7 @@ foundation::Value commitValue(const runtime::TransactionCommit& commit)
         {"revisionsAfter", revisionsValue(commit.revisionsAfter)},
         {"revisionsBefore", revisionsValue(commit.revisionsBefore)},
         {"transactionId", foundation::Value {std::string(commit.transactionId.value())}},
-        {"version", foundation::Value {std::int64_t {3}}},
+        {"version", foundation::Value {std::int64_t {4}}},
     }};
 }
 
@@ -352,7 +352,7 @@ foundation::Result<void> validateRecord(
     const auto after = root->find("revisionsAfter");
     const auto history = root->find("history");
     if(!matchesText("format", "lasercnc.state-journal")
-       || versionNumber == nullptr || (*versionNumber != 1 && *versionNumber != 2 && *versionNumber != 3)
+       || versionNumber == nullptr || (*versionNumber != 1 && *versionNumber != 2 && *versionNumber != 3 && *versionNumber != 4)
        || (*versionNumber >= 2
            && (history == root->end()
                || history->second.kind() != foundation::Value::Kind::Object))

@@ -55,6 +55,8 @@ public:
     [[nodiscard]] foundation::Result<void> addModule(std::unique_ptr<IModule> module);
     [[nodiscard]] foundation::Result<void> configureTaskExecutor(
         std::unique_ptr<platform::ITaskExecutor> executor);
+    [[nodiscard]] foundation::Result<void> configureAssetStore(
+        std::shared_ptr<platform::IAssetStore> store);
     [[nodiscard]] foundation::Result<void> bootstrap();
     [[nodiscard]] foundation::Result<void> shutdown(
         std::chrono::milliseconds taskTimeout = std::chrono::seconds(5));
@@ -106,6 +108,7 @@ private:
     ServiceRegistry services_;
     state::DocumentStore documents_;
     state::ObjectTypeRegistry objectTypes_;
+    std::shared_ptr<platform::IAssetStore> assetStore_;
     persistence::PersistenceService persistence_;
     runtime::DocumentRuntime documentRuntime_;
     runtime::HistoryRuntime history_;

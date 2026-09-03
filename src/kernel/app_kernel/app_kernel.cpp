@@ -1,6 +1,7 @@
 #include <lasercnc/kernel/app_kernel.hpp>
 
 #include <lasercnc/foundation/error.hpp>
+#include <lasercnc/runtime/asset_validation.hpp>
 
 #include <algorithm>
 #include <string>
@@ -183,6 +184,19 @@ foundation::Result<void> AppKernel::configureTaskExecutor(
     return foundation::Result<void>::success();
 }
 
+foundation::Result<void> AppKernel::configureAssetStore(std::shared_ptr<platform::IAssetStore> store)
+{
+    if(state_ != AppKernelState::Configuring || assetStore_ != nullptr || store == nullptr) {
+        return foundation::Result<void>::failure(foundation::makeError(
+            "Asset.InvalidKernelConfiguration", foundation::ErrorCategory::Conflict,
+            "A non-null asset store may be configured once before kernel startup"));
+    }
+    assetStore_ = std::move(store);
+    transactions_.assetStore_ = assetStore_.get();
+    documentRuntime_.assetStore_ = assetStore_.get();
+    return foundation::Result<void>::success();
+}
+
 foundation::Result<void> AppKernel::restoreState()
 {
     objectTypes_.freeze();
@@ -226,6 +240,9 @@ foundation::Result<void> AppKernel::restoreState()
 
         for(const auto& image : recovered.value().documents) {
             auto admitted = objectTypes_.validateObjects(image.objects, true);
+            if(admitted) {
+                admitted = runtime::validateObjectAssets(image.objects, assetStore_.get());
+            }
             if(!admitted) {
                 return foundation::Result<void>::failure(foundation::makeError(
                     "ObjectType.RecoveryAdmissionFailed", foundation::ErrorCategory::Validation,
@@ -241,6 +258,9 @@ foundation::Result<void> AppKernel::restoreState()
                         continue;
                     }
                     auto admitted = objectTypes_.validateRecord(**record, true);
+                    if(admitted) {
+                        admitted = runtime::validateObjectAssets(std::span{&**record, 1U}, assetStore_.get());
+                    }
                     if(!admitted) {
                         return foundation::Result<void>::failure(foundation::makeError(
                             "ObjectType.HistoryAdmissionFailed", foundation::ErrorCategory::Validation,

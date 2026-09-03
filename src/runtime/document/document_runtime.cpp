@@ -4,6 +4,7 @@
 #include <lasercnc/persistence/persistence_service.hpp>
 #include <lasercnc/state/document_store.hpp>
 #include <lasercnc/state/object_type_registry.hpp>
+#include <lasercnc/runtime/asset_validation.hpp>
 
 #include <algorithm>
 #include <array>
@@ -80,8 +81,9 @@ const char* documentLifecycleStateName(DocumentLifecycleState state) noexcept
 DocumentRuntime::DocumentRuntime(
     state::DocumentStore& documents,
     persistence::PersistenceService& persistence,
-    const state::ObjectTypeRegistry* objectTypes) noexcept
-    : documents_(documents), persistence_(persistence), objectTypes_(objectTypes)
+    const state::ObjectTypeRegistry* objectTypes,
+    const platform::IAssetStore* assetStore) noexcept
+    : documents_(documents), persistence_(persistence), objectTypes_(objectTypes), assetStore_(assetStore)
 {
 }
 
@@ -179,6 +181,10 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::attach(
     }
     const auto documentId = image.documentId;
     const auto projectId = image.projectId;
+    auto assetsAdmitted = validateObjectAssets(image.objects, assetStore_);
+    if(!assetsAdmitted) {
+        return foundation::Result<DocumentLifecycleSnapshot>::failure(std::move(assetsAdmitted).error());
+    }
     if(objectTypes_ != nullptr) {
         auto admitted = objectTypes_->validateObjects(image.objects, persistence_.configured());
         if(!admitted) {
@@ -507,7 +513,10 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::detachImpl(
                 std::move(document).error());
         }
         auto snapshotId = closeSnapshotId(documentId);
-        auto captured = snapshotId
+        auto assetsAdmitted = validateObjectAssets(document.value().objects().all(), assetStore_);
+        auto captured = !assetsAdmitted
+            ? foundation::Result<persistence::SnapshotRecord>::failure(std::move(assetsAdmitted).error())
+            : snapshotId
             ? persistence_.captureSnapshot(
                   std::move(snapshotId).value(), document.value())
             : foundation::Result<persistence::SnapshotRecord>::failure(

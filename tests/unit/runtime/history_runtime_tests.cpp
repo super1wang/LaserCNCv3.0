@@ -881,6 +881,44 @@ TEST_CASE("History recovery rejects unknown fields with a valid digest", "[histo
     removeDatabase(path);
 }
 
+TEST_CASE("Version three journals preserve versioned history without asset fields", "[history][persistence][compatibility]")
+{
+    const auto path = databasePath();
+    const auto project = validId<ProjectId>("project.history");
+    const auto document = validId<DocumentId>("document.history");
+    const auto session = validId<SessionId>("session.history");
+    {
+        AppKernel kernel;
+        configurePersistence(kernel, path);
+        configureRuntime(kernel, project, document, session, true);
+        REQUIRE(kernel.bootstrap().hasValue());
+        REQUIRE(kernel.execution().executeCommand(request(
+            "request.history.v3", "kernel.history.create", project, document, session, "object.history.v3")).hasValue());
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+    rewriteJournal(path, "transaction.request.history.v3", [](Value::Object& root) {
+        root.at("version") = Value{std::int64_t{3}};
+        for(auto& change : *root.at("changes").getIf<Value::Array>()) {
+            for(const auto* name : {"before", "after"}) {
+                if(auto* record = change.getIf<Value::Object>()->at(name).getIf<Value::Object>()) {
+                    record->erase("assets");
+                }
+            }
+        }
+    });
+    {
+        AppKernel kernel;
+        configurePersistence(kernel, path);
+        configureRuntime(kernel, project, document, session, false);
+        REQUIRE(kernel.bootstrap().hasValue());
+        REQUIRE(kernel.execution().executeCommand(request(
+            "request.history.v3.undo", "edit.undo", project, document, session)).hasValue());
+        CHECK_FALSE(hasObject(kernel, document, "object.history.v3"));
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+    removeDatabase(path);
+}
+
 TEST_CASE("Version one journal writes become an undo barrier", "[history][persistence][compatibility]")
 {
     const auto path = databasePath();
@@ -909,6 +947,7 @@ TEST_CASE("Version one journal writes become an undo barrier", "[history][persis
                 for(const auto* name : {"before", "after"}) {
                     if(auto* object = fields.at(name).getIf<Value::Object>()) {
                         object->erase("schemaVersion");
+                        object->erase("assets");
                     }
                 }
             }

@@ -2,6 +2,7 @@
 
 #include <lasercnc/foundation/result.hpp>
 #include <lasercnc/kernel/identifiers.hpp>
+#include <lasercnc/platform/asset_store.hpp>
 #include <lasercnc/state/document.hpp>
 
 #include <array>
@@ -83,7 +84,8 @@ public:
     DocumentRuntime(
         state::DocumentStore& documents,
         persistence::PersistenceService& persistence,
-        const state::ObjectTypeRegistry* objectTypes = nullptr) noexcept;
+        const state::ObjectTypeRegistry* objectTypes = nullptr,
+        const platform::IAssetStore* assetStore = nullptr) noexcept;
 
     [[nodiscard]] foundation::Result<DocumentLifecycleSnapshot> create(
         kernel::ProjectId projectId,
@@ -154,6 +156,7 @@ private:
     state::DocumentStore& documents_;
     persistence::PersistenceService& persistence_;
     const state::ObjectTypeRegistry* objectTypes_;
+    const platform::IAssetStore* assetStore_;
     mutable std::mutex mutex_;
     mutable std::map<kernel::DocumentId, Entry> entries_;
     CloseBlockers blockers_;

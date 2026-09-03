@@ -2,6 +2,7 @@
 
 #include <lasercnc/foundation/result.hpp>
 #include <lasercnc/kernel/identifiers.hpp>
+#include <lasercnc/platform/asset_store.hpp>
 #include <lasercnc/runtime/transaction.hpp>
 #include <lasercnc/state/document_store.hpp>
 #include <lasercnc/state/object_type_registry.hpp>
@@ -19,6 +20,10 @@ namespace lasercnc::persistence {
 class PersistenceService;
 }
 
+namespace lasercnc::kernel {
+class AppKernel;
+}
+
 namespace lasercnc::runtime {
 
 class HistoryRuntime;
@@ -30,7 +35,8 @@ public:
         persistence::PersistenceService* persistence = nullptr,
         DocumentRuntime* documentRuntime = nullptr,
         HistoryRuntime* historyRuntime = nullptr,
-        const state::ObjectTypeRegistry* objectTypes = nullptr) noexcept;
+        const state::ObjectTypeRegistry* objectTypes = nullptr,
+        const platform::IAssetStore* assetStore = nullptr) noexcept;
 
     TransactionManager(const TransactionManager&) = delete;
     TransactionManager& operator=(const TransactionManager&) = delete;
@@ -45,6 +51,7 @@ public:
 
 private:
     friend class ApplicationTransaction;
+    friend class kernel::AppKernel;
 
     [[nodiscard]] foundation::Result<TransactionCommit> commit(
         ApplicationTransaction& transaction,
@@ -56,6 +63,7 @@ private:
     DocumentRuntime* documentRuntime_;
     HistoryRuntime* historyRuntime_;
     const state::ObjectTypeRegistry* objectTypes_;
+    const platform::IAssetStore* assetStore_;
     std::mutex commitMutex_;
     mutable std::mutex activeMutex_;
     std::map<kernel::TransactionId, kernel::DocumentId> activeTransactions_;
