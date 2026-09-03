@@ -1,0 +1,29 @@
+add_executable(
+    lasercnc_foundation_tests
+    unit/foundation/strong_id_tests.cpp
+    unit/foundation/value_tests.cpp
+    unit/foundation/result_error_tests.cpp
+    unit/foundation/schema_tests.cpp
+)
+
+target_link_libraries(
+    lasercnc_foundation_tests
+    PRIVATE
+        LaserCNC::Foundation
+        Catch2::Catch2WithMain
+)
+
+target_compile_features(lasercnc_foundation_tests PRIVATE cxx_std_20)
+set_target_properties(lasercnc_foundation_tests PROPERTIES CXX_EXTENSIONS OFF)
+lcnc_enable_warnings(lasercnc_foundation_tests)
+
+include(Catch)
+catch_discover_tests(lasercnc_foundation_tests)
+
+add_test(
+    NAME architecture.kernel_public_api_boundary
+    COMMAND
+        "${CMAKE_COMMAND}"
+        "-DLCNC_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+        -P "${PROJECT_SOURCE_DIR}/cmake/VerifyKernelBoundaries.cmake"
+)
