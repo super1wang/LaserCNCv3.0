@@ -20,6 +20,33 @@ lcnc_enable_warnings(lasercnc_foundation_tests)
 include(Catch)
 catch_discover_tests(lasercnc_foundation_tests)
 
+# Benchmark harness is test-only; it is not a product command-line host.
+# 中文翻译：基准程序仅用于测试，不是产品命令行宿主。
+if(WIN32)
+    add_executable(lasercnc_kernel_benchmark benchmark/kernel_benchmark.cpp)
+    target_link_libraries(lasercnc_kernel_benchmark PRIVATE LaserCNC::Infrastructure Psapi)
+    target_include_directories(lasercnc_kernel_benchmark PRIVATE "${PROJECT_SOURCE_DIR}/tests/support")
+    target_compile_features(lasercnc_kernel_benchmark PRIVATE cxx_std_20)
+    set_target_properties(lasercnc_kernel_benchmark PROPERTIES CXX_EXTENSIONS OFF)
+    target_compile_definitions(lasercnc_kernel_benchmark PRIVATE
+        LCNC_BENCH_ROOT="${CMAKE_CURRENT_BINARY_DIR}/benchmark-runs"
+        LCNC_BENCH_CONFIG="$<CONFIG>"
+        LCNC_BENCH_COMPILER="${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}")
+    lcnc_enable_warnings(lasercnc_kernel_benchmark)
+    foreach(family IN ITEMS component gateway journal lifecycle)
+        foreach(storage IN ITEMS memory sqlite)
+            if(family STREQUAL "journal" AND storage STREQUAL "memory")
+                continue()
+            endif()
+            add_test(NAME integration.kernel_benchmark_smoke_${family}_${storage}
+                COMMAND lasercnc_kernel_benchmark --objects 10 --samples 2 --warmup 1
+                    --cycles 3 --family ${family} --storage ${storage})
+            set_tests_properties(integration.kernel_benchmark_smoke_${family}_${storage} PROPERTIES
+                TIMEOUT 120 RUN_SERIAL TRUE PASS_REGULAR_EXPRESSION "benchmark-verified")
+        endforeach()
+    endforeach()
+endif()
+
 add_executable(
     lasercnc_kernel_tests
     unit/kernel/document_state_tests.cpp
