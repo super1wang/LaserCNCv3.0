@@ -4,10 +4,10 @@ LaserCNC v3.0 当前处于 Application Kernel 建设阶段。仓库按
 Command-First、Automation-First、Headless-First 和 Infrastructure-Adapter
 原则推进；在内核阶段结束前，不引入 CAD、CAM、Machine 或 Qt GUI 实现。
 
-## 当前阶段
+## 已完成阶段
 
-- Phase 1：Foundation
-- 范围：`StrongId`、`Value`、`Result`、`Error`、`Schema`
+- Phase 1：Foundation（`StrongId`、`Value`、`Result`、`Error`、`Schema`）
+- Phase 2：Application Composition（`AppKernel`、`ServiceRegistry`、`ModuleRuntime`）
 - 标准：C++20
 - 测试：Catch2 + CTest
 

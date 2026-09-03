@@ -20,6 +20,25 @@ lcnc_enable_warnings(lasercnc_foundation_tests)
 include(Catch)
 catch_discover_tests(lasercnc_foundation_tests)
 
+add_executable(
+    lasercnc_kernel_tests
+    unit/kernel/service_registry_tests.cpp
+    unit/kernel/module_runtime_tests.cpp
+)
+
+target_link_libraries(
+    lasercnc_kernel_tests
+    PRIVATE
+        LaserCNC::Kernel
+        Catch2::Catch2WithMain
+)
+
+target_compile_features(lasercnc_kernel_tests PRIVATE cxx_std_20)
+set_target_properties(lasercnc_kernel_tests PROPERTIES CXX_EXTENSIONS OFF)
+lcnc_enable_warnings(lasercnc_kernel_tests)
+
+catch_discover_tests(lasercnc_kernel_tests)
+
 add_test(
     NAME architecture.kernel_public_api_boundary
     COMMAND

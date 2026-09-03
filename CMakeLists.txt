@@ -15,6 +15,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerWarnings)
 
 add_subdirectory(src/foundation)
+add_subdirectory(src/kernel)
 
 if(LCNC_BUILD_TESTING)
     include(CTest)
