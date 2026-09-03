@@ -146,6 +146,12 @@ void ObjectTypeRegistry::freeze()
     frozen_ = true;
 }
 
+void ObjectTypeRegistry::remove(const kernel::ObjectTypeId& type)
+{
+    std::unique_lock lock(mutex_);
+    definitions_.erase(type);
+}
+
 bool ObjectTypeRegistry::frozen() const
 {
     std::shared_lock lock(mutex_);

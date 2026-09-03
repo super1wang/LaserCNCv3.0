@@ -45,7 +45,8 @@ AppKernel::AppKernel()
           queryRegistry_,
           taskRegistry_,
           workflowRegistry_,
-          scriptRegistry_),
+          scriptRegistry_,
+          objectTypes_),
       effects_(effectGuards_, resources_, documents_, persistence_),
       scheduler_(resources_, persistence_, traces_, metrics_),
       tasks_(
@@ -106,6 +107,7 @@ AppKernel::AppKernel()
           taskRegistry_,
           workflowRegistry_,
           scriptRegistry_,
+          objectTypes_,
           commands_,
           queries_,
           tasks_,
@@ -492,6 +494,7 @@ foundation::Result<void> AppKernel::bootstrap()
     effectGuards_.freeze();
     queryRegistry_.freeze();
     taskRegistry_.freeze();
+    objectTypes_.freeze();
     resources_.freeze();
     persistence_.freeze();
     traces_.freeze();
@@ -687,6 +690,11 @@ const runtime::ScriptRegistry& AppKernel::scriptRegistry() const noexcept
 const runtime::TaskRegistry& AppKernel::taskRegistry() const noexcept
 {
     return taskRegistry_;
+}
+
+const state::ObjectTypeRegistry& AppKernel::objectTypes() const noexcept
+{
+    return objectTypes_;
 }
 
 runtime::ResourceManager& AppKernel::resources() noexcept

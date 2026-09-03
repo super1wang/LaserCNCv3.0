@@ -85,6 +85,7 @@ public:
     [[nodiscard]] const runtime::WorkflowRegistry& workflowRegistry() const noexcept;
     [[nodiscard]] const runtime::ScriptRegistry& scriptRegistry() const noexcept;
     [[nodiscard]] const runtime::TaskRegistry& taskRegistry() const noexcept;
+    [[nodiscard]] const state::ObjectTypeRegistry& objectTypes() const noexcept;
     [[nodiscard]] runtime::ResourceManager& resources() noexcept;
     [[nodiscard]] const runtime::ResourceManager& resources() const noexcept;
     [[nodiscard]] runtime::Scheduler& scheduler() noexcept;
@@ -118,6 +119,7 @@ private:
     runtime::WorkflowRegistry workflowRegistry_;
     runtime::ScriptRegistry scriptRegistry_;
     runtime::TaskRegistry taskRegistry_;
+    state::ObjectTypeRegistry objectTypes_;
     ModuleRuntime modules_;
     runtime::ResourceManager resources_;
     runtime::EffectExecutor effects_;

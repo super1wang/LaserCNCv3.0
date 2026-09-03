@@ -9,6 +9,7 @@
 #include <lasercnc/runtime/script_registry.hpp>
 #include <lasercnc/runtime/task_registry.hpp>
 #include <lasercnc/runtime/workflow_registry.hpp>
+#include <lasercnc/state/object_type_registry.hpp>
 
 #include <algorithm>
 #include <memory>
@@ -30,6 +31,7 @@ struct ModuleContributionSnapshot final {
     std::vector<ScriptName> scripts;
     std::vector<EventName> events;
     std::vector<CapabilityId> capabilities;
+    std::vector<ObjectTypeId> objectTypes;
 };
 
 class ModuleRegistrar final {
@@ -81,6 +83,8 @@ public:
         runtime::ScriptDefinition definition);
     [[nodiscard]] foundation::Result<void> registerEvent(EventName event);
     [[nodiscard]] foundation::Result<void> registerCapability(CapabilityId capability);
+    [[nodiscard]] foundation::Result<void> registerObjectType(
+        state::ObjectTypeDefinition definition);
 
 private:
     friend class ModuleRuntime;
@@ -92,7 +96,8 @@ private:
         runtime::QueryRegistry& queries,
         runtime::TaskRegistry& tasks,
         runtime::WorkflowRegistry& workflows,
-        runtime::ScriptRegistry& scripts) noexcept;
+        runtime::ScriptRegistry& scripts,
+        state::ObjectTypeRegistry& objectTypes) noexcept;
 
     template <typename Id>
     static bool contains(const std::vector<Id>& values, const Id& value)
@@ -114,6 +119,7 @@ private:
     runtime::TaskRegistry& tasks_;
     runtime::WorkflowRegistry& workflows_;
     runtime::ScriptRegistry& scripts_;
+    state::ObjectTypeRegistry& objectTypes_;
     ModuleContributionSnapshot contributions_;
     std::optional<foundation::Error> firstError_;
 };

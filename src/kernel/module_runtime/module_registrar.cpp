@@ -44,14 +44,16 @@ ModuleRegistrar::ModuleRegistrar(
     runtime::QueryRegistry& queries,
     runtime::TaskRegistry& tasks,
     runtime::WorkflowRegistry& workflows,
-    runtime::ScriptRegistry& scripts) noexcept
+    runtime::ScriptRegistry& scripts,
+    state::ObjectTypeRegistry& objectTypes) noexcept
     : descriptor_(descriptor),
       services_(services),
       commands_(commands),
       queries_(queries),
       tasks_(tasks),
       workflows_(workflows),
-      scripts_(scripts)
+      scripts_(scripts),
+      objectTypes_(objectTypes)
 {
 }
 
@@ -271,6 +273,23 @@ foundation::Result<void> ModuleRegistrar::registerCapability(CapabilityId capabi
     return foundation::Result<void>::success();
 }
 
+foundation::Result<void> ModuleRegistrar::registerObjectType(
+    state::ObjectTypeDefinition definition)
+{
+    const auto type = definition.descriptor.type;
+    auto admitted = admit(
+        contains(descriptor_.objectTypes, type), "object-type", type.value());
+    if(!admitted) {
+        return admitted;
+    }
+    auto registered = objectTypes_.registerType(std::move(definition));
+    if(!registered) {
+        return remember(std::move(registered).error());
+    }
+    contributions_.objectTypes.push_back(type);
+    return foundation::Result<void>::success();
+}
+
 foundation::Result<ModuleContributionSnapshot> ModuleRegistrar::finish()
 {
     if(firstError_.has_value()) {
@@ -283,7 +302,8 @@ foundation::Result<ModuleContributionSnapshot> ModuleRegistrar::finish()
         && matches(descriptor_.workflows, contributions_.workflows)
         && matches(descriptor_.scripts, contributions_.scripts)
         && matches(descriptor_.events, contributions_.events)
-        && matches(descriptor_.capabilities, contributions_.capabilities);
+        && matches(descriptor_.capabilities, contributions_.capabilities)
+        && matches(descriptor_.objectTypes, contributions_.objectTypes);
     if(!exact) {
         return foundation::Result<ModuleContributionSnapshot>::failure(
             foundation::makeError(

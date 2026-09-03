@@ -2,6 +2,7 @@
 #include <lasercnc/foundation/error.hpp>
 
 #include <catch2/catch_test_macros.hpp>
+#include "kernel_test_module.hpp"
 
 #include <atomic>
 #include <functional>
@@ -9,12 +10,17 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 using namespace lasercnc::foundation;
 using namespace lasercnc::kernel;
 using namespace lasercnc::state;
+
+static_assert(std::is_same_v<
+              decltype(std::declval<lasercnc::kernel::AppKernel&>().objectTypes()),
+              const ObjectTypeRegistry&>);
 
 namespace {
 
@@ -99,6 +105,34 @@ ObjectTypeDefinition definition(const char* name = "type.test.versioned")
             {Version {1U, 0U, 0U}, Version {2U, 0U, 0U}, incrementMigration()},
         }};
 }
+
+class TypeModule final : public IModule {
+public:
+    TypeModule(const char* moduleId, bool declareType, bool publishType, bool failStart)
+        : descriptor_ {id<ModuleId>(moduleId), moduleId, Version {1U, 0U, 0U}},
+          publishType_(publishType), failStart_(failStart)
+    {
+        if(declareType) {
+            descriptor_.objectTypes = {id<ObjectTypeId>("type.test.versioned")};
+        }
+    }
+    const ModuleDescriptor& descriptor() const noexcept override { return descriptor_; }
+    Result<void> registerComponents(ModuleRegistrar& registrar) override
+    {
+        return publishType_ ? registrar.registerObjectType(definition())
+                            : Result<void>::success();
+    }
+    Result<void> start(AppKernel&) override
+    {
+        return failStart_
+            ? Result<void>::failure(makeError("Test.TypeModuleStartFailed", ErrorCategory::Internal, "failure"))
+            : Result<void>::success();
+    }
+private:
+    ModuleDescriptor descriptor_;
+    bool publishType_;
+    bool failStart_;
+};
 
 } // namespace
 
@@ -286,4 +320,44 @@ TEST_CASE("ObjectTypeRegistry contains reference enumeration failures", "[state]
                                           Version {1U, 0U, 0U}, Value {std::int64_t {1}});
     REQUIRE_FALSE(references.hasValue());
     CHECK(std::string(references.error().code.value()) == expected);
+}
+
+TEST_CASE("AppKernel governs object types through modules and read-only discovery", "[kernel][object-type][modules]")
+{
+    AppKernel kernel;
+    REQUIRE(lasercnc::test::registerObjectType(kernel, definition()).hasValue());
+    REQUIRE(kernel.bootstrap().hasValue());
+    CHECK(kernel.objectTypes().frozen());
+    CHECK(kernel.objectTypes().size() == 1U);
+    const auto catalog = kernel.execution().catalog();
+    REQUIRE(catalog.objectTypes.size() == 1U);
+    CHECK(catalog.objectTypes.front().type == id<ObjectTypeId>("type.test.versioned"));
+    CHECK_FALSE(lasercnc::test::registerObjectType(kernel, definition("type.late")).hasValue());
+    REQUIRE(kernel.shutdown().hasValue());
+}
+
+TEST_CASE("ModuleRegistrar rejects invalid object type ownership and rolls back", "[kernel][object-type][modules][rollback]")
+{
+    AppKernel kernel;
+    SECTION("undeclared type") {
+        REQUIRE(kernel.addModule(std::make_unique<TypeModule>(
+            "module.type", false, true, false)).hasValue());
+    }
+    SECTION("declared but not published") {
+        REQUIRE(kernel.addModule(std::make_unique<TypeModule>(
+            "module.type", true, false, false)).hasValue());
+    }
+    SECTION("start failure removes the published type") {
+        REQUIRE(kernel.addModule(std::make_unique<TypeModule>(
+            "module.type", true, true, true)).hasValue());
+    }
+    SECTION("cross-module ownership conflict") {
+        REQUIRE(kernel.addModule(std::make_unique<TypeModule>(
+            "module.type.first", true, true, false)).hasValue());
+        REQUIRE(kernel.addModule(std::make_unique<TypeModule>(
+            "module.type.second", true, true, false)).hasValue());
+    }
+    CHECK_FALSE(kernel.bootstrap().hasValue());
+    CHECK(kernel.objectTypes().size() == 0U);
+    CHECK(kernel.execution().catalog().objectTypes.empty());
 }

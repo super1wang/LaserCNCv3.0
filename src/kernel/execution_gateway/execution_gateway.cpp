@@ -22,6 +22,7 @@ ExecutionGateway::ExecutionGateway(
     const runtime::TaskRegistry& taskRegistry,
     const runtime::WorkflowRegistry& workflowRegistry,
     const runtime::ScriptRegistry& scriptRegistry,
+    const state::ObjectTypeRegistry& objectTypes,
     runtime::CommandRuntime& commands,
     runtime::QueryRuntime& queries,
     runtime::TaskRuntime& tasks,
@@ -33,6 +34,7 @@ ExecutionGateway::ExecutionGateway(
       taskRegistry_(taskRegistry),
       workflowRegistry_(workflowRegistry),
       scriptRegistry_(scriptRegistry),
+      objectTypes_(objectTypes),
       commands_(commands),
       queries_(queries),
       tasks_(tasks),
@@ -127,7 +129,8 @@ ExecutionCatalog ExecutionGateway::catalog() const
         queryRegistry_.descriptors(),
         taskRegistry_.descriptors(),
         workflowRegistry_.descriptors(),
-        scriptRegistry_.descriptors()};
+        scriptRegistry_.descriptors(),
+        objectTypes_.descriptors()};
 }
 
 } // namespace lasercnc::kernel

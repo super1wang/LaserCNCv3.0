@@ -2,7 +2,7 @@
 
 ## 状态与范围
 
-E1A 是 K10E 的内部可独立验证节点，不代表 K10E 已验收。当前只实现对象类型注册、版本校验、显式迁移和对象引用枚举；尚未接入 AppKernel/ModuleRegistrar、Document、Journal、History 或 AssetStore 的准入链。
+E1A 是 K10E 的内部可独立验证节点，不代表 K10E 已验收。E1A 实现对象类型注册、版本校验、显式迁移和对象引用枚举；后续 E1B1 已完成 AppKernel/ModuleRegistrar 集成。Document、Journal、History 与 AssetStore 的准入链仍未闭合。
 
 ## 类型定义
 
@@ -37,6 +37,14 @@ Reference Enumerator 按精确版本读取对象数据，输出同一 Document �
 - 覆盖确定性目录、冻结、未知类型/版本、完整迁移链、非法图、源/中间结果校验、错误/异常隔离、源 Value 不变、引用规范化、锁外重入和并发读取；
 - 架构扫描：65 个公共头文件、126 个生产源文件通过。
 
+## E1B1 模块治理集成
+
+`ModuleDescriptor::objectTypes` 声明稳定 ObjectTypeId，`ModuleRegistrar::registerObjectType()` 原子发布完整版本定义。类型所有权在模块回调前检查，漏注册、越权注册或跨模块冲突均阻止启动；后续生命周期失败时移除已发布类型。
+
+AppKernel 在 Ready 前冻结 ObjectTypeRegistry，只暴露 const 发现视图；ExecutionGateway catalog 追加对象类型描述符。类型专用的可变 getter 已加入架构扫描，编译期断言固定 const 返回类型。
+
+E1B1 Debug/Release 均为 173/173 CTest；新增 2 个模块集成用例重复 20 次共 40 项通过，覆盖正常发现、冻结、晚注册、未声明/漏注册、跨模块冲突与启动失败回滚。
+
 ## 下一节点
 
-将 ObjectTypeRegistry 纳入 ModuleRegistrar 声明/所有权/回滚和 ExecutionGateway 发现；为 ObjectRecord 持久化精确 Schema Version，并在事务提交、文档打开与恢复时执行类型和引用准入。之后再闭合 AssetRef/AssetStore 与 OCCT 架构边界。
+为 ObjectRecord 持久化精确 Schema Version，并在事务提交、文档打开与恢复时执行类型和引用准入。之后再闭合 AssetRef/AssetStore 与 OCCT 架构边界。

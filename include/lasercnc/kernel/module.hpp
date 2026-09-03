@@ -31,6 +31,7 @@ struct ModuleDescriptor final {
     std::vector<ScriptName> scripts;
     std::vector<EventName> events;
     std::vector<CapabilityId> capabilities;
+    std::vector<ObjectTypeId> objectTypes;
 };
 
 class IModule {

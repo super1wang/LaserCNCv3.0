@@ -35,6 +35,7 @@ struct ExecutionCatalog final {
     std::vector<runtime::TaskDescriptor> tasks;
     std::vector<runtime::WorkflowDescriptor> workflows;
     std::vector<runtime::ScriptDescriptor> scripts;
+    std::vector<state::ObjectTypeDescriptor> objectTypes;
 };
 
 class ExecutionGateway final {
@@ -84,6 +85,7 @@ private:
         const runtime::TaskRegistry& taskRegistry,
         const runtime::WorkflowRegistry& workflowRegistry,
         const runtime::ScriptRegistry& scriptRegistry,
+        const state::ObjectTypeRegistry& objectTypes,
         runtime::CommandRuntime& commands,
         runtime::QueryRuntime& queries,
         runtime::TaskRuntime& tasks,
@@ -96,6 +98,7 @@ private:
     const runtime::TaskRegistry& taskRegistry_;
     const runtime::WorkflowRegistry& workflowRegistry_;
     const runtime::ScriptRegistry& scriptRegistry_;
+    const state::ObjectTypeRegistry& objectTypes_;
     runtime::CommandRuntime& commands_;
     runtime::QueryRuntime& queries_;
     runtime::TaskRuntime& tasks_;

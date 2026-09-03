@@ -127,13 +127,15 @@ ModuleRuntime::ModuleRuntime(
     runtime::QueryRegistry& queries,
     runtime::TaskRegistry& tasks,
     runtime::WorkflowRegistry& workflows,
-    runtime::ScriptRegistry& scripts) noexcept
+    runtime::ScriptRegistry& scripts,
+    state::ObjectTypeRegistry& objectTypes) noexcept
     : services_(services),
       commands_(commands),
       queries_(queries),
       tasks_(tasks),
       workflows_(workflows),
-      scripts_(scripts)
+      scripts_(scripts),
+      objectTypes_(objectTypes)
 {
 }
 
@@ -278,6 +280,7 @@ foundation::Result<void> ModuleRuntime::validateContributionDeclarations() const
     std::map<ScriptName, ModuleId> scriptOwners;
     std::map<EventName, ModuleId> eventOwners;
     std::map<CapabilityId, ModuleId> capabilityOwners;
+    std::map<ObjectTypeId, ModuleId> objectTypeOwners;
     for(const auto& record : records_) {
         std::set<ServiceId> required;
         for(const auto& serviceId : record.descriptor.requiredServices) {
@@ -352,12 +355,20 @@ foundation::Result<void> ModuleRuntime::validateContributionDeclarations() const
         if(!claimed) {
             return claimed;
         }
+        claimed = claimAll(objectTypeOwners, record.descriptor.objectTypes, "object-type");
+        if(!claimed) {
+            return claimed;
+        }
     }
     return foundation::Result<void>::success();
 }
 
 void ModuleRuntime::removeContributions(Record& record)
 {
+    for(auto current = record.contributions.objectTypes.rbegin();
+        current != record.contributions.objectTypes.rend(); ++current) {
+        objectTypes_.remove(*current);
+    }
     for(auto current = record.contributions.scripts.rbegin();
         current != record.contributions.scripts.rend(); ++current) {
         scripts_.remove(*current);
@@ -432,7 +443,8 @@ foundation::Result<void> ModuleRuntime::bootstrap(AppKernel& kernel)
             queries_,
             tasks_,
             workflows_,
-            scripts_);
+            scripts_,
+            objectTypes_);
         auto result = invokeLifecycle(
             record.descriptor,
             "register",

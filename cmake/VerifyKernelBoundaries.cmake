@@ -44,6 +44,7 @@ set(forbidden_app_kernel_bypasses
     "TaskRegistry& taskRegistry() noexcept"
     "WorkflowRegistry& workflowRegistry() noexcept"
     "ScriptRegistry& scriptRegistry() noexcept"
+    "ObjectTypeRegistry& objectTypes() noexcept"
     "CommandRuntime& commands("
     "QueryRuntime& queries("
     "TaskRuntime& tasks("

@@ -12,6 +12,10 @@
 #include <shared_mutex>
 #include <vector>
 
+namespace lasercnc::kernel {
+class ModuleRuntime;
+}
+
 namespace lasercnc::state {
 
 enum class ObjectPersistencePolicy : std::uint8_t {
@@ -91,6 +95,9 @@ public:
         const foundation::Value& data) const;
 
 private:
+    friend class kernel::ModuleRuntime;
+    void remove(const kernel::ObjectTypeId& type);
+
     [[nodiscard]] foundation::Result<ObjectTypeDefinition> resolve(
         const kernel::ObjectTypeId& type) const;
 

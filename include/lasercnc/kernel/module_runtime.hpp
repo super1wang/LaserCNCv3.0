@@ -49,7 +49,8 @@ public:
         runtime::QueryRegistry& queries,
         runtime::TaskRegistry& tasks,
         runtime::WorkflowRegistry& workflows,
-        runtime::ScriptRegistry& scripts) noexcept;
+        runtime::ScriptRegistry& scripts,
+        state::ObjectTypeRegistry& objectTypes) noexcept;
 
     ModuleRuntime(const ModuleRuntime&) = delete;
     ModuleRuntime& operator=(const ModuleRuntime&) = delete;
@@ -84,6 +85,7 @@ private:
     runtime::TaskRegistry& tasks_;
     runtime::WorkflowRegistry& workflows_;
     runtime::ScriptRegistry& scripts_;
+    state::ObjectTypeRegistry& objectTypes_;
     std::vector<Record> records_;
     std::vector<std::size_t> startupOrder_;
     ModuleRuntimeState state_{ModuleRuntimeState::Configuring};

@@ -237,6 +237,17 @@ public:
         return *this;
     }
 
+    KernelTestModuleBuilder& objectType(state::ObjectTypeDefinition definition)
+    {
+        descriptor_.objectTypes.push_back(definition.descriptor.type);
+        registrations_.push_back(
+            [definition = std::move(definition)](
+                kernel::ModuleRegistrar& registrar) mutable {
+                return registrar.registerObjectType(std::move(definition));
+            });
+        return *this;
+    }
+
     [[nodiscard]] foundation::Result<void> install(kernel::AppKernel& kernel)
     {
         return kernel.addModule(std::make_unique<KernelTestModule>(
@@ -374,6 +385,17 @@ inline foundation::Result<void> registerScript(
         kernel,
         [definition = std::move(definition)](KernelTestModuleBuilder& builder) mutable {
             builder.script(std::move(definition));
+        });
+}
+
+inline foundation::Result<void> registerObjectType(
+    kernel::AppKernel& kernel,
+    state::ObjectTypeDefinition definition)
+{
+    return installKernelTestModule(
+        kernel,
+        [definition = std::move(definition)](KernelTestModuleBuilder& builder) mutable {
+            builder.objectType(std::move(definition));
         });
 }
 
