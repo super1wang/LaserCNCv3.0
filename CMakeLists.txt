@@ -20,6 +20,7 @@ lcnc_make_production_dependencies_available()
 add_subdirectory(src/foundation)
 add_subdirectory(src/kernel)
 add_subdirectory(src/state)
+add_subdirectory(src/runtime)
 add_subdirectory(src/infrastructure)
 
 if(LCNC_BUILD_TESTING)

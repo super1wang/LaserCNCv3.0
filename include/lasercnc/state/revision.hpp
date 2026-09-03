@@ -57,6 +57,15 @@ struct RevisionPrecondition final {
 
 class RevisionSet final {
 public:
+    RevisionSet() = default;
+    RevisionSet(
+        Revision project,
+        Revision document,
+        Revision geometry,
+        Revision cam,
+        Revision machineContext,
+        Revision environment) noexcept;
+
     [[nodiscard]] const Revision& at(RevisionScope scope) const noexcept;
 
     friend bool operator==(const RevisionSet&, const RevisionSet&) = default;
@@ -78,10 +87,6 @@ public:
     [[nodiscard]] static foundation::Result<void> validate(
         const RevisionSet& current,
         std::span<const RevisionPrecondition> preconditions);
-
-private:
-    friend class runtime::TransactionManager;
-
     [[nodiscard]] static foundation::Result<RevisionSet> advance(
         const RevisionSet& current,
         std::span<const RevisionScope> scopes);

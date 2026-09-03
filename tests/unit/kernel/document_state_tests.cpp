@@ -79,6 +79,21 @@ TEST_CASE("Revision validates conflicts duplicates and overflow", "[state][revis
     auto overflow = Revision {std::numeric_limits<std::uint64_t>::max()}.next();
     REQUIRE_FALSE(overflow.hasValue());
     CHECK(std::string(overflow.error().code.value()) == "Revision.Overflow");
+
+    const RevisionSet nearOverflow {
+        Revision {9U},
+        Revision {std::numeric_limits<std::uint64_t>::max()},
+        Revision {4U},
+        Revision {3U},
+        Revision {2U},
+        Revision {1U}};
+    const std::array scopes {RevisionScope::Project, RevisionScope::Document};
+    auto advanced = RevisionManager::advance(nearOverflow, scopes);
+    REQUIRE_FALSE(advanced.hasValue());
+    CHECK(std::string(advanced.error().code.value()) == "Revision.Overflow");
+    CHECK(nearOverflow.at(RevisionScope::Project) == Revision {9U});
+    CHECK(nearOverflow.at(RevisionScope::Document)
+          == Revision {std::numeric_limits<std::uint64_t>::max()});
 }
 
 TEST_CASE("DocumentStore returns immutable snapshots with stable identity", "[state][document]")

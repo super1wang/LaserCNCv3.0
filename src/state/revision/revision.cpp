@@ -87,6 +87,17 @@ foundation::Result<Revision> Revision::next() const
     return foundation::Result<Revision>::success(Revision {value_ + 1U});
 }
 
+RevisionSet::RevisionSet(
+    Revision project,
+    Revision document,
+    Revision geometry,
+    Revision cam,
+    Revision machineContext,
+    Revision environment) noexcept
+    : values_ {project, document, geometry, cam, machineContext, environment}
+{
+}
+
 const Revision& RevisionSet::at(RevisionScope scope) const noexcept
 {
     return values_[scopeIndex(scope)];

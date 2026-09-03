@@ -3,6 +3,8 @@
 #include <lasercnc/foundation/result.hpp>
 #include <lasercnc/kernel/module_runtime.hpp>
 #include <lasercnc/kernel/service_registry.hpp>
+#include <lasercnc/runtime/transaction_manager.hpp>
+#include <lasercnc/state/document_store.hpp>
 
 #include <memory>
 
@@ -33,11 +35,17 @@ public:
     [[nodiscard]] const ServiceRegistry& services() const noexcept;
     [[nodiscard]] ModuleRuntime& modules() noexcept;
     [[nodiscard]] const ModuleRuntime& modules() const noexcept;
+    [[nodiscard]] state::DocumentStore& documents() noexcept;
+    [[nodiscard]] const state::DocumentStore& documents() const noexcept;
+    [[nodiscard]] runtime::TransactionManager& transactions() noexcept;
+    [[nodiscard]] const runtime::TransactionManager& transactions() const noexcept;
     [[nodiscard]] AppKernelState state() const noexcept;
 
 private:
     ServiceRegistry services_;
     ModuleRuntime modules_;
+    state::DocumentStore documents_;
+    runtime::TransactionManager transactions_;
     AppKernelState state_{AppKernelState::Configuring};
 };
 

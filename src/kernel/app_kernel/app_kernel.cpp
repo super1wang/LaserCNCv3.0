@@ -2,12 +2,13 @@
 
 #include <lasercnc/foundation/error.hpp>
 
+#include <string>
 #include <utility>
 
 namespace lasercnc::kernel {
 
 AppKernel::AppKernel()
-    : modules_(services_)
+    : modules_(services_), transactions_(documents_)
 {
 }
 
@@ -61,6 +62,17 @@ foundation::Result<void> AppKernel::shutdown()
             foundation::ErrorCategory::Conflict,
             "The application kernel cannot stop from its current state"));
     }
+    const auto activeTransactionCount = transactions_.activeTransactionCount();
+    if(activeTransactionCount != 0U) {
+        return foundation::Result<void>::failure(foundation::makeError(
+            "Kernel.ActiveTransactions",
+            foundation::ErrorCategory::Conflict,
+            "The application kernel cannot stop while transactions are active",
+            foundation::Value {foundation::Value::Object {
+                {"activeTransactionCount",
+                 foundation::Value {std::to_string(activeTransactionCount)}},
+            }}));
+    }
 
     state_ = AppKernelState::Stopping;
     auto result = modules_.shutdown(*this);
@@ -91,6 +103,26 @@ ModuleRuntime& AppKernel::modules() noexcept
 const ModuleRuntime& AppKernel::modules() const noexcept
 {
     return modules_;
+}
+
+state::DocumentStore& AppKernel::documents() noexcept
+{
+    return documents_;
+}
+
+const state::DocumentStore& AppKernel::documents() const noexcept
+{
+    return documents_;
+}
+
+runtime::TransactionManager& AppKernel::transactions() noexcept
+{
+    return transactions_;
+}
+
+const runtime::TransactionManager& AppKernel::transactions() const noexcept
+{
+    return transactions_;
 }
 
 AppKernelState AppKernel::state() const noexcept
