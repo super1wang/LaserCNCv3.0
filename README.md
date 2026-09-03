@@ -12,6 +12,7 @@ Command-First、Automation-First、Headless-First 和 Infrastructure-Adapter
 - Phase 4：Document、Revision 与 Application Transaction
 - Phase 5：CommandRuntime、QueryRuntime 与 EventBus
 - Phase 6：TaskRuntime、Scheduler、Cancellation 与 Resource Model
+- Phase 7：Tracing、Metrics 与 Diagnostics
 - 标准：C++20
 - 测试：Catch2 + CTest
 
