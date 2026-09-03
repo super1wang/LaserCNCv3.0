@@ -1,6 +1,6 @@
 # LaserCNC v3.0
 
-LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9 及 K10A–K10E 收口节点，具备版本化执行、文档生命周期、History、模块治理与 ExecutionGateway、对象类型和资产状态准入。K10F 的 F1 故障注入、F2 独立进程恢复、F3 并发与生命周期已验收，下一步为 F4 性能/内存基线和 F5 最终门禁；Kernel 1.0 尚未 Frozen。仓库坚持 Command-First、Automation-First、Headless-First 和 Infrastructure-Adapter；CAD、CAM、Machine、Process、Qt GUI、产品 RPC/CLI 与 AI 等上层模块仍未开始。
+LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9 及 K10A–K10E 收口节点，具备版本化执行、文档生命周期、History、模块治理与 ExecutionGateway、对象类型和资产状态准入。K10F 的 F1 故障注入、F2 独立进程恢复、F3 并发与生命周期、F4 性能/内存基线已验收，下一步为 F5 最终门禁；Kernel 1.0 尚未 Frozen。仓库坚持 Command-First、Automation-First、Headless-First 和 Infrastructure-Adapter；CAD、CAM、Machine、Process、Qt GUI、产品 RPC/CLI 与 AI 等上层模块仍未开始。
 
 ## 已完成阶段
 
@@ -13,7 +13,7 @@ LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9 及 K10A–K10E 收�
 - Phase 7：Tracing、Metrics 与 Diagnostics
 - Phase 8：Snapshot、Journal、SQLite Persistence 与 Crash Recovery
 - Phase 9：Workflow Runtime 与结构化 Script Runtime
-- Kernel 1.0 Closure：K10A–K10E 已验收；K10F 的 F1–F3 已验收；F4–F5 待闭合，不能宣布 Kernel Frozen
+- Kernel 1.0 Closure：K10A–K10E 已验收；K10F 的 F1–F4 已验收；F5 待闭合，不能宣布 Kernel Frozen
 - 标准：C++20
 - 测试：Catch2 + CTest
 
