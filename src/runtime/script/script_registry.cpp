@@ -376,4 +376,12 @@ foundation::Result<void> ScriptRegistry::validateAndFreeze()
     return foundation::Result<void>::success();
 }
 
+void ScriptRegistry::remove(const kernel::ScriptName& name)
+{
+    std::unique_lock lock(mutex_);
+    if(!frozen_) {
+        definitions_.erase(name);
+    }
+}
+
 } // namespace lasercnc::runtime

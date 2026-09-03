@@ -3,6 +3,7 @@
 #include <lasercnc/foundation/error.hpp>
 #include <lasercnc/foundation/result.hpp>
 #include <lasercnc/kernel/module.hpp>
+#include <lasercnc/kernel/module_registrar.hpp>
 
 #include <cstddef>
 #include <memory>
@@ -42,7 +43,13 @@ struct ModuleSnapshot final {
 
 class ModuleRuntime final {
 public:
-    explicit ModuleRuntime(ServiceRegistry& services);
+    ModuleRuntime(
+        ServiceRegistry& services,
+        runtime::CommandRegistry& commands,
+        runtime::QueryRegistry& queries,
+        runtime::TaskRegistry& tasks,
+        runtime::WorkflowRegistry& workflows,
+        runtime::ScriptRegistry& scripts) noexcept;
 
     ModuleRuntime(const ModuleRuntime&) = delete;
     ModuleRuntime& operator=(const ModuleRuntime&) = delete;
@@ -60,19 +67,23 @@ private:
         ModuleDescriptor descriptor;
         ModuleState state{ModuleState::Discovered};
         std::optional<foundation::Error> lastError;
-        std::vector<ServiceId> registeredServices;
+        ModuleContributionSnapshot contributions;
     };
 
     [[nodiscard]] foundation::Result<std::vector<std::size_t>> buildStartupOrder() const;
-    [[nodiscard]] foundation::Result<void> validateServiceDeclarations() const;
-    [[nodiscard]] foundation::Result<void> validateRegisteredServices(const Record& record) const;
+    [[nodiscard]] foundation::Result<void> validateContributionDeclarations() const;
     [[nodiscard]] foundation::Result<void> validateRequiredServices(const Record& record) const;
-    void captureRegistrationDelta(Record& record, const std::vector<ServiceId>& before);
+    void removeContributions(Record& record);
     [[nodiscard]] std::optional<foundation::Error> rollback(
         AppKernel& kernel,
         std::optional<std::size_t> failedIndex);
 
     ServiceRegistry& services_;
+    runtime::CommandRegistry& commands_;
+    runtime::QueryRegistry& queries_;
+    runtime::TaskRegistry& tasks_;
+    runtime::WorkflowRegistry& workflows_;
+    runtime::ScriptRegistry& scripts_;
     std::vector<Record> records_;
     std::vector<std::size_t> startupOrder_;
     ModuleRuntimeState state_{ModuleRuntimeState::Configuring};

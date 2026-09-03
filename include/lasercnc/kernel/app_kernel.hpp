@@ -114,7 +114,6 @@ public:
 
 private:
     ServiceRegistry services_;
-    ModuleRuntime modules_;
     state::DocumentStore documents_;
     persistence::PersistenceService persistence_;
     runtime::DocumentRuntime documentRuntime_;
@@ -132,6 +131,7 @@ private:
     runtime::WorkflowRegistry workflowRegistry_;
     runtime::ScriptRegistry scriptRegistry_;
     runtime::TaskRegistry taskRegistry_;
+    ModuleRuntime modules_;
     runtime::ResourceManager resources_;
     runtime::EffectExecutor effects_;
     std::unique_ptr<platform::ITaskExecutor> taskExecutor_;

@@ -6,6 +6,7 @@ target_sources(
     PRIVATE
         app_kernel/app_kernel.cpp
         module_runtime/module.cpp
+        module_runtime/module_registrar.cpp
         module_runtime/module_runtime.cpp
         service_registry/service_registry.cpp
     PUBLIC
@@ -15,6 +16,7 @@ target_sources(
             "${PROJECT_SOURCE_DIR}/include/lasercnc/kernel/app_kernel.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/kernel/identifiers.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/kernel/module.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/kernel/module_registrar.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/kernel/module_runtime.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/kernel/service_registry.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/observability/log_service.hpp"

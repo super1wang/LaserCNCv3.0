@@ -65,7 +65,7 @@ Discovered
 
 失败模块进入 `Failed`。启动流程分三轮执行，确保所有服务先注册，再初始化，最后启动：
 
-1. 按拓扑序调用 `registerServices()`，并核验服务声明。
+1. 按拓扑序调用 `registerComponents(ModuleRegistrar&)`，并核验全部模块贡献声明；这是 K10D D1 对原 `registerServices()` 契约的收紧。
 2. 检查 Required Services 后按拓扑序调用 `initialize()`。
 3. 按拓扑序调用 `start()`；全部成功后统一进入 Ready。
 

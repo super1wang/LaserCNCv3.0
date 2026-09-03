@@ -1,8 +1,9 @@
 #include <lasercnc/kernel/module.hpp>
+#include <lasercnc/kernel/module_registrar.hpp>
 
 namespace lasercnc::kernel {
 
-foundation::Result<void> IModule::registerServices(ServiceRegistry&)
+foundation::Result<void> IModule::registerComponents(ModuleRegistrar&)
 {
     return foundation::Result<void>::success();
 }

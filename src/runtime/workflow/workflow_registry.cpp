@@ -345,4 +345,12 @@ foundation::Result<void> WorkflowRegistry::validateAndFreeze()
     return foundation::Result<void>::success();
 }
 
+void WorkflowRegistry::remove(const kernel::WorkflowName& name)
+{
+    std::unique_lock lock(mutex_);
+    if(!frozen_) {
+        definitions_.erase(name);
+    }
+}
+
 } // namespace lasercnc::runtime

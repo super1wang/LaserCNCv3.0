@@ -3,6 +3,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <memory>
+#include <functional>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -11,8 +12,82 @@
 
 using namespace lasercnc::foundation;
 using namespace lasercnc::kernel;
+using namespace lasercnc::observability;
+using namespace lasercnc::platform;
+using namespace lasercnc::runtime;
 
 namespace {
+
+template <typename Id>
+Id makeId(const char* value)
+{
+    auto result = Id::create(value);
+    if(!result) {
+        throw std::logic_error("Invalid test identity");
+    }
+    return std::move(result).value();
+}
+
+Schema makeSchema(const char* value)
+{
+    auto result = Schema::create(
+        makeId<SchemaId>(value), Version {1U, 0U, 0U}, SchemaKind::Object);
+    if(!result) {
+        throw std::logic_error("Invalid test schema");
+    }
+    return std::move(result).value();
+}
+
+class PassSchemaValidator final : public ISchemaValidator {
+public:
+    Result<void> validate(const Schema&, const Value&) const override
+    {
+        return Result<void>::success();
+    }
+};
+
+class NullLogService final : public ILogService {
+public:
+    Result<void> write(const LogRecord&) override { return Result<void>::success(); }
+    Result<void> flush() override { return Result<void>::success(); }
+};
+
+class NullReadOnlyCommandHandler final : public IReadOnlyCommandHandler {
+public:
+    Result<Value> execute(const CommandRequest&, const ReadOnlyCommandContext&) override
+    {
+        return Result<Value>::success(Value {Value::Object {}});
+    }
+};
+
+class NullQueryHandler final : public IQueryHandler {
+public:
+    Result<Value> execute(const QueryRequest&, const QueryContext&) override
+    {
+        return Result<Value>::success(Value {Value::Object {}});
+    }
+};
+
+class NullTaskHandler final : public ITaskHandler {
+public:
+    Result<Value> execute(const TaskRequest&, const TaskContext&) override
+    {
+        return Result<Value>::success(Value {Value::Object {}});
+    }
+};
+
+class InlineTaskExecutor final : public ITaskExecutor {
+public:
+    Result<void> submit(ExecutorWork work, ExecutorCompletion completion) override
+    {
+        completion(work());
+        return Result<void>::success();
+    }
+
+    Result<void> waitIdle() override { return Result<void>::success(); }
+    Result<void> shutdown() override { return Result<void>::success(); }
+    std::size_t concurrency() const noexcept override { return 1U; }
+};
 
 struct IProbeService {
     virtual ~IProbeService() = default;
@@ -68,12 +143,12 @@ public:
         return descriptor_;
     }
 
-    [[nodiscard]] Result<void> registerServices(ServiceRegistry& services) override
+    [[nodiscard]] Result<void> registerComponents(ModuleRegistrar& registrar) override
     {
         append("register");
         if(serviceToRegister_.has_value() && registerDeclaredService_) {
             std::shared_ptr<IProbeService> service = std::make_shared<ProbeService>();
-            return services.registerService(*serviceToRegister_, std::move(service));
+            return registrar.registerService(*serviceToRegister_, std::move(service));
         }
         return Result<void>::success();
     }
@@ -137,7 +212,7 @@ public:
         return descriptor_;
     }
 
-    [[nodiscard]] Result<void> registerServices(ServiceRegistry&) override
+    [[nodiscard]] Result<void> registerComponents(ModuleRegistrar&) override
     {
         events_->push_back("module.throwing.register");
         return Result<void>::success();
@@ -160,6 +235,46 @@ private:
     std::shared_ptr<std::vector<std::string>> events_;
 };
 
+class RegistrarModule final : public IModule {
+public:
+    using Registration = std::function<Result<void>(ModuleRegistrar&)>;
+
+    RegistrarModule(
+        ModuleDescriptor descriptor,
+        Registration registration,
+        bool failStart = false)
+        : descriptor_(std::move(descriptor)),
+          registration_(std::move(registration)),
+          failStart_(failStart)
+    {
+    }
+
+    const ModuleDescriptor& descriptor() const noexcept override
+    {
+        return descriptor_;
+    }
+
+    Result<void> registerComponents(ModuleRegistrar& registrar) override
+    {
+        return registration_(registrar);
+    }
+
+    Result<void> start(AppKernel&) override
+    {
+        return failStart_
+            ? Result<void>::failure(makeError(
+                "Test.RegistrarStartFailed",
+                ErrorCategory::Internal,
+                "Injected registrar module start failure"))
+            : Result<void>::success();
+    }
+
+private:
+    ModuleDescriptor descriptor_;
+    Registration registration_;
+    bool failStart_{false};
+};
+
 ModuleDescriptor makeDescriptor(
     const char* id,
     Version version = Version {1, 0, 0},
@@ -174,6 +289,124 @@ ModuleDescriptor makeDescriptor(
         std::move(dependencies),
         std::move(requiredServices),
         std::move(providedServices)};
+}
+
+CommandDescriptor governedCommand(const char* name)
+{
+    return CommandDescriptor {
+        makeId<CommandName>(name),
+        Version {1U, 0U, 0U},
+        makeSchema("schema.module.command.arguments"),
+        makeSchema("schema.module.command.result"),
+        ExecutionMode::Synchronous,
+        SideEffectLevel::ReadOnly,
+        makeId<CapabilityId>("capability.module.execute"),
+        false,
+        true,
+        false,
+        ContractStatus::Active,
+        ExecutionScope::Global};
+}
+
+QueryDescriptor governedQuery(const char* name)
+{
+    return QueryDescriptor {
+        makeId<QueryName>(name),
+        Version {1U, 0U, 0U},
+        makeSchema("schema.module.query.arguments"),
+        makeSchema("schema.module.query.result"),
+        makeId<CapabilityId>("capability.module.execute"),
+        ExecutionScope::Global,
+        true};
+}
+
+TaskDescriptor governedTask(const char* name)
+{
+    return TaskDescriptor {
+        makeId<TaskName>(name),
+        Version {1U, 0U, 0U},
+        makeSchema("schema.module.task.input"),
+        makeSchema("schema.module.task.result")};
+}
+
+WorkflowDefinition governedWorkflow(const char* name)
+{
+    return WorkflowDefinition {
+        WorkflowDescriptor {
+            makeId<WorkflowName>(name),
+            Version {1U, 0U, 0U},
+            makeSchema("schema.module.workflow.input"),
+            makeSchema("schema.module.workflow.result")},
+        {},
+        Value {Value::Object {}}};
+}
+
+ScriptDefinition governedScript(const char* name)
+{
+    return ScriptDefinition {
+        ScriptDescriptor {
+            makeId<ScriptName>(name),
+            Version {1U, 0U, 0U},
+            makeSchema("schema.module.script.input"),
+            makeSchema("schema.module.script.result")},
+        {},
+        Value {Value::Object {}}};
+}
+
+ModuleDescriptor governedDescriptor(const char* id)
+{
+    auto descriptor = makeDescriptor(
+        id,
+        Version {1U, 0U, 0U},
+        {},
+        {},
+        {makeServiceId("service.module.governed")});
+    descriptor.commands = {makeId<CommandName>("command.module.governed")};
+    descriptor.queries = {makeId<QueryName>("query.module.governed")};
+    descriptor.tasks = {makeId<TaskName>("task.module.governed")};
+    descriptor.workflows = {makeId<WorkflowName>("workflow.module.governed")};
+    descriptor.scripts = {makeId<ScriptName>("script.module.governed")};
+    descriptor.events = {makeId<EventName>("event.module.governed")};
+    descriptor.capabilities = {
+        makeId<CapabilityId>("capability.module.governed")};
+    return descriptor;
+}
+
+Result<void> registerGovernedContributions(ModuleRegistrar& registrar)
+{
+    std::shared_ptr<IProbeService> service = std::make_shared<ProbeService>();
+    auto result = registrar.registerService(
+        makeServiceId("service.module.governed"), std::move(service));
+    if(result) {
+        result = registrar.registerReadOnlyCommand(
+            governedCommand("command.module.governed"),
+            std::make_shared<NullReadOnlyCommandHandler>());
+    }
+    if(result) {
+        result = registrar.registerQuery(
+            governedQuery("query.module.governed"),
+            std::make_shared<NullQueryHandler>());
+    }
+    if(result) {
+        result = registrar.registerTask(
+            governedTask("task.module.governed"),
+            std::make_shared<NullTaskHandler>());
+    }
+    if(result) {
+        result = registrar.registerWorkflow(
+            governedWorkflow("workflow.module.governed"));
+    }
+    if(result) {
+        result = registrar.registerScript(governedScript("script.module.governed"));
+    }
+    if(result) {
+        result = registrar.registerEvent(makeId<EventName>("event.module.governed"));
+    }
+    if(result) {
+        result = registrar.registerCapability(
+            makeId<CapabilityId>("capability.module.governed"));
+    }
+    return result;
 }
 
 } // namespace
@@ -372,7 +605,8 @@ TEST_CASE("ModuleRuntime enforces declared service composition", "[kernel][modul
 
     auto result = kernel.bootstrap();
     REQUIRE_FALSE(result.hasValue());
-    CHECK(std::string(result.error().code.value()) == "Kernel.ModuleServiceDeclarationMismatch");
+    CHECK(std::string(result.error().code.value())
+          == "Kernel.ModuleContributionDeclarationMismatch");
     CHECK_FALSE(kernel.services().contains(serviceId));
     CHECK(*events == std::vector<std::string> {
         "module.incomplete.register",
@@ -402,7 +636,8 @@ TEST_CASE("ModuleRuntime rejects conflicting service providers before callbacks"
 
     auto result = kernel.bootstrap();
     REQUIRE_FALSE(result.hasValue());
-    CHECK(std::string(result.error().code.value()) == "Kernel.ServiceProviderConflict");
+    CHECK(std::string(result.error().code.value())
+          == "Kernel.ModuleContributionOwnerConflict");
     CHECK(events->empty());
 }
 
@@ -487,4 +722,131 @@ TEST_CASE("AppKernel rejects invalid composition mutations", "[kernel][modules]"
         makeDescriptor("module.late"), events));
     REQUIRE_FALSE(lateModule.hasValue());
     CHECK(std::string(lateModule.error().code.value()) == "Kernel.AppKernelNotConfiguring");
+}
+
+TEST_CASE("ModuleRegistrar matches every declared contribution kind", "[kernel][modules][registrar]")
+{
+    AppKernel kernel;
+    REQUIRE(kernel.executionServices()
+                .configure(
+                    std::make_shared<PassSchemaValidator>(),
+                    std::make_shared<NullLogService>())
+                .hasValue());
+    REQUIRE(kernel.configureTaskExecutor(
+        std::make_unique<InlineTaskExecutor>()).hasValue());
+    REQUIRE(kernel.addModule(std::make_unique<RegistrarModule>(
+        governedDescriptor("module.governed"),
+        registerGovernedContributions)).hasValue());
+
+    auto started = kernel.bootstrap();
+    const auto startCode = started.hasValue()
+        ? std::string {}
+        : std::string(started.error().code.value());
+    INFO(startCode);
+    REQUIRE(started.hasValue());
+    CHECK(kernel.services().contains(makeServiceId("service.module.governed")));
+    CHECK(kernel.commandRegistry().descriptor(CommandKey {
+        makeId<CommandName>("command.module.governed"), Version {1U, 0U, 0U}}).hasValue());
+    CHECK(kernel.queryRegistry().descriptor(QueryKey {
+        makeId<QueryName>("query.module.governed"), Version {1U, 0U, 0U}}).hasValue());
+    CHECK(kernel.taskRegistry().descriptor(
+        makeId<TaskName>("task.module.governed")).hasValue());
+    CHECK(kernel.workflowRegistry().descriptor(
+        makeId<WorkflowName>("workflow.module.governed")).hasValue());
+    CHECK(kernel.scriptRegistry().descriptor(
+        makeId<ScriptName>("script.module.governed")).hasValue());
+    REQUIRE(kernel.shutdown().hasValue());
+}
+
+TEST_CASE("ModuleRegistrar rejects undeclared and missing contributions", "[kernel][modules][registrar]")
+{
+    SECTION("undeclared registration is remembered even when the module ignores it")
+    {
+        AppKernel kernel;
+        auto descriptor = makeDescriptor("module.undeclared");
+        auto registration = [](ModuleRegistrar& registrar) {
+            static_cast<void>(registrar.registerReadOnlyCommand(
+                governedCommand("command.module.undeclared"),
+                std::make_shared<NullReadOnlyCommandHandler>()));
+            return Result<void>::success();
+        };
+        REQUIRE(kernel.addModule(std::make_unique<RegistrarModule>(
+            std::move(descriptor), registration)).hasValue());
+        auto started = kernel.bootstrap();
+        REQUIRE_FALSE(started.hasValue());
+        CHECK(std::string(started.error().code.value())
+              == "Kernel.ModuleContributionUndeclared");
+        CHECK(kernel.commandRegistry().size() == 0U);
+    }
+
+    SECTION("declared contribution must actually be registered")
+    {
+        AppKernel kernel;
+        auto descriptor = makeDescriptor("module.missing-contribution");
+        descriptor.tasks = {makeId<TaskName>("task.module.missing")};
+        REQUIRE(kernel.addModule(std::make_unique<RegistrarModule>(
+            std::move(descriptor),
+            [](ModuleRegistrar&) { return Result<void>::success(); })).hasValue());
+        auto started = kernel.bootstrap();
+        REQUIRE_FALSE(started.hasValue());
+        CHECK(std::string(started.error().code.value())
+              == "Kernel.ModuleContributionDeclarationMismatch");
+        CHECK(kernel.taskRegistry().size() == 0U);
+    }
+}
+
+TEST_CASE("ModuleRuntime rolls back every registrar contribution", "[kernel][modules][registrar][rollback]")
+{
+    AppKernel kernel;
+    REQUIRE(kernel.executionServices()
+                .configure(
+                    std::make_shared<PassSchemaValidator>(),
+                    std::make_shared<NullLogService>())
+                .hasValue());
+    const auto providerId = makeModuleId("module.governed-provider");
+    REQUIRE(kernel.addModule(std::make_unique<RegistrarModule>(
+        governedDescriptor("module.governed-provider"),
+        registerGovernedContributions)).hasValue());
+    REQUIRE(kernel.addModule(std::make_unique<RegistrarModule>(
+        makeDescriptor(
+            "module.governed-failure",
+            Version {1U, 0U, 0U},
+            {{providerId, Version {1U, 0U, 0U}}}),
+        [](ModuleRegistrar&) { return Result<void>::success(); },
+        true)).hasValue());
+
+    auto started = kernel.bootstrap();
+    REQUIRE_FALSE(started.hasValue());
+    CHECK(std::string(started.error().code.value()) == "Kernel.ModuleLifecycleFailed");
+    CHECK_FALSE(kernel.services().contains(makeServiceId("service.module.governed")));
+    CHECK(kernel.commandRegistry().size() == 0U);
+    CHECK(kernel.queryRegistry().size() == 0U);
+    CHECK(kernel.taskRegistry().size() == 0U);
+    CHECK(kernel.workflowRegistry().size() == 0U);
+    CHECK(kernel.scriptRegistry().size() == 0U);
+}
+
+TEST_CASE("ModuleRuntime rejects cross-module contribution ownership before callbacks", "[kernel][modules][registrar]")
+{
+    AppKernel kernel;
+    auto first = makeDescriptor("module.owner-first");
+    auto second = makeDescriptor("module.owner-second");
+    const auto shared = makeId<CommandName>("command.module.shared");
+    first.commands = {shared};
+    second.commands = {shared};
+    auto callbackInvoked = std::make_shared<bool>(false);
+    auto registration = [callbackInvoked](ModuleRegistrar&) {
+        *callbackInvoked = true;
+        return Result<void>::success();
+    };
+    REQUIRE(kernel.addModule(std::make_unique<RegistrarModule>(
+        std::move(first), registration)).hasValue());
+    REQUIRE(kernel.addModule(std::make_unique<RegistrarModule>(
+        std::move(second), registration)).hasValue());
+
+    auto started = kernel.bootstrap();
+    REQUIRE_FALSE(started.hasValue());
+    CHECK(std::string(started.error().code.value())
+          == "Kernel.ModuleContributionOwnerConflict");
+    CHECK_FALSE(*callbackInvoked);
 }

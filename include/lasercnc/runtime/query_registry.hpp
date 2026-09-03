@@ -10,6 +10,7 @@
 
 namespace lasercnc::kernel {
 class AppKernel;
+class ModuleRuntime;
 }
 
 namespace lasercnc::runtime {
@@ -31,6 +32,7 @@ public:
 private:
     friend class QueryRuntime;
     friend class kernel::AppKernel;
+    friend class kernel::ModuleRuntime;
 
     struct Entry final {
         QueryDescriptor descriptor;
@@ -41,6 +43,7 @@ private:
         const QueryKey& key,
         VersionResolution resolution) const;
     void freeze();
+    void remove(const QueryKey& key);
 
     mutable std::shared_mutex mutex_;
     std::map<QueryKey, Entry> entries_;

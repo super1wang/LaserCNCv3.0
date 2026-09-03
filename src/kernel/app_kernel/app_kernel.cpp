@@ -34,12 +34,18 @@ private:
 } // namespace
 
 AppKernel::AppKernel()
-    : modules_(services_),
-      documentRuntime_(documents_, persistence_),
+    : documentRuntime_(documents_, persistence_),
       history_(documents_),
       transactions_(documents_, &persistence_, &documentRuntime_, &history_),
       workflowRegistry_(commandRegistry_, queryRegistry_),
       scriptRegistry_(commandRegistry_, queryRegistry_, workflowRegistry_),
+      modules_(
+          services_,
+          commandRegistry_,
+          queryRegistry_,
+          taskRegistry_,
+          workflowRegistry_,
+          scriptRegistry_),
       effects_(effectGuards_, resources_, documents_, persistence_),
       scheduler_(resources_, persistence_, traces_, metrics_),
       tasks_(

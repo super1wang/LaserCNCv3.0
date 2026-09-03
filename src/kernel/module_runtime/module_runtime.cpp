@@ -105,8 +105,19 @@ foundation::Error combineBootstrapAndRollbackErrors(
 
 } // namespace
 
-ModuleRuntime::ModuleRuntime(ServiceRegistry& services)
-    : services_(services)
+ModuleRuntime::ModuleRuntime(
+    ServiceRegistry& services,
+    runtime::CommandRegistry& commands,
+    runtime::QueryRegistry& queries,
+    runtime::TaskRegistry& tasks,
+    runtime::WorkflowRegistry& workflows,
+    runtime::ScriptRegistry& scripts) noexcept
+    : services_(services),
+      commands_(commands),
+      queries_(queries),
+      tasks_(tasks),
+      workflows_(workflows),
+      scripts_(scripts)
 {
 }
 
@@ -241,9 +252,16 @@ foundation::Result<std::vector<std::size_t>> ModuleRuntime::buildStartupOrder() 
     return foundation::Result<std::vector<std::size_t>>::success(std::move(order));
 }
 
-foundation::Result<void> ModuleRuntime::validateServiceDeclarations() const
+foundation::Result<void> ModuleRuntime::validateContributionDeclarations() const
 {
     std::map<ServiceId, ModuleId> providers;
+    std::map<CommandName, ModuleId> commandOwners;
+    std::map<QueryName, ModuleId> queryOwners;
+    std::map<TaskName, ModuleId> taskOwners;
+    std::map<WorkflowName, ModuleId> workflowOwners;
+    std::map<ScriptName, ModuleId> scriptOwners;
+    std::map<EventName, ModuleId> eventOwners;
+    std::map<CapabilityId, ModuleId> capabilityOwners;
     for(const auto& record : records_) {
         std::set<ServiceId> required;
         for(const auto& serviceId : record.descriptor.requiredServices) {
@@ -256,50 +274,98 @@ foundation::Result<void> ModuleRuntime::validateServiceDeclarations() const
             }
         }
 
-        for(const auto& serviceId : record.descriptor.providedServices) {
-            const auto [found, inserted] = providers.emplace(serviceId, record.descriptor.id);
+        const auto claim = [&record](auto& owners, const auto& identity, const char* kind)
+            -> foundation::Result<void> {
+            const auto [found, inserted] = owners.emplace(identity, record.descriptor.id);
             if(!inserted) {
                 return foundation::Result<void>::failure(foundation::makeError(
-                    "Kernel.ServiceProviderConflict",
-                    foundation::ErrorCategory::Conflict,
-                    "Multiple modules declare the same provided service",
+                    found->second == record.descriptor.id
+                        ? "Kernel.ModuleContributionDuplicated"
+                        : "Kernel.ModuleContributionOwnerConflict",
+                    found->second == record.descriptor.id
+                        ? foundation::ErrorCategory::Validation
+                        : foundation::ErrorCategory::Conflict,
+                    found->second == record.descriptor.id
+                        ? "A module contribution is declared more than once"
+                        : "Multiple modules declare ownership of the same contribution",
                     foundation::Value {foundation::Value::Object {
-                        {"serviceId", foundation::Value {std::string(serviceId.value())}},
-                        {"firstProvider", foundation::Value {std::string(found->second.value())}},
-                        {"secondProvider", foundation::Value {std::string(record.descriptor.id.value())}},
+                        {"contribution", foundation::Value {std::string(identity.value())}},
+                        {"firstModule", foundation::Value {std::string(found->second.value())}},
+                        {"kind", foundation::Value {kind}},
+                        {"secondModule", foundation::Value {
+                            std::string(record.descriptor.id.value())}},
                     }}));
             }
+            return foundation::Result<void>::success();
+        };
+        const auto claimAll = [&claim](auto& owners, const auto& identities, const char* kind)
+            -> foundation::Result<void> {
+            for(const auto& identity : identities) {
+                auto claimed = claim(owners, identity, kind);
+                if(!claimed) {
+                    return claimed;
+                }
+            }
+            return foundation::Result<void>::success();
+        };
+        auto claimed = claimAll(
+            providers, record.descriptor.providedServices, "service");
+        if(claimed) {
+            claimed = claimAll(commandOwners, record.descriptor.commands, "command");
+        }
+        if(claimed) {
+            claimed = claimAll(queryOwners, record.descriptor.queries, "query");
+        }
+        if(claimed) {
+            claimed = claimAll(taskOwners, record.descriptor.tasks, "task");
+        }
+        if(claimed) {
+            claimed = claimAll(workflowOwners, record.descriptor.workflows, "workflow");
+        }
+        if(claimed) {
+            claimed = claimAll(scriptOwners, record.descriptor.scripts, "script");
+        }
+        if(claimed) {
+            claimed = claimAll(eventOwners, record.descriptor.events, "event");
+        }
+        if(claimed) {
+            claimed = claimAll(
+                capabilityOwners, record.descriptor.capabilities, "capability");
+        }
+        if(!claimed) {
+            return claimed;
         }
     }
     return foundation::Result<void>::success();
 }
 
-void ModuleRuntime::captureRegistrationDelta(
-    Record& record,
-    const std::vector<ServiceId>& before)
+void ModuleRuntime::removeContributions(Record& record)
 {
-    const auto after = services_.snapshot().serviceIds;
-    record.registeredServices.clear();
-    std::set_difference(
-        after.begin(),
-        after.end(),
-        before.begin(),
-        before.end(),
-        std::back_inserter(record.registeredServices));
-}
-
-foundation::Result<void> ModuleRuntime::validateRegisteredServices(const Record& record) const
-{
-    auto expected = record.descriptor.providedServices;
-    std::sort(expected.begin(), expected.end());
-    if(expected != record.registeredServices) {
-        return foundation::Result<void>::failure(foundation::makeError(
-            "Kernel.ModuleServiceDeclarationMismatch",
-            foundation::ErrorCategory::Validation,
-            "Registered services do not match the module descriptor",
-            moduleDetails(record.descriptor, "register")));
+    for(auto current = record.contributions.scripts.rbegin();
+        current != record.contributions.scripts.rend(); ++current) {
+        scripts_.remove(*current);
     }
-    return foundation::Result<void>::success();
+    for(auto current = record.contributions.workflows.rbegin();
+        current != record.contributions.workflows.rend(); ++current) {
+        workflows_.remove(*current);
+    }
+    for(auto current = record.contributions.tasks.rbegin();
+        current != record.contributions.tasks.rend(); ++current) {
+        tasks_.remove(*current);
+    }
+    for(auto current = record.contributions.queries.rbegin();
+        current != record.contributions.queries.rend(); ++current) {
+        queries_.remove(*current);
+    }
+    for(auto current = record.contributions.commands.rbegin();
+        current != record.contributions.commands.rend(); ++current) {
+        commands_.remove(*current);
+    }
+    for(auto current = record.contributions.services.rbegin();
+        current != record.contributions.services.rend(); ++current) {
+        services_.remove(*current);
+    }
+    record.contributions = {};
 }
 
 foundation::Result<void> ModuleRuntime::validateRequiredServices(const Record& record) const
@@ -325,10 +391,10 @@ foundation::Result<void> ModuleRuntime::bootstrap(AppKernel& kernel)
         return runtimeStateError("The module runtime can only bootstrap once");
     }
 
-    auto serviceValidation = validateServiceDeclarations();
-    if(!serviceValidation) {
+    auto declarationValidation = validateContributionDeclarations();
+    if(!declarationValidation) {
         state_ = ModuleRuntimeState::Failed;
-        return serviceValidation;
+        return declarationValidation;
     }
 
     auto order = buildStartupOrder();
@@ -342,16 +408,31 @@ foundation::Result<void> ModuleRuntime::bootstrap(AppKernel& kernel)
 
     for(const std::size_t index : startupOrder_) {
         auto& record = records_[index];
-        const auto before = services_.snapshot().serviceIds;
+        ModuleRegistrar registrar(
+            record.descriptor,
+            services_,
+            commands_,
+            queries_,
+            tasks_,
+            workflows_,
+            scripts_);
         auto result = invokeLifecycle(
             record.descriptor,
             "register",
-            [&record, this] { return record.module->registerServices(services_); });
-        captureRegistrationDelta(record, before);
+            [&record, &registrar] {
+                return record.module->registerComponents(registrar);
+            });
         if(result) {
-            result = validateRegisteredServices(record);
+            auto finished = registrar.finish();
+            if(finished) {
+                record.contributions = std::move(finished).value();
+            } else {
+                result = foundation::Result<void>::failure(
+                    std::move(finished).error());
+            }
         }
         if(!result) {
+            record.contributions = std::move(registrar.contributions_);
             record.lastError = result.error();
             record.state = ModuleState::Failed;
             auto error = result.error();
@@ -427,7 +508,12 @@ std::optional<foundation::Error> ModuleRuntime::rollback(
         const std::size_t index = *iterator;
         auto& record = records_[index];
         const bool needsCleanup = record.state != ModuleState::Discovered
-            || !record.registeredServices.empty();
+            || !record.contributions.services.empty()
+            || !record.contributions.commands.empty()
+            || !record.contributions.queries.empty()
+            || !record.contributions.tasks.empty()
+            || !record.contributions.workflows.empty()
+            || !record.contributions.scripts.empty();
         if(!needsCleanup) {
             continue;
         }
@@ -444,12 +530,7 @@ std::optional<foundation::Error> ModuleRuntime::rollback(
             firstRollbackError = stopResult.error();
         }
 
-        for(auto service = record.registeredServices.rbegin();
-            service != record.registeredServices.rend();
-            ++service) {
-            services_.remove(*service);
-        }
-        record.registeredServices.clear();
+        removeContributions(record);
         record.state = ModuleState::Stopped;
     }
 

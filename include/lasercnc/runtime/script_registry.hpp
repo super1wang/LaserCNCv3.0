@@ -9,6 +9,7 @@
 
 namespace lasercnc::kernel {
 class AppKernel;
+class ModuleRuntime;
 }
 
 namespace lasercnc::runtime {
@@ -35,10 +36,12 @@ public:
 private:
     friend class ScriptRuntime;
     friend class kernel::AppKernel;
+    friend class kernel::ModuleRuntime;
 
     [[nodiscard]] foundation::Result<ScriptDefinition> resolve(
         const kernel::ScriptName& name) const;
     [[nodiscard]] foundation::Result<void> validateAndFreeze();
+    void remove(const kernel::ScriptName& name);
 
     const CommandRegistry& commands_;
     const QueryRegistry& queries_;

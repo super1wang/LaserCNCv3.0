@@ -10,6 +10,7 @@
 
 namespace lasercnc::kernel {
 class AppKernel;
+class ModuleRuntime;
 }
 
 namespace lasercnc::runtime {
@@ -40,6 +41,7 @@ public:
 private:
     friend class CommandRuntime;
     friend class kernel::AppKernel;
+    friend class kernel::ModuleRuntime;
 
     struct Entry final {
         CommandDescriptor descriptor;
@@ -53,6 +55,7 @@ private:
         const CommandKey& key,
         VersionResolution resolution) const;
     void freeze();
+    void remove(const CommandKey& key);
 
     mutable std::shared_mutex mutex_;
     std::map<CommandKey, Entry> entries_;

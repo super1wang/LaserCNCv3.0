@@ -9,6 +9,7 @@
 
 namespace lasercnc::kernel {
 class AppKernel;
+class ModuleRuntime;
 }
 
 namespace lasercnc::runtime {
@@ -31,10 +32,12 @@ public:
 private:
     friend class WorkflowRuntime;
     friend class kernel::AppKernel;
+    friend class kernel::ModuleRuntime;
 
     [[nodiscard]] foundation::Result<WorkflowDefinition> resolve(
         const kernel::WorkflowName& name) const;
     [[nodiscard]] foundation::Result<void> validateAndFreeze();
+    void remove(const kernel::WorkflowName& name);
 
     const CommandRegistry& commands_;
     const QueryRegistry& queries_;

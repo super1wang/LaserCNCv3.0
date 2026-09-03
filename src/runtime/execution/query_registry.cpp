@@ -152,4 +152,12 @@ void QueryRegistry::freeze()
     frozen_ = true;
 }
 
+void QueryRegistry::remove(const QueryKey& key)
+{
+    std::unique_lock lock(mutex_);
+    if(!frozen_) {
+        entries_.erase(key);
+    }
+}
+
 } // namespace lasercnc::runtime

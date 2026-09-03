@@ -114,4 +114,12 @@ void TaskRegistry::freeze()
     frozen_ = true;
 }
 
+void TaskRegistry::remove(const kernel::TaskName& name)
+{
+    std::unique_lock lock(mutex_);
+    if(!frozen_) {
+        entries_.erase(name);
+    }
+}
+
 } // namespace lasercnc::runtime
