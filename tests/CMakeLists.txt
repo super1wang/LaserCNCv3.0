@@ -27,6 +27,12 @@ add_test(NAME architecture.asan_configuration_guards
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_asan_configuration.cmake")
 set_tests_properties(architecture.asan_configuration_guards PROPERTIES TIMEOUT 60)
 
+add_test(NAME architecture.verified_program_exit_guards
+    COMMAND "${CMAKE_COMMAND}" "-DSOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+        "-DEVIDENCE_ROOT=${CMAKE_CURRENT_BINARY_DIR}/verified-program-probes"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_program_exit_guard.cmake")
+set_tests_properties(architecture.verified_program_exit_guards PROPERTIES TIMEOUT 45)
+
 if(LCNC_ENABLE_ASAN)
     add_executable(lasercnc_asan_probe integration/kernel_asan_probe.cpp)
     target_compile_features(lasercnc_asan_probe PRIVATE cxx_std_20)
@@ -60,10 +66,13 @@ if(WIN32)
                 continue()
             endif()
             add_test(NAME integration.kernel_benchmark_smoke_${family}_${storage}
-                COMMAND lasercnc_kernel_benchmark --objects 10 --samples 2 --warmup 1
-                    --cycles 3 --family ${family} --storage ${storage})
+                COMMAND "${CMAKE_COMMAND}"
+                    "-DLCNC_EXECUTABLE=$<TARGET_FILE:lasercnc_kernel_benchmark>"
+                    "-DLCNC_ARGUMENTS=--objects;10;--samples;2;--warmup;1;--cycles;3;--family;${family};--storage;${storage}"
+                    "-DLCNC_EXPECTED_OUTPUT=benchmark-verified" "-DLCNC_TIMEOUT=110"
+                    -P "${PROJECT_SOURCE_DIR}/cmake/RunVerifiedProgram.cmake")
             set_tests_properties(integration.kernel_benchmark_smoke_${family}_${storage} PROPERTIES
-                TIMEOUT 120 RUN_SERIAL TRUE PASS_REGULAR_EXPRESSION "benchmark-verified")
+                TIMEOUT 120 RUN_SERIAL TRUE)
         endforeach()
     endforeach()
 endif()
@@ -175,25 +184,31 @@ foreach(scenario IN ITEMS command-staged journal-inserted outcome-written transa
             "-DLCNC_CRASH_SCENARIO=${scenario}"
             -P "${PROJECT_SOURCE_DIR}/cmake/RunKernelCrashContract.cmake")
     set_tests_properties(integration.kernel_crash_${scenario} PROPERTIES
-        TIMEOUT 100 RUN_SERIAL TRUE PASS_REGULAR_EXPRESSION "独立进程崩溃契约通过")
+        TIMEOUT 100 RUN_SERIAL TRUE)
 endforeach()
 
 add_test(
     NAME integration.kernel_headless_cli_roundtrip
-    COMMAND lasercnc_kernel_headless_contract --mode roundtrip
+    COMMAND "${CMAKE_COMMAND}"
+        "-DLCNC_EXECUTABLE=$<TARGET_FILE:lasercnc_kernel_headless_contract>"
+        "-DLCNC_ARGUMENTS=--mode;roundtrip" "-DLCNC_EXPECTED_OUTPUT=verified"
+        -P "${PROJECT_SOURCE_DIR}/cmake/RunVerifiedProgram.cmake"
 )
 set_tests_properties(
     integration.kernel_headless_cli_roundtrip
-    PROPERTIES PASS_REGULAR_EXPRESSION "verified"
+    PROPERTIES TIMEOUT 40
 )
 
 add_test(
     NAME integration.kernel_headless_task_roundtrip
-    COMMAND lasercnc_kernel_headless_contract --mode task-roundtrip
+    COMMAND "${CMAKE_COMMAND}"
+        "-DLCNC_EXECUTABLE=$<TARGET_FILE:lasercnc_kernel_headless_contract>"
+        "-DLCNC_ARGUMENTS=--mode;task-roundtrip" "-DLCNC_EXPECTED_OUTPUT=task-verified"
+        -P "${PROJECT_SOURCE_DIR}/cmake/RunVerifiedProgram.cmake"
 )
 set_tests_properties(
     integration.kernel_headless_task_roundtrip
-    PROPERTIES PASS_REGULAR_EXPRESSION "task-verified"
+    PROPERTIES TIMEOUT 40
 )
 
 add_test(
@@ -207,7 +222,6 @@ add_test(
 set_tests_properties(
     integration.kernel_persistence_process_recovery
     PROPERTIES
-        PASS_REGULAR_EXPRESSION "独立进程持久化恢复契约通过"
         TIMEOUT 70
         RUN_SERIAL TRUE
 )
@@ -223,7 +237,6 @@ add_test(
 set_tests_properties(
     integration.kernel_workflow_process_recovery
     PROPERTIES
-        PASS_REGULAR_EXPRESSION "独立进程工作流恢复契约通过"
         TIMEOUT 70
         RUN_SERIAL TRUE
 )

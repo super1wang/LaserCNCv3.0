@@ -46,19 +46,21 @@ constexpr unsigned int rounds = 20U;
 
 class TimedGate final {
 public:
+    explicit TimedGate(std::chrono::milliseconds timeout = 5s) : timeout_(timeout) {}
+
     void arriveAndWait()
     {
         std::unique_lock lock(mutex_);
         ++arrivals_;
         changed_.notify_all();
-        if(!changed_.wait_for(lock, 5s, [this] { return released_; })) {
+        if(!changed_.wait_for(lock, timeout_, [this] { return released_; })) {
             throw std::runtime_error("Test.GateTimeout: worker release");
         }
     }
     bool awaitArrivals(std::size_t count)
     {
         std::unique_lock lock(mutex_);
-        return changed_.wait_for(lock, 5s, [this, count] { return arrivals_ >= count; });
+        return changed_.wait_for(lock, timeout_, [this, count] { return arrivals_ >= count; });
     }
     void release()
     {
@@ -67,6 +69,7 @@ public:
         changed_.notify_all();
     }
 private:
+    std::chrono::milliseconds timeout_;
     std::mutex mutex_;
     std::condition_variable changed_;
     std::size_t arrivals_{0U};
@@ -80,9 +83,9 @@ struct ReleaseOnExit final {
     ~ReleaseOnExit() { gate.release(); }
 };
 
-template<typename T> T completed(std::future<T>& future)
+template<typename T> T completed(std::future<T>& future, std::chrono::milliseconds timeout = 5s)
 {
-    if(future.wait_for(5s) != std::future_status::ready) {
+    if(future.wait_for(timeout) != std::future_status::ready) {
         throw std::runtime_error("Test.FutureTimeout: execution did not finish");
     }
     return future.get();
@@ -450,6 +453,9 @@ void verifyWorkflow(const WorkflowSnapshot& snapshot, WorkflowState expected, st
 
 void exerciseWorkflowCancellation(CancelOrder order)
 {
+    // Eight cancellation calls serialize durable checkpoints under the instance lock.
+    // 中文翻译：八路取消会在实例锁下串行提交持久 checkpoint，等待预算须覆盖整批 I/O。
+    constexpr auto durableBatchTimeout = 30s;
     for(unsigned int round = 0U; round < rounds; ++round) {
         const auto root = newRoot();
         INFO("round=" << round << " evidence=" << root.string());
@@ -459,9 +465,9 @@ void exerciseWorkflowCancellation(CancelOrder order)
         {
             Fixture fixture{root, true, ExecutionScenario::Workflow};
             auto& kernel = fixture.kernel;
-            auto gate = std::make_shared<TimedGate>();
+            auto gate = std::make_shared<TimedGate>(durableBatchTimeout);
             fixture.command->gate = gate;
-            TimedGate race;
+            TimedGate race{durableBatchTimeout};
             std::future<Result<WorkflowSnapshot>> advance;
             std::vector<std::future<Result<WorkflowSnapshot>>> cancels;
             std::future<void> finish;
@@ -482,8 +488,9 @@ void exerciseWorkflowCancellation(CancelOrder order)
             REQUIRE(kernel.state() == AppKernelState::Ready);
             if(order == CancelOrder::AfterCompletion) {
                 gate->release();
-                REQUIRE(take(completed(advance)).state == WorkflowState::Succeeded);
+                REQUIRE(take(completed(advance, durableBatchTimeout)).state == WorkflowState::Succeeded);
             }
+            const auto cancelStarted = std::chrono::steady_clock::now();
             for(unsigned int index = 0U; index < 8U; ++index) {
                 cancels.push_back(std::async(std::launch::async, [&] {
                     if(order == CancelOrder::Race) { race.arriveAndWait(); }
@@ -496,9 +503,15 @@ void exerciseWorkflowCancellation(CancelOrder order)
                 race.release();
             }
             for(auto& future : cancels) {
-                const auto cancelled = take(completed(future));
+                const auto cancelled = take(completed(future, durableBatchTimeout));
                 REQUIRE((cancelled.state == WorkflowState::CancelRequested
                     || cancelled.state == WorkflowState::Cancelled || cancelled.state == WorkflowState::Succeeded));
+            }
+            const auto cancelElapsed = std::chrono::steady_clock::now() - cancelStarted;
+            INFO("durable cancel batch ms=" << std::chrono::duration_cast<std::chrono::milliseconds>(cancelElapsed).count());
+            if(cancelElapsed >= 5s) {
+                WARN("Durable cancel batch exceeded the former 5-second wait budget: "
+                    << std::chrono::duration_cast<std::chrono::milliseconds>(cancelElapsed).count() << " ms");
             }
             if(order == CancelOrder::BeforeCompletion) {
                 const auto cancelling = take(kernel.execution().workflow(request.workflowId));
@@ -507,8 +520,8 @@ void exerciseWorkflowCancellation(CancelOrder order)
                 REQUIRE(take(kernel.documents().snapshot(document)).objects().size() == 0U);
                 gate->release();
             }
-            if(finish.valid()) { completed(finish); }
-            const auto terminal = advance.valid() ? take(completed(advance))
+            if(finish.valid()) { completed(finish, durableBatchTimeout); }
+            const auto terminal = advance.valid() ? take(completed(advance, durableBatchTimeout))
                 : take(kernel.execution().workflow(request.workflowId));
             finalState = terminal.state;
             commits = terminal.steps.back().state == WorkflowStepState::Succeeded ? 2U : 1U;

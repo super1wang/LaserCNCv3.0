@@ -2,7 +2,7 @@
 
 ## 状态
 
-F5 进行中。已建立 Windows MSVC x64 RelWithDebInfo 隔离配置，三个真实探针及完整插桩构建通过；ASan 全集正在执行，尚未签发 ASan 全集或 F5 验收。未修改生产内核 API/实现，不增加上层模块。
+F5 进行中。已建立 Windows MSVC x64 RelWithDebInfo 隔离配置，三个真实探针、完整插桩构建及修正测试等待预算后的先行 ASan 全集 261/261 通过。随后审计发现并强化了进程退出码门禁，新增后的最终全集与重复矩阵仍须验证，不能宣布 F5 或 Kernel Frozen。未修改生产内核 API/实现，不增加上层模块。
 
 ## 构建与边界
 
@@ -39,6 +39,24 @@ CTest 驱动 `tests/cmake/verify_asan_probe.cmake` 为每次执行保留独立 s
 
 驱动和 ASan test preset 显式设置 `alloc_dealloc_mismatch=1:abort_on_error=1`，清除允许忽略 interception failure 的继承选项；不通过继续运行或抑制错误让测试变绿。当前探针 3/3（0.53 秒），日志为 `build/k10f-f5-probe-tests.log`，详细证据保留在 `build/vs2022-asan/tests/asan-probes/`。
 
+## 首轮全集失败与测试时限修正
+
+首轮 ASan 全集完成 261 项、其中两项 Workflow 压力失败（总耗时 265.19 秒）；没有将该轮计为通过。失败分别为测试辅助 `Test.FutureTimeout`，以及预期 Cancelled 却得到 Failed。后者的只读 SQLite 现场检查显示完整错误链：`Command.HandlerFailed → Command.HandlerException → Test.GateTimeout: worker release`，第一步未提交、第二步仍 Pending。这是测试 handler 的五秒释放门先到期，不能把该 Failed 状态当作一次合法取消结果接受。
+
+现场保留：`build/k10f-f5-asan-tests.log` 及 `build/vs2022-asan/tests/stress-contract-runs/77231894294800-1/state.db`。首轮没有地址错误报告，但两项语义测试失败仍阻止验收。
+
+源码核对：Workflow cancel 在实例锁下保存 durable checkpoint；八路调用会串行持久化并重新取得快照。测试要求八路返回后才释放正在运行的 handler，却给释放门及单 future 都设置五秒上限，混淆了线程会合与整批持久化完成的时间预算。仅将 `exerciseWorkflowCancellation` 的门和 future 预算明确为 30 秒；其他压力用例继续默认五秒。三种取消顺序、八路竞争、每例二十轮、真实 SQLite、状态/Revision/History/重启断言及 CTest 300 秒兜底均不改变，也不修改生产取消实现或数据库同步配置。超过旧五秒预算时记录实际整批取消耗时，供后续诊断。
+
+修正后重新执行完整 ASan 四路并行矩阵，而不是只跑失败用例或降低并发：261/261 通过（311.28 秒），包含三个真实探针、四类配置防护、故障注入、独立进程恢复、F3 压力及 Benchmark 冒烟。日志为 `build/k10f-f5-asan-budget-tests.log`。保留首轮失败记录，不将增加测试等待预算解释为修复了生产内核故障，也不把一次全集通过当作已经完成连续重复门禁。
+
+## 进程成功判定的门禁强化
+
+后续审计发现 Benchmark 与无界面契约等测试使用 `PASS_REGULAR_EXPRESSION`；CMake 官方说明该属性会忽略普通进程退出码，因此“先输出成功标志，随后析构或退出时失败”有被误判的风险，见 [官方属性说明](https://cmake.org/cmake/help/latest/prop_test/PASS_REGULAR_EXPRESSION.html)。已检查本轮完整 ASan `LastTest.log`，没有发现被该规则掩盖的非预期地址错误；但门禁本身仍需修正。
+
+移除所有该正向覆盖属性。直接运行的 Benchmark 与两个 headless roundtrip 改由 `RunVerifiedProgram.cmake` 同时检查零退出码、stdout 成功标志及无 ASan 错误报告；崩溃/恢复驱动保留内部退出码与成功标志双校验，改用严格字符串退出码比较，并显式拒绝 ASan 错误。故障生产者的预期退出码仍为 86，不将正常退出替代实际崩溃点。
+
+新增 `architecture.verified_program_exit_guards`，覆盖健康、输出标志后失败、缺少标志以及“退出 0 但出现合成 ASan 错误文本”四种驱动判定。最后一种只测试日志判定逻辑，真实 ASan 可用性仍由实际内存访问探针证明。新驱动的四个手动回归通过，更新后的 ASan 集成契约与退出防护专项 42/42 通过（40.97 秒），日志为 `build/k10f-f5-exit-guard-tests.log`。新增后普通 CTest 为 259 项、ASan 为 262 项，最终三个配置的全集仍须重跑。
+
 ## 未完成门禁
 
-普通 Debug/Release 构建及 Production-only Release 构建已经通过。完整 ASan 测试、最终代码 Debug/Release 全集、架构与配置负例汇总、连续重复及 F1/F2/F3 专项仍须完成。ASan 只提供地址错误检测，不是数据竞争、断电或零泄漏证明；插桩下的内存不能作为 F4 无插桩性能基线。
+普通 Debug/Release 构建及 Production-only Release 构建已经通过，后者 31 个工程，无测试/contract/Catch2/Benchmark/ASan 工程、无插桩开关、无 CTest 文件；公共边界扫描 69 个头文件、133 个生产源文件通过。等待预算调整后的先行 Debug/Release 各 258/258 通过（297.27 / 283.63 秒），但退出码门禁调整后必须重新跑最终图，不把先行结果代替最终验证。连续重复及 F1/F2/F3 最终专项也未签核。ASan 只提供地址错误检测，不是数据竞争、断电或零泄漏证明；插桩下的内存不能作为 F4 无插桩性能基线。

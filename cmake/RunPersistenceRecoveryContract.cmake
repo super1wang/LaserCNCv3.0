@@ -17,7 +17,8 @@ execute_process(
     TIMEOUT 30
 )
 file(WRITE "${LCNC_STATE_ROOT}/seed-process.log" "exit=${seed_result}\n${seed_output}\n${seed_error}")
-if(NOT seed_result EQUAL 0 OR NOT seed_output MATCHES "persistence-seeded")
+if(NOT seed_result STREQUAL "0" OR NOT seed_output MATCHES "persistence-seeded"
+   OR "${seed_output}\n${seed_error}" MATCHES "(ERROR|SUMMARY): AddressSanitizer")
     message(FATAL_ERROR
         "独立进程持久化播种失败: ${seed_result}\n${seed_output}\n${seed_error}")
 endif()
@@ -33,7 +34,8 @@ execute_process(
     TIMEOUT 30
 )
 file(WRITE "${LCNC_STATE_ROOT}/recover-process.log" "exit=${recovery_result}\n${recovery_output}\n${recovery_error}")
-if(NOT recovery_result EQUAL 0 OR NOT recovery_output MATCHES "persistence-recovered")
+if(NOT recovery_result STREQUAL "0" OR NOT recovery_output MATCHES "persistence-recovered"
+   OR "${recovery_output}\n${recovery_error}" MATCHES "(ERROR|SUMMARY): AddressSanitizer")
     message(FATAL_ERROR
         "独立进程持久化恢复失败: ${recovery_result}\n${recovery_output}\n${recovery_error}")
 endif()

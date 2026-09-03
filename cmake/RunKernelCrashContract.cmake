@@ -41,7 +41,8 @@ execute_process(COMMAND "${LCNC_CONTRACT_EXECUTABLE}" --mode crash-seed --state-
     --scenario "${LCNC_CRASH_SCENARIO}" RESULT_VARIABLE seed_result OUTPUT_VARIABLE seed_output
     ERROR_VARIABLE seed_error TIMEOUT 30)
 file(WRITE "${state_root}/seed-process.log" "exit=${seed_result}\n${seed_output}\n${seed_error}")
-if(NOT seed_result STREQUAL "86" OR NOT seed_output MATCHES "crash-point:${LCNC_CRASH_SCENARIO}:${expected_point}")
+if(NOT seed_result STREQUAL "86" OR NOT seed_output MATCHES "crash-point:${LCNC_CRASH_SCENARIO}:${expected_point}"
+   OR "${seed_output}\n${seed_error}" MATCHES "(ERROR|SUMMARY): AddressSanitizer")
     message(FATAL_ERROR "子进程未到达指定崩溃点: ${seed_result} ${seed_output} ${seed_error}; 证据目录: ${state_root}")
 endif()
 foreach(mode IN ITEMS recover audit)
@@ -49,7 +50,8 @@ foreach(mode IN ITEMS recover audit)
         --scenario "${LCNC_CRASH_SCENARIO}" RESULT_VARIABLE result OUTPUT_VARIABLE output
         ERROR_VARIABLE error TIMEOUT 30)
     file(WRITE "${state_root}/${mode}-process.log" "exit=${result}\n${output}\n${error}")
-    if(NOT result EQUAL 0 OR NOT output MATCHES "crash-${mode}ed:${LCNC_CRASH_SCENARIO}")
+    if(NOT result STREQUAL "0" OR NOT output MATCHES "crash-${mode}ed:${LCNC_CRASH_SCENARIO}"
+       OR "${output}\n${error}" MATCHES "(ERROR|SUMMARY): AddressSanitizer")
         message(FATAL_ERROR "独立进程 ${mode} 失败: ${result} ${output} ${error}; 证据目录: ${state_root}")
     endif()
 endforeach()
