@@ -17,6 +17,10 @@ target_sources(
             "${PROJECT_SOURCE_DIR}/include/lasercnc/kernel/module.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/kernel/module_runtime.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/kernel/service_registry.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/observability/log_service.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/platform/config_serializer.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/platform/persistence_backend.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/platform/task_executor.hpp"
 )
 
 target_link_libraries(lasercnc_kernel PUBLIC LaserCNC::Foundation)

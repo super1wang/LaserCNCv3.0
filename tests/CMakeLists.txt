@@ -24,6 +24,7 @@ add_executable(
     lasercnc_kernel_tests
     unit/kernel/service_registry_tests.cpp
     unit/kernel/module_runtime_tests.cpp
+    unit/kernel/infrastructure_ports_tests.cpp
 )
 
 target_link_libraries(
