@@ -56,6 +56,7 @@ struct CommandRequest final {
     kernel::CorrelationId correlationId;
     kernel::TraceId traceId;
     std::optional<kernel::IdempotencyKey> idempotencyKey;
+    std::optional<kernel::SpanId> parentSpanId;
 
     friend bool operator==(const CommandRequest&, const CommandRequest&) = default;
 };

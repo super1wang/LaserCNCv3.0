@@ -1,6 +1,8 @@
 #include <lasercnc/infrastructure/bs_thread_pool_executor.hpp>
 #include <lasercnc/kernel/app_kernel.hpp>
 #include <lasercnc/observability/log_service.hpp>
+#include <lasercnc/observability/metrics_service.hpp>
+#include <lasercnc/observability/trace_service.hpp>
 #include <lasercnc/runtime/resource_manager.hpp>
 #include <lasercnc/runtime/scheduler.hpp>
 #include <lasercnc/runtime/task_registry.hpp>
@@ -9,6 +11,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <array>
 #include <chrono>
@@ -120,9 +123,38 @@ public:
     Result<void> flush() override { return Result<void>::success(); }
 };
 
+class FailingTraceExporter final : public lasercnc::observability::ITraceExporter {
+public:
+    Result<void> exportSpan(const lasercnc::observability::TraceSpanRecord&) override
+    {
+        throw std::runtime_error("expected trace exporter exception");
+    }
+};
+
+class FailingMetricsExporter final : public lasercnc::observability::IMetricsExporter {
+public:
+    Result<void> exportObservation(
+        const lasercnc::observability::MetricObservation&) override
+    {
+        throw std::runtime_error("expected metrics exporter exception");
+    }
+};
+
+const lasercnc::observability::TraceSpanRecord* findSpan(
+    const std::vector<lasercnc::observability::TraceSpanRecord>& records,
+    const char* name)
+{
+    const auto found = std::find_if(records.begin(), records.end(), [name](const auto& record) {
+        return record.name == name;
+    });
+    return found == records.end() ? nullptr : &*found;
+}
+
 struct RuntimeFixture final {
     ResourceManager resources;
-    Scheduler scheduler{resources};
+    lasercnc::observability::LocalTraceService traces;
+    lasercnc::observability::LocalMetricsService metrics;
+    Scheduler scheduler{resources, traces, metrics};
     TaskRegistry registry;
     ExecutionServices services;
     lasercnc::state::DocumentStore documents;
@@ -220,6 +252,9 @@ TEST_CASE("TaskRuntime cancellation and deadline are cooperative", "[runtime][ta
     CHECK(expired.value().state == TaskState::Cancelled);
     REQUIRE(expired.value().error.has_value());
     CHECK(std::string(expired.value().error->code.value()) == "Task.DeadlineExceeded");
+    const auto spans = fixture.traces.records();
+    REQUIRE(spans.size() == 1U);
+    CHECK(spans[0].status == lasercnc::observability::TraceStatus::Cancelled);
     fixture.stop();
 }
 
@@ -404,6 +439,10 @@ TEST_CASE("TaskRuntime captures immutable document revisions and marks stale res
     CHECK(completed.value().sourceRevisions->at(RevisionScope::Document) == Revision {0U});
     REQUIRE(completed.value().error.has_value());
     CHECK(std::string(completed.value().error->code.value()) == "Task.SourceRevisionChanged");
+    const auto spans = fixture.traces.records();
+    const auto* span = findSpan(spans, "task.execute");
+    REQUIRE(span != nullptr);
+    CHECK(span->status == lasercnc::observability::TraceStatus::Stale);
     fixture.stop();
 }
 
@@ -521,6 +560,9 @@ TEST_CASE("AppKernel owns freezes and stops the task stack", "[kernel][runtime][
     REQUIRE(kernel.bootstrap().hasValue());
     CHECK(kernel.taskRegistry().frozen());
     CHECK(kernel.resources().frozen());
+    CHECK(kernel.traces().frozen());
+    CHECK(kernel.metrics().frozen());
+    CHECK(kernel.diagnostics().frozen());
 
     auto task = request("kernel-owned", "task.kernel-owned");
     REQUIRE(kernel.tasks().submit(task).hasValue());
@@ -579,6 +621,8 @@ TEST_CASE("Asynchronous commands use CommandRuntime to accept one read-only task
     REQUIRE(kernel.executionServices()
                 .configure(std::make_shared<PassValidator>(), std::make_shared<NullLog>())
                 .hasValue());
+    REQUIRE(kernel.traces().addExporter(std::make_shared<FailingTraceExporter>()).hasValue());
+    REQUIRE(kernel.metrics().addExporter(std::make_shared<FailingMetricsExporter>()).hasValue());
     const std::array grants {capability};
     REQUIRE(kernel.capabilities().replace(session, grants).hasValue());
 
@@ -595,6 +639,7 @@ TEST_CASE("Asynchronous commands use CommandRuntime to accept one read-only task
                                 && task.correlationId
                                     == validId<CorrelationId>("correlation.async-command")
                                 && context.traceId == validId<TraceId>("trace.async-command")
+                                && context.spanId.has_value()
                                 && context.document.has_value());
                             return Result<Value>::success(Value {"computed"});
                         }))
@@ -637,7 +682,8 @@ TEST_CASE("Asynchronous commands use CommandRuntime to accept one read-only task
         Revision {0U},
         validId<CorrelationId>("correlation.async-command"),
         validId<TraceId>("trace.async-command"),
-        key};
+        key,
+        validId<SpanId>("span.external-parent")};
     auto accepted = kernel.commands().execute(command);
     REQUIRE(accepted.hasValue());
     CHECK_FALSE(accepted.value().commit.has_value());
@@ -648,11 +694,41 @@ TEST_CASE("Asynchronous commands use CommandRuntime to accept one read-only task
     CHECK(completed.value().state == TaskState::Succeeded);
     CHECK(receivedCommandContext.load());
 
+    const auto records = kernel.traces().records();
+    REQUIRE(records.size() == 2U);
+    const auto* commandSpan = findSpan(records, "command.execute");
+    const auto* taskSpan = findSpan(records, "task.execute");
+    REQUIRE(commandSpan != nullptr);
+    REQUIRE(taskSpan != nullptr);
+    CHECK(commandSpan->traceId == validId<TraceId>("trace.async-command"));
+    REQUIRE(commandSpan->parentSpanId.has_value());
+    CHECK(*commandSpan->parentSpanId == validId<SpanId>("span.external-parent"));
+    REQUIRE(taskSpan->parentSpanId.has_value());
+    CHECK(*taskSpan->parentSpanId == commandSpan->spanId);
+    CHECK(taskSpan->traceId == commandSpan->traceId);
+    CHECK(commandSpan->status == lasercnc::observability::TraceStatus::Succeeded);
+    CHECK(taskSpan->status == lasercnc::observability::TraceStatus::Succeeded);
+    CHECK(kernel.traces().exporterFailures().size() == 2U);
+    CHECK(kernel.metrics().exporterFailures().size() == 4U);
+
+    const auto metricSnapshot = kernel.metrics().snapshot();
+    CHECK(std::count_if(
+              metricSnapshot.begin(), metricSnapshot.end(), [](const auto& metric) {
+                  return metric.name == validId<MetricName>("kernel.command.completed")
+                      || metric.name == validId<MetricName>("kernel.command.duration_ms")
+                      || metric.name == validId<MetricName>("kernel.task.completed")
+                      || metric.name == validId<MetricName>("kernel.task.duration_ms");
+              })
+          == 4);
+
     command.requestId = validId<RequestId>("request.async-retry");
     auto replayed = kernel.commands().execute(command);
     REQUIRE(replayed.hasValue());
     CHECK(replayed.value().replayed);
     CHECK(replayed.value().taskId == accepted.value().taskId);
     CHECK(asyncHandler->calls.load() == 1U);
+    CHECK(kernel.traces().records().size() == 3U);
+    CHECK(kernel.traces().exporterFailures().size() == 3U);
+    CHECK(kernel.metrics().exporterFailures().size() == 6U);
     REQUIRE(kernel.shutdown().hasValue());
 }

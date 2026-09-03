@@ -18,6 +18,7 @@ target_sources(
         task/task_runtime.cpp
         observability/local_trace_service.cpp
         observability/local_metrics_service.cpp
+        observability/log_observability_exporter.cpp
         observability/diagnostics_service.cpp
     PUBLIC
         FILE_SET HEADERS
@@ -42,5 +43,6 @@ target_sources(
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/task_runtime.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/observability/trace_service.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/observability/metrics_service.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/observability/log_observability_exporter.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/observability/diagnostics_service.hpp"
 )

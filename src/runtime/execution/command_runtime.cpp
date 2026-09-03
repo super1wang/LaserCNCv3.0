@@ -3,6 +3,8 @@
 #include <lasercnc/foundation/error.hpp>
 #include <lasercnc/messaging/event_bus.hpp>
 #include <lasercnc/observability/log_service.hpp>
+#include <lasercnc/observability/metrics_service.hpp>
+#include <lasercnc/observability/trace_service.hpp>
 #include <lasercnc/runtime/capability_service.hpp>
 #include <lasercnc/runtime/command_registry.hpp>
 #include <lasercnc/runtime/execution_services.hpp>
@@ -42,6 +44,65 @@ foundation::Error commandError(
         }},
         foundation::Severity::Error,
         std::move(cause));
+}
+
+foundation::Result<kernel::SpanId> commandSpanId(const kernel::RequestId& requestId)
+{
+    static std::atomic_ullong sequence {0U};
+    return kernel::SpanId::create(
+        "span.command." + std::string(requestId.value()) + "."
+        + std::to_string(sequence.fetch_add(1U, std::memory_order_relaxed)));
+}
+
+void startCommandSpan(
+    observability::ITraceService& traces,
+    const CommandRequest& request,
+    std::optional<kernel::SpanId>& activeSpanId,
+    std::unique_ptr<observability::ITraceSpan>& span) noexcept
+{
+    try {
+        auto createdSpanId = commandSpanId(request.requestId);
+        if(!createdSpanId) {
+            return;
+        }
+        const auto spanId = createdSpanId.value();
+        auto started = traces.startSpan(observability::TraceSpanStart {
+            request.traceId,
+            spanId,
+            request.parentSpanId,
+            "command.execute",
+            foundation::Value::Object {
+                {"command", foundation::Value {std::string(request.command.value())}},
+            }});
+        if(started && started.value() != nullptr) {
+            activeSpanId = spanId;
+            span = std::move(started).value();
+        }
+    } catch(...) {
+    }
+}
+
+void recordCommandMetrics(
+    observability::IMetricsService& metrics,
+    bool succeeded,
+    std::chrono::steady_clock::duration elapsed) noexcept
+{
+    try {
+        const observability::MetricLabels labels {
+            {"outcome", succeeded ? "success" : "failure"}};
+        auto completedMetric = kernel::MetricName::create("kernel.command.completed");
+        if(completedMetric) {
+            static_cast<void>(metrics.addCounter(
+                std::move(completedMetric).value(), 1.0, labels));
+        }
+        auto durationMetric = kernel::MetricName::create("kernel.command.duration_ms");
+        if(durationMetric) {
+            const auto duration = std::chrono::duration<double, std::milli>(elapsed).count();
+            static_cast<void>(metrics.observeHistogram(
+                std::move(durationMetric).value(), duration, labels));
+        }
+    } catch(...) {
+    }
 }
 
 struct RequestSignature final {
@@ -120,6 +181,8 @@ public:
         messaging::EventBus& eventBus,
         ExecutionServices& services,
         TaskRuntime& taskRuntime,
+        observability::ITraceService& traceService,
+        observability::IMetricsService& metricsService,
         std::size_t capacity)
         : registry(commandRegistry),
           transactions(transactionManager),
@@ -127,6 +190,8 @@ public:
           events(eventBus),
           executionServices(services),
           tasks(taskRuntime),
+          traces(traceService),
+          metrics(metricsService),
           idempotencyCapacity(capacity)
     {
     }
@@ -145,10 +210,12 @@ public:
         std::condition_variable completed;
     };
 
-    foundation::Result<CommandResponse> executeSafe(const CommandRequest& request)
+    foundation::Result<CommandResponse> executeSafe(
+        const CommandRequest& request,
+        std::optional<kernel::SpanId> activeSpanId)
     {
         try {
-            return executeOnce(request);
+            return executeOnce(request, std::move(activeSpanId));
         } catch(const std::exception& exception) {
             return foundation::Result<CommandResponse>::failure(commandError(
                 "Command.ExecutionFailed",
@@ -180,7 +247,9 @@ public:
         }
     }
 
-    foundation::Result<CommandResponse> executeOnce(const CommandRequest& request)
+    foundation::Result<CommandResponse> executeOnce(
+        const CommandRequest& request,
+        std::optional<kernel::SpanId> activeSpanId)
     {
         auto entry = registry.resolve(request.command);
         if(!entry.hasValue()) {
@@ -253,6 +322,9 @@ public:
             plan.task.projectId = request.projectId;
             plan.task.documentId = request.documentId;
             plan.task.expectedProjectRevision = request.expectedRevision;
+            plan.task.parentSpanId = activeSpanId.has_value()
+                ? activeSpanId
+                : request.parentSpanId;
             const auto taskId = plan.task.taskId;
             CommandResponse response {
                 std::move(plan.acceptance), std::nullopt, taskId, {}, false};
@@ -422,6 +494,8 @@ public:
     messaging::EventBus& events;
     ExecutionServices& executionServices;
     TaskRuntime& tasks;
+    observability::ITraceService& traces;
+    observability::IMetricsService& metrics;
     const std::size_t idempotencyCapacity;
     std::atomic_bool accepting{false};
     std::atomic_size_t activeExecutions{0U};
@@ -437,6 +511,8 @@ CommandRuntime::CommandRuntime(
     messaging::EventBus& events,
     ExecutionServices& executionServices,
     TaskRuntime& tasks,
+    observability::ITraceService& traces,
+    observability::IMetricsService& metrics,
     std::size_t idempotencyCapacity)
     : impl_(std::make_unique<Impl>(
           registry,
@@ -445,6 +521,8 @@ CommandRuntime::CommandRuntime(
           events,
           executionServices,
           tasks,
+          traces,
+          metrics,
           idempotencyCapacity))
 {
 }
@@ -453,99 +531,118 @@ CommandRuntime::~CommandRuntime() = default;
 
 foundation::Result<CommandResponse> CommandRuntime::execute(const CommandRequest& request)
 {
-    if(!impl_->accepting.load(std::memory_order_acquire)) {
-        return foundation::Result<CommandResponse>::failure(commandError(
-            "Command.RuntimeNotReady",
-            foundation::ErrorCategory::Conflict,
-            "The command runtime is not accepting requests",
-            request));
-    }
-    ActiveExecution active(impl_->activeExecutions);
+    const auto startedAt = std::chrono::steady_clock::now();
+    std::optional<kernel::SpanId> activeSpanId;
+    std::unique_ptr<observability::ITraceSpan> span;
+    startCommandSpan(impl_->traces, request, activeSpanId, span);
 
-    if(!request.idempotencyKey.has_value()) {
-        return impl_->executeSafe(request);
-    }
+    auto observedResult = [&]() -> foundation::Result<CommandResponse> {
+        if(!impl_->accepting.load(std::memory_order_acquire)) {
+            return foundation::Result<CommandResponse>::failure(commandError(
+                "Command.RuntimeNotReady",
+                foundation::ErrorCategory::Conflict,
+                "The command runtime is not accepting requests",
+                request));
+        }
+        ActiveExecution active(impl_->activeExecutions);
 
-    std::shared_ptr<Impl::IdempotencyRecord> record;
-    {
-        std::unique_lock lock(impl_->idempotencyMutex);
-        const auto existing = impl_->idempotencyRecords.find(*request.idempotencyKey);
-        if(existing != impl_->idempotencyRecords.end()) {
-            record = existing->second;
-            if(record->signature != signatureOf(request)) {
+        if(!request.idempotencyKey.has_value()) {
+            return impl_->executeSafe(request, activeSpanId);
+        }
+
+        std::shared_ptr<Impl::IdempotencyRecord> record;
+        {
+            std::unique_lock lock(impl_->idempotencyMutex);
+            const auto existing = impl_->idempotencyRecords.find(*request.idempotencyKey);
+            if(existing != impl_->idempotencyRecords.end()) {
+                record = existing->second;
+                if(record->signature != signatureOf(request)) {
+                    return foundation::Result<CommandResponse>::failure(commandError(
+                        "Command.IdempotencyKeyConflict",
+                        foundation::ErrorCategory::Conflict,
+                        "The idempotency key is already bound to a different request",
+                        request));
+                }
+                if(!record->complete && record->owner == std::this_thread::get_id()) {
+                    return foundation::Result<CommandResponse>::failure(commandError(
+                        "Command.IdempotencyReentry",
+                        foundation::ErrorCategory::Conflict,
+                        "The same in-flight idempotency key cannot re-enter its execution thread",
+                        request));
+                }
+                record->completed.wait(lock, [&]() { return record->complete; });
+                if(record->abandoned || !record->result.has_value()) {
+                    return foundation::Result<CommandResponse>::failure(commandError(
+                        "Command.IdempotencyRecordLost",
+                        foundation::ErrorCategory::Internal,
+                        "The in-flight request completed without a reusable idempotency record",
+                        request));
+                }
+                auto result = *record->result;
+                if(result.hasValue()) {
+                    result.value().replayed = true;
+                }
+                return result;
+            }
+
+            if(impl_->idempotencyCapacity == 0U) {
                 return foundation::Result<CommandResponse>::failure(commandError(
-                    "Command.IdempotencyKeyConflict",
+                    "Command.IdempotencyDisabled",
                     foundation::ErrorCategory::Conflict,
-                    "The idempotency key is already bound to a different request",
+                    "The command runtime has no idempotency record capacity",
                     request));
             }
-            if(!record->complete && record->owner == std::this_thread::get_id()) {
+            impl_->evictCompletedForCapacity();
+            if(impl_->idempotencyRecords.size() >= impl_->idempotencyCapacity) {
                 return foundation::Result<CommandResponse>::failure(commandError(
-                    "Command.IdempotencyReentry",
+                    "Command.IdempotencyCapacityExhausted",
                     foundation::ErrorCategory::Conflict,
-                    "The same in-flight idempotency key cannot re-enter its execution thread",
+                    "All bounded idempotency records are currently in flight",
                     request));
             }
-            record->completed.wait(lock, [&]() { return record->complete; });
-            if(record->abandoned || !record->result.has_value()) {
-                return foundation::Result<CommandResponse>::failure(commandError(
-                    "Command.IdempotencyRecordLost",
-                    foundation::ErrorCategory::Internal,
-                    "The in-flight request completed without a reusable idempotency record",
-                    request));
+            record = std::make_shared<Impl::IdempotencyRecord>(
+                signatureOf(request), std::this_thread::get_id());
+            impl_->idempotencyRecords.emplace(*request.idempotencyKey, record);
+        }
+
+        auto result = impl_->executeSafe(request, activeSpanId);
+        std::optional<foundation::Result<CommandResponse>> cached;
+        try {
+            cached.emplace(result);
+        } catch(...) {
+            {
+                std::lock_guard lock(impl_->idempotencyMutex);
+                record->abandoned = true;
+                record->complete = true;
+                impl_->idempotencyRecords.erase(*request.idempotencyKey);
             }
-            auto result = *record->result;
-            if(result.hasValue()) {
-                result.value().replayed = true;
-            }
+            record->completed.notify_all();
             return result;
         }
-
-        if(impl_->idempotencyCapacity == 0U) {
-            return foundation::Result<CommandResponse>::failure(commandError(
-                "Command.IdempotencyDisabled",
-                foundation::ErrorCategory::Conflict,
-                "The command runtime has no idempotency record capacity",
-                request));
-        }
-        impl_->evictCompletedForCapacity();
-        if(impl_->idempotencyRecords.size() >= impl_->idempotencyCapacity) {
-            return foundation::Result<CommandResponse>::failure(commandError(
-                "Command.IdempotencyCapacityExhausted",
-                foundation::ErrorCategory::Conflict,
-                "All bounded idempotency records are currently in flight",
-                request));
-        }
-        record = std::make_shared<Impl::IdempotencyRecord>(
-            signatureOf(request), std::this_thread::get_id());
-        impl_->idempotencyRecords.emplace(*request.idempotencyKey, record);
-    }
-
-    auto result = impl_->executeSafe(request);
-    std::optional<foundation::Result<CommandResponse>> cached;
-    try {
-        cached.emplace(result);
-    } catch(...) {
         {
             std::lock_guard lock(impl_->idempotencyMutex);
-            record->abandoned = true;
+            record->result = std::move(cached);
             record->complete = true;
-            impl_->idempotencyRecords.erase(*request.idempotencyKey);
+            try {
+                impl_->completionOrder.push_back(*request.idempotencyKey);
+            } catch(...) {
+            }
         }
         record->completed.notify_all();
         return result;
+    }();
+
+    const auto succeeded = observedResult.hasValue();
+    if(span != nullptr) {
+        span->end(
+            succeeded ? observability::TraceStatus::Succeeded
+                      : observability::TraceStatus::Failed,
+            succeeded ? std::nullopt
+                      : std::optional<foundation::Error> {observedResult.error()});
     }
-    {
-        std::lock_guard lock(impl_->idempotencyMutex);
-        record->result = std::move(cached);
-        record->complete = true;
-        try {
-            impl_->completionOrder.push_back(*request.idempotencyKey);
-        } catch(...) {
-        }
-    }
-    record->completed.notify_all();
-    return result;
+    recordCommandMetrics(
+        impl_->metrics, succeeded, std::chrono::steady_clock::now() - startedAt);
+    return observedResult;
 }
 
 std::size_t CommandRuntime::activeExecutionCount() const noexcept

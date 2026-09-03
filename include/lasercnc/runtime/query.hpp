@@ -31,6 +31,7 @@ struct QueryRequest final {
     foundation::Value arguments;
     kernel::CorrelationId correlationId;
     kernel::TraceId traceId;
+    std::optional<kernel::SpanId> parentSpanId;
 };
 
 struct QueryContext final {

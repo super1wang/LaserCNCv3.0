@@ -14,6 +14,11 @@ namespace lasercnc::state {
 class DocumentStore;
 }
 
+namespace lasercnc::observability {
+class IMetricsService;
+class ITraceService;
+}
+
 namespace lasercnc::runtime {
 
 class CapabilityService;
@@ -26,7 +31,9 @@ public:
         QueryRegistry& registry,
         state::DocumentStore& documents,
         CapabilityService& capabilities,
-        ExecutionServices& executionServices);
+        ExecutionServices& executionServices,
+        observability::ITraceService& traces,
+        observability::IMetricsService& metrics);
     ~QueryRuntime();
 
     QueryRuntime(const QueryRuntime&) = delete;

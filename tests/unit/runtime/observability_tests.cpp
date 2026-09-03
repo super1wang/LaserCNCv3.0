@@ -1,4 +1,5 @@
 #include <lasercnc/observability/diagnostics_service.hpp>
+#include <lasercnc/observability/log_observability_exporter.hpp>
 #include <lasercnc/observability/metrics_service.hpp>
 #include <lasercnc/observability/trace_service.hpp>
 
@@ -8,9 +9,11 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 using namespace lasercnc::foundation;
 using namespace lasercnc::kernel;
@@ -70,6 +73,28 @@ public:
 
 private:
     Function function_;
+};
+
+class RecordingLogService final : public ILogService {
+public:
+    Result<void> write(const LogRecord& record) override
+    {
+        std::lock_guard lock(mutex_);
+        records_.push_back(record);
+        return Result<void>::success();
+    }
+
+    Result<void> flush() override { return Result<void>::success(); }
+
+    std::vector<LogRecord> records() const
+    {
+        std::lock_guard lock(mutex_);
+        return records_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::vector<LogRecord> records_;
 };
 
 } // namespace
@@ -229,4 +254,42 @@ TEST_CASE("DiagnosticsService runs checks outside locks and converts failures to
     auto missing = diagnostics.run(validId<DiagnosticId>("kernel.missing"));
     REQUIRE_FALSE(missing.hasValue());
     CHECK(std::string(missing.error().code.value()) == "Diagnostics.NotFound");
+}
+
+TEST_CASE("LogObservabilityExporter maps spans and metrics to structured log records", "[observability][log]")
+{
+    CHECK_FALSE(LogObservabilityExporter::create(nullptr).hasValue());
+    auto log = std::make_shared<RecordingLogService>();
+    auto created = LogObservabilityExporter::create(log);
+    REQUIRE(created.hasValue());
+    const auto exporter = std::move(created).value();
+
+    LocalTraceService traces;
+    LocalMetricsService metrics;
+    REQUIRE(traces.addExporter(exporter).hasValue());
+    REQUIRE(metrics.addExporter(exporter).hasValue());
+    auto span = traces.startSpan(TraceSpanStart {
+        validId<TraceId>("trace.log-export"),
+        validId<SpanId>("span.log-export"),
+        validId<SpanId>("span.log-parent"),
+        "command.execute",
+        Value::Object {{"command", Value {"kernel.test"}}}});
+    REQUIRE(span.hasValue());
+    span.value()->end(TraceStatus::Cancelled, makeError(
+        "Test.Cancelled", ErrorCategory::Cancellation, "expected"));
+    REQUIRE(metrics.addCounter(
+        validId<MetricName>("kernel.command.completed"),
+        1.0,
+        MetricLabels {{"outcome", "success"}}).hasValue());
+
+    const auto records = log->records();
+    REQUIRE(records.size() == 2U);
+    CHECK(records[0].category == "trace.span");
+    CHECK(records[0].level == LogLevel::Warning);
+    REQUIRE(records[0].context.traceId.has_value());
+    CHECK(*records[0].context.traceId == "trace.log-export");
+    CHECK(records[0].structuredData.contains("parentSpanId"));
+    CHECK(records[0].structuredData.contains("errorCode"));
+    CHECK(records[1].category == "metric.observation");
+    CHECK(records[1].structuredData.contains("labels"));
 }

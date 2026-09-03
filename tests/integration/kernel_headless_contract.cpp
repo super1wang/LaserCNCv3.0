@@ -2,12 +2,16 @@
 #include <lasercnc/infrastructure/bs_thread_pool_executor.hpp>
 #include <lasercnc/infrastructure/spdlog_log_service.hpp>
 #include <lasercnc/kernel/app_kernel.hpp>
+#include <lasercnc/observability/log_observability_exporter.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -18,6 +22,7 @@ using namespace lasercnc::foundation;
 using namespace lasercnc::infrastructure;
 using namespace lasercnc::kernel;
 using namespace lasercnc::messaging;
+using namespace lasercnc::observability;
 using namespace lasercnc::runtime;
 using namespace lasercnc::state;
 
@@ -175,6 +180,31 @@ int fail(const char* stage, const Error& error)
     return 1;
 }
 
+Result<void> configureObservability(
+    lasercnc::kernel::AppKernel& kernel,
+    const std::shared_ptr<ILogService>& logService)
+{
+    auto created = LogObservabilityExporter::create(logService);
+    if(!created) {
+        return Result<void>::failure(std::move(created).error());
+    }
+    auto exporter = std::move(created).value();
+    auto trace = kernel.traces().addExporter(exporter);
+    if(!trace) {
+        return trace;
+    }
+    return kernel.metrics().addExporter(std::move(exporter));
+}
+
+bool containsObservabilityJsonl(const std::filesystem::path& path)
+{
+    std::ifstream input(path, std::ios::binary);
+    const std::string content {
+        std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    return content.find("trace.span") != std::string::npos
+        && content.find("metric.observation") != std::string::npos;
+}
+
 int runRoundTrip()
 {
     const auto logPath = uniqueLogPath();
@@ -196,6 +226,10 @@ int runRoundTrip()
     auto configured = kernel.executionServices().configure(validator, logService);
     if(!configured.hasValue()) {
         return fail("configure", configured.error());
+    }
+    auto observability = configureObservability(kernel, logService);
+    if(!observability) {
+        return fail("observability", observability.error());
     }
 
     const auto project = requiredId<ProjectId>("project.headless-contract");
@@ -324,7 +358,8 @@ int runRoundTrip()
     if(!flushed.hasValue()) {
         return fail("log flush", flushed.error());
     }
-    if(!std::filesystem::exists(logPath) || std::filesystem::file_size(logPath) == 0U) {
+    if(!std::filesystem::exists(logPath) || std::filesystem::file_size(logPath) == 0U
+       || !containsObservabilityJsonl(logPath)) {
         std::cerr << "logging: JSONL output is missing\n";
         return 1;
     }
@@ -358,6 +393,10 @@ int runTaskRoundTrip()
     auto configured = kernel.executionServices().configure(validator, logService);
     if(!configured) {
         return fail("configure", configured.error());
+    }
+    auto observability = configureObservability(kernel, logService);
+    if(!observability) {
+        return fail("observability", observability.error());
     }
     const auto project = requiredId<ProjectId>("project.headless-task");
     const auto document = requiredId<DocumentId>("document.headless-task");
@@ -451,9 +490,31 @@ int runTaskRoundTrip()
         std::cerr << "task wait: invalid terminal state\n";
         return 1;
     }
+    const auto spans = kernel.traces().records();
+    const auto commandSpan = std::find_if(spans.begin(), spans.end(), [](const auto& span) {
+        return span.name == "command.execute";
+    });
+    const auto taskSpan = std::find_if(spans.begin(), spans.end(), [](const auto& span) {
+        return span.name == "task.execute";
+    });
+    if(commandSpan == spans.end() || taskSpan == spans.end()
+       || !taskSpan->parentSpanId.has_value()
+       || *taskSpan->parentSpanId != commandSpan->spanId
+       || taskSpan->traceId != commandSpan->traceId) {
+        std::cerr << "observability: command/task trace hierarchy is invalid\n";
+        return 1;
+    }
     auto serialized = validator->serialize(*completed.value().result);
     if(!serialized) {
         return fail("task result serialize", serialized.error());
+    }
+    auto flushed = logService->flush();
+    if(!flushed) {
+        return fail("log flush", flushed.error());
+    }
+    if(!containsObservabilityJsonl(logPath)) {
+        std::cerr << "observability: JSONL span or metric output is missing\n";
+        return 1;
     }
     auto stopped = kernel.shutdown();
     if(!stopped) {

@@ -1,10 +1,13 @@
 #include <lasercnc/kernel/app_kernel.hpp>
 #include <lasercnc/observability/log_service.hpp>
+#include <lasercnc/observability/metrics_service.hpp>
+#include <lasercnc/observability/trace_service.hpp>
 #include <lasercnc/runtime/command_runtime.hpp>
 #include <lasercnc/runtime/query_runtime.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <future>
@@ -83,6 +86,24 @@ public:
     std::mutex mutex;
     std::vector<LogRecord> records;
     bool failWrites{false};
+};
+
+class FailingTraceExporter final : public ITraceExporter {
+public:
+    Result<void> exportSpan(const TraceSpanRecord&) override
+    {
+        return Result<void>::failure(makeError(
+            "Test.TraceExportFailed", ErrorCategory::Infrastructure, "expected"));
+    }
+};
+
+class FailingMetricsExporter final : public IMetricsExporter {
+public:
+    Result<void> exportObservation(const MetricObservation&) override
+    {
+        return Result<void>::failure(makeError(
+            "Test.MetricsExportFailed", ErrorCategory::Infrastructure, "expected"));
+    }
 };
 
 class CreateObjectHandler final : public ICommandHandler {
@@ -335,6 +356,12 @@ struct RuntimeFixture final {
 TEST_CASE("AppKernel runs one headless command and query chain", "[runtime][command][query]")
 {
     RuntimeFixture fixture;
+    REQUIRE(fixture.kernel.traces()
+                .addExporter(std::make_shared<FailingTraceExporter>())
+                .hasValue());
+    REQUIRE(fixture.kernel.metrics()
+                .addExporter(std::make_shared<FailingMetricsExporter>())
+                .hasValue());
     fixture.registerStandardHandlers();
     std::vector<EventEnvelope> events;
     auto subscription = fixture.kernel.events().subscribe(
@@ -354,6 +381,9 @@ TEST_CASE("AppKernel runs one headless command and query chain", "[runtime][comm
     CHECK(fixture.kernel.commandRegistry().frozen());
     CHECK(fixture.kernel.queryRegistry().frozen());
     CHECK(fixture.kernel.executionServices().frozen());
+    CHECK(fixture.kernel.traces().frozen());
+    CHECK(fixture.kernel.metrics().frozen());
+    CHECK(fixture.kernel.diagnostics().frozen());
     CHECK_FALSE(fixture.kernel.executionServices().configure(
         fixture.validator, fixture.log).hasValue());
     CHECK(fixture.kernel.commands().accepting());
@@ -361,9 +391,11 @@ TEST_CASE("AppKernel runs one headless command and query chain", "[runtime][comm
     CHECK_FALSE(fixture.kernel.commandRegistry().registerHandler(
         commandDescriptor("kernel.late"), fixture.create).hasValue());
 
-    auto command = fixture.kernel.commands().execute(commandRequest(
+    auto createRequest = commandRequest(
         "request.create", fixture.project, fixture.document, fixture.session,
-        "kernel.object.create", "object.runtime"));
+        "kernel.object.create", "object.runtime");
+    createRequest.parentSpanId = validId<SpanId>("span.workflow.command-parent");
+    auto command = fixture.kernel.commands().execute(createRequest);
     REQUIRE(command.hasValue());
     REQUIRE(command.value().commit.has_value());
     CHECK(command.value().commit->revisionsAfter.at(RevisionScope::Project) == Revision {1U});
@@ -372,8 +404,11 @@ TEST_CASE("AppKernel runs one headless command and query chain", "[runtime][comm
     REQUIRE(events.front().correlationId().has_value());
     CHECK(*events.front().correlationId() == validId<CorrelationId>("correlation.runtime"));
 
-    auto query = fixture.kernel.queries().execute(queryRequest(
-        fixture.project, fixture.document, fixture.session, "object.runtime"));
+    auto getRequest = queryRequest(
+        fixture.project, fixture.document, fixture.session, "object.runtime");
+    getRequest.traceId = validId<TraceId>("trace.runtime");
+    getRequest.parentSpanId = validId<SpanId>("span.workflow.query-parent");
+    auto query = fixture.kernel.queries().execute(getRequest);
     REQUIRE(query.hasValue());
     REQUIRE(query.value().revisions.has_value());
     CHECK(query.value().revisions->at(RevisionScope::Document) == Revision {1U});
@@ -383,6 +418,38 @@ TEST_CASE("AppKernel runs one headless command and query chain", "[runtime][comm
     CHECK(fixture.create->calls == 1U);
     CHECK(fixture.query->calls == 1U);
     CHECK(fixture.log->records.size() == 2U);
+
+    const auto spans = fixture.kernel.traces().records();
+    REQUIRE(spans.size() == 3U);
+    const auto successfulCommand = std::find_if(
+        spans.begin(), spans.end(), [](const auto& span) {
+            return span.name == "command.execute" && span.status == TraceStatus::Succeeded;
+        });
+    const auto successfulQuery = std::find_if(
+        spans.begin(), spans.end(), [](const auto& span) {
+            return span.name == "query.execute" && span.status == TraceStatus::Succeeded;
+        });
+    REQUIRE(successfulCommand != spans.end());
+    REQUIRE(successfulQuery != spans.end());
+    CHECK(successfulCommand->traceId == validId<TraceId>("trace.runtime"));
+    REQUIRE(successfulCommand->parentSpanId.has_value());
+    CHECK(*successfulCommand->parentSpanId
+          == validId<SpanId>("span.workflow.command-parent"));
+    CHECK(successfulQuery->traceId == successfulCommand->traceId);
+    REQUIRE(successfulQuery->parentSpanId.has_value());
+    CHECK(*successfulQuery->parentSpanId
+          == validId<SpanId>("span.workflow.query-parent"));
+    CHECK(fixture.kernel.traces().exporterFailures().size() == 3U);
+    CHECK(fixture.kernel.metrics().exporterFailures().size() == 6U);
+
+    const auto metrics = fixture.kernel.metrics().snapshot();
+    CHECK(std::count_if(metrics.begin(), metrics.end(), [](const auto& metric) {
+              return metric.name == validId<MetricName>("kernel.command.completed")
+                  || metric.name == validId<MetricName>("kernel.command.duration_ms")
+                  || metric.name == validId<MetricName>("kernel.query.completed")
+                  || metric.name == validId<MetricName>("kernel.query.duration_ms");
+          })
+          == 6);
 
     REQUIRE(fixture.kernel.shutdown().hasValue());
     CHECK_FALSE(fixture.kernel.commands().accepting());

@@ -14,6 +14,11 @@ namespace lasercnc::messaging {
 class EventBus;
 }
 
+namespace lasercnc::observability {
+class IMetricsService;
+class ITraceService;
+}
+
 namespace lasercnc::runtime {
 
 class CapabilityService;
@@ -31,6 +36,8 @@ public:
         messaging::EventBus& events,
         ExecutionServices& executionServices,
         TaskRuntime& tasks,
+        observability::ITraceService& traces,
+        observability::IMetricsService& metrics,
         std::size_t idempotencyCapacity = 1024U);
     ~CommandRuntime();
 

@@ -72,6 +72,7 @@ struct TaskRequest final {
     std::vector<kernel::TaskId> dependencies;
     std::vector<ResourceClaim> resources;
     std::optional<std::chrono::steady_clock::time_point> deadline;
+    std::optional<kernel::SpanId> parentSpanId;
 };
 
 class CancellationToken final {
@@ -118,6 +119,7 @@ struct TaskContext final {
     CancellationToken cancellation;
     ProgressReporter progress;
     kernel::TraceId traceId;
+    std::optional<kernel::SpanId> spanId;
     ResourceContext resources;
     std::optional<state::Document> document;
 };

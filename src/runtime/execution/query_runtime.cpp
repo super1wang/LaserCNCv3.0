@@ -2,6 +2,8 @@
 
 #include <lasercnc/foundation/error.hpp>
 #include <lasercnc/observability/log_service.hpp>
+#include <lasercnc/observability/metrics_service.hpp>
+#include <lasercnc/observability/trace_service.hpp>
 #include <lasercnc/runtime/capability_service.hpp>
 #include <lasercnc/runtime/execution_services.hpp>
 #include <lasercnc/runtime/query_registry.hpp>
@@ -34,6 +36,62 @@ foundation::Error queryError(
         }},
         foundation::Severity::Error,
         std::move(cause));
+}
+
+foundation::Result<kernel::SpanId> querySpanId(const kernel::RequestId& requestId)
+{
+    static std::atomic_ullong sequence {0U};
+    return kernel::SpanId::create(
+        "span.query." + std::string(requestId.value()) + "."
+        + std::to_string(sequence.fetch_add(1U, std::memory_order_relaxed)));
+}
+
+void startQuerySpan(
+    observability::ITraceService& traces,
+    const QueryRequest& request,
+    std::unique_ptr<observability::ITraceSpan>& span) noexcept
+{
+    try {
+        auto createdSpanId = querySpanId(request.requestId);
+        if(!createdSpanId) {
+            return;
+        }
+        auto started = traces.startSpan(observability::TraceSpanStart {
+            request.traceId,
+            std::move(createdSpanId).value(),
+            request.parentSpanId,
+            "query.execute",
+            foundation::Value::Object {
+                {"query", foundation::Value {std::string(request.query.value())}},
+            }});
+        if(started && started.value() != nullptr) {
+            span = std::move(started).value();
+        }
+    } catch(...) {
+    }
+}
+
+void recordQueryMetrics(
+    observability::IMetricsService& metrics,
+    bool succeeded,
+    std::chrono::steady_clock::duration elapsed) noexcept
+{
+    try {
+        const observability::MetricLabels labels {
+            {"outcome", succeeded ? "success" : "failure"}};
+        auto completedMetric = kernel::MetricName::create("kernel.query.completed");
+        if(completedMetric) {
+            static_cast<void>(metrics.addCounter(
+                std::move(completedMetric).value(), 1.0, labels));
+        }
+        auto durationMetric = kernel::MetricName::create("kernel.query.duration_ms");
+        if(durationMetric) {
+            const auto duration = std::chrono::duration<double, std::milli>(elapsed).count();
+            static_cast<void>(metrics.observeHistogram(
+                std::move(durationMetric).value(), duration, labels));
+        }
+    } catch(...) {
+    }
 }
 
 observability::LogRecord queryLog(
@@ -86,11 +144,15 @@ public:
         QueryRegistry& queryRegistry,
         state::DocumentStore& documentStore,
         CapabilityService& capabilityService,
-        ExecutionServices& services)
+        ExecutionServices& services,
+        observability::ITraceService& traceService,
+        observability::IMetricsService& metricsService)
         : registry(queryRegistry),
           documents(documentStore),
           capabilities(capabilityService),
-          executionServices(services)
+          executionServices(services),
+          traces(traceService),
+          metrics(metricsService)
     {
     }
 
@@ -220,6 +282,8 @@ public:
     state::DocumentStore& documents;
     CapabilityService& capabilities;
     ExecutionServices& executionServices;
+    observability::ITraceService& traces;
+    observability::IMetricsService& metrics;
     std::atomic_bool accepting{false};
     std::atomic_size_t activeExecutions{0U};
 };
@@ -228,9 +292,11 @@ QueryRuntime::QueryRuntime(
     QueryRegistry& registry,
     state::DocumentStore& documents,
     CapabilityService& capabilities,
-    ExecutionServices& executionServices)
+    ExecutionServices& executionServices,
+    observability::ITraceService& traces,
+    observability::IMetricsService& metrics)
     : impl_(std::make_unique<Impl>(
-          registry, documents, capabilities, executionServices))
+          registry, documents, capabilities, executionServices, traces, metrics))
 {
 }
 
@@ -238,29 +304,47 @@ QueryRuntime::~QueryRuntime() = default;
 
 foundation::Result<QueryResponse> QueryRuntime::execute(const QueryRequest& request)
 {
-    if(!impl_->accepting.load(std::memory_order_acquire)) {
-        return foundation::Result<QueryResponse>::failure(queryError(
-            "Query.RuntimeNotReady",
-            foundation::ErrorCategory::Conflict,
-            "The query runtime is not accepting requests",
-            request));
+    const auto startedAt = std::chrono::steady_clock::now();
+    std::unique_ptr<observability::ITraceSpan> span;
+    startQuerySpan(impl_->traces, request, span);
+
+    auto observedResult = [&]() -> foundation::Result<QueryResponse> {
+        if(!impl_->accepting.load(std::memory_order_acquire)) {
+            return foundation::Result<QueryResponse>::failure(queryError(
+                "Query.RuntimeNotReady",
+                foundation::ErrorCategory::Conflict,
+                "The query runtime is not accepting requests",
+                request));
+        }
+        ActiveExecution active(impl_->activeExecutions);
+        try {
+            return impl_->executeOnce(request);
+        } catch(const std::exception& exception) {
+            return foundation::Result<QueryResponse>::failure(queryError(
+                "Query.ExecutionFailed",
+                foundation::ErrorCategory::Internal,
+                exception.what(),
+                request));
+        } catch(...) {
+            return foundation::Result<QueryResponse>::failure(queryError(
+                "Query.ExecutionFailed",
+                foundation::ErrorCategory::Internal,
+                "Query execution failed unexpectedly",
+                request));
+        }
+    }();
+
+    const auto succeeded = observedResult.hasValue();
+    if(span != nullptr) {
+        span->end(
+            succeeded ? observability::TraceStatus::Succeeded
+                      : observability::TraceStatus::Failed,
+            succeeded ? std::nullopt
+                      : std::optional<foundation::Error> {observedResult.error()});
     }
-    ActiveExecution active(impl_->activeExecutions);
-    try {
-        return impl_->executeOnce(request);
-    } catch(const std::exception& exception) {
-        return foundation::Result<QueryResponse>::failure(queryError(
-            "Query.ExecutionFailed",
-            foundation::ErrorCategory::Internal,
-            exception.what(),
-            request));
-    } catch(...) {
-        return foundation::Result<QueryResponse>::failure(queryError(
-            "Query.ExecutionFailed",
-            foundation::ErrorCategory::Internal,
-            "Query execution failed unexpectedly",
-            request));
-    }
+    recordQueryMetrics(
+        impl_->metrics, succeeded, std::chrono::steady_clock::now() - startedAt);
+    return observedResult;
 }
 
 std::size_t QueryRuntime::activeExecutionCount() const noexcept

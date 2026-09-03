@@ -3,6 +3,7 @@
 #include <lasercnc/foundation/error.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <condition_variable>
 #include <map>
@@ -37,12 +38,69 @@ foundation::Error schedulerError(
     return foundation::makeError(code, category, message);
 }
 
+foundation::Result<kernel::SpanId> taskSpanId(const kernel::TaskId& taskId)
+{
+    static std::atomic_ullong sequence {0U};
+    return kernel::SpanId::create(
+        "span.task." + std::string(taskId.value()) + "."
+        + std::to_string(sequence.fetch_add(1U, std::memory_order_relaxed)));
+}
+
+const char* taskStateLabel(TaskState state) noexcept
+{
+    switch(state) {
+    case TaskState::Pending: return "pending";
+    case TaskState::Ready: return "ready";
+    case TaskState::Running: return "running";
+    case TaskState::Succeeded: return "succeeded";
+    case TaskState::Failed: return "failed";
+    case TaskState::CancelRequested: return "cancel_requested";
+    case TaskState::Cancelled: return "cancelled";
+    case TaskState::Stale: return "stale";
+    }
+    return "unknown";
+}
+
+observability::TraceStatus traceStatus(TaskState state) noexcept
+{
+    switch(state) {
+    case TaskState::Succeeded: return observability::TraceStatus::Succeeded;
+    case TaskState::Cancelled: return observability::TraceStatus::Cancelled;
+    case TaskState::Stale: return observability::TraceStatus::Stale;
+    default: return observability::TraceStatus::Failed;
+    }
+}
+
+void recordTaskMetrics(
+    observability::IMetricsService& metrics,
+    TaskState state,
+    std::chrono::steady_clock::duration elapsed) noexcept
+{
+    try {
+        const observability::MetricLabels labels {{"outcome", taskStateLabel(state)}};
+        auto completedMetric = kernel::MetricName::create("kernel.task.completed");
+        if(completedMetric) {
+            static_cast<void>(metrics.addCounter(
+                std::move(completedMetric).value(), 1.0, labels));
+        }
+        auto durationMetric = kernel::MetricName::create("kernel.task.duration_ms");
+        if(durationMetric) {
+            const auto duration = std::chrono::duration<double, std::milli>(elapsed).count();
+            static_cast<void>(metrics.observeHistogram(
+                std::move(durationMetric).value(), duration, labels));
+        }
+    } catch(...) {
+    }
+}
+
 } // namespace
 
 struct Scheduler::Outcome final {
     std::mutex mutex;
     std::optional<foundation::Value> result;
     std::optional<foundation::Error> error;
+    std::unique_ptr<observability::ITraceSpan> span;
+    std::chrono::steady_clock::time_point startedAt{std::chrono::steady_clock::now()};
 };
 
 struct Scheduler::Core final {
@@ -62,8 +120,11 @@ struct Scheduler::Core final {
         bool resourcesHeld{false};
     };
 
-    explicit Core(ResourceManager& resourceManager)
-        : resources(&resourceManager)
+    Core(
+        ResourceManager& resourceManager,
+        observability::ITraceService& traceService,
+        observability::IMetricsService& metricsService)
+        : resources(&resourceManager), traces(&traceService), metrics(&metricsService)
     {
     }
 
@@ -71,6 +132,8 @@ struct Scheduler::Core final {
     mutable std::condition_variable changed;
     std::map<kernel::TaskId, Record> records;
     ResourceManager* resources;
+    observability::ITraceService* traces;
+    observability::IMetricsService* metrics;
     platform::ITaskExecutor* executor{nullptr};
     std::size_t nextSequence{0U};
     std::size_t runningCount{0U};
@@ -80,8 +143,11 @@ struct Scheduler::Core final {
     bool dispatching{false};
 };
 
-Scheduler::Scheduler(ResourceManager& resources)
-    : core_(std::make_shared<Core>(resources))
+Scheduler::Scheduler(
+    ResourceManager& resources,
+    observability::ITraceService& traces,
+    observability::IMetricsService& metrics)
+    : core_(std::make_shared<Core>(resources, traces, metrics))
 {
 }
 
@@ -481,9 +547,29 @@ void Scheduler::pump(const std::shared_ptr<Core>& core)
             }
         }
 
-        auto outcome = std::make_shared<Outcome>();
         const auto taskId = *selected;
         const auto taskRequest = *request;
+        auto outcome = std::make_shared<Outcome>();
+        std::optional<kernel::SpanId> activeSpanId;
+        try {
+            auto createdSpanId = taskSpanId(taskId);
+            if(createdSpanId) {
+                const auto spanId = createdSpanId.value();
+                auto span = core->traces->startSpan(observability::TraceSpanStart {
+                    taskRequest.traceId,
+                    spanId,
+                    taskRequest.parentSpanId,
+                    "task.execute",
+                    foundation::Value::Object {
+                        {"task", foundation::Value {std::string(taskRequest.task.value())}},
+                    }});
+                if(span && span.value() != nullptr) {
+                    activeSpanId = spanId;
+                    outcome->span = std::move(span).value();
+                }
+            }
+        } catch(...) {
+        }
         const auto weakCore = std::weak_ptr<Core>(core);
         ProgressReporter reporter(ProgressReporter::Callback {
             [weakCore, taskId](double completed, std::string message) {
@@ -527,6 +613,7 @@ void Scheduler::pump(const std::shared_ptr<Core>& core)
             token,
             std::move(reporter),
             taskRequest.traceId,
+            activeSpanId,
             ResourceContext {taskRequest.resources},
             std::move(document)};
 
@@ -569,6 +656,8 @@ void Scheduler::finish(
         }
     }
     const bool staleSource = sourceIsStale && sourceIsStale();
+    TaskState finalState{TaskState::Failed};
+    std::optional<foundation::Error> finalError;
     {
         std::lock_guard lock(core->mutex);
         const auto found = core->records.find(taskId);
@@ -617,7 +706,14 @@ void Scheduler::finish(
             std::lock_guard outcomeLock(outcome->mutex);
             record.result = outcome->result;
         }
+        finalState = record.state;
+        finalError = record.error;
     }
+    if(outcome->span != nullptr) {
+        outcome->span->end(traceStatus(finalState), finalError);
+    }
+    recordTaskMetrics(
+        *core->metrics, finalState, std::chrono::steady_clock::now() - outcome->startedAt);
     core->changed.notify_all();
     pump(core);
 }

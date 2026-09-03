@@ -10,7 +10,7 @@ namespace lasercnc::kernel {
 AppKernel::AppKernel()
     : modules_(services_),
       transactions_(documents_),
-      scheduler_(resources_),
+      scheduler_(resources_, traces_, metrics_),
       tasks_(taskRegistry_, scheduler_, executionServices_, documents_),
       commands_(
           commandRegistry_,
@@ -18,8 +18,11 @@ AppKernel::AppKernel()
           capabilities_,
           events_,
           executionServices_,
-          tasks_),
-      queries_(queryRegistry_, documents_, capabilities_, executionServices_)
+          tasks_,
+          traces_,
+          metrics_),
+      queries_(
+          queryRegistry_, documents_, capabilities_, executionServices_, traces_, metrics_)
 {
 }
 
@@ -129,6 +132,9 @@ foundation::Result<void> AppKernel::bootstrap()
     commandRegistry_.freeze();
     queryRegistry_.freeze();
     taskRegistry_.freeze();
+    traces_.freeze();
+    metrics_.freeze();
+    diagnostics_.freeze();
     commands_.start();
     queries_.start();
     if(taskExecutor_ != nullptr) {
@@ -342,6 +348,36 @@ runtime::TaskRuntime& AppKernel::tasks() noexcept
 const runtime::TaskRuntime& AppKernel::tasks() const noexcept
 {
     return tasks_;
+}
+
+observability::LocalTraceService& AppKernel::traces() noexcept
+{
+    return traces_;
+}
+
+const observability::LocalTraceService& AppKernel::traces() const noexcept
+{
+    return traces_;
+}
+
+observability::LocalMetricsService& AppKernel::metrics() noexcept
+{
+    return metrics_;
+}
+
+const observability::LocalMetricsService& AppKernel::metrics() const noexcept
+{
+    return metrics_;
+}
+
+observability::DiagnosticsService& AppKernel::diagnostics() noexcept
+{
+    return diagnostics_;
+}
+
+const observability::DiagnosticsService& AppKernel::diagnostics() const noexcept
+{
+    return diagnostics_;
 }
 
 AppKernelState AppKernel::state() const noexcept

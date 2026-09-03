@@ -1,6 +1,8 @@
 #pragma once
 
 #include <lasercnc/foundation/result.hpp>
+#include <lasercnc/observability/metrics_service.hpp>
+#include <lasercnc/observability/trace_service.hpp>
 #include <lasercnc/platform/task_executor.hpp>
 #include <lasercnc/runtime/resource_manager.hpp>
 #include <lasercnc/runtime/task.hpp>
@@ -15,7 +17,10 @@ class TaskRuntime;
 
 class Scheduler final {
 public:
-    explicit Scheduler(ResourceManager& resources);
+    Scheduler(
+        ResourceManager& resources,
+        observability::ITraceService& traces,
+        observability::IMetricsService& metrics);
     ~Scheduler();
 
     Scheduler(const Scheduler&) = delete;

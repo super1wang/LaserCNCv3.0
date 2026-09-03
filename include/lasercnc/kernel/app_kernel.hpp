@@ -5,6 +5,9 @@
 #include <lasercnc/kernel/service_registry.hpp>
 #include <lasercnc/runtime/transaction_manager.hpp>
 #include <lasercnc/messaging/event_bus.hpp>
+#include <lasercnc/observability/diagnostics_service.hpp>
+#include <lasercnc/observability/metrics_service.hpp>
+#include <lasercnc/observability/trace_service.hpp>
 #include <lasercnc/runtime/capability_service.hpp>
 #include <lasercnc/runtime/command_registry.hpp>
 #include <lasercnc/runtime/command_runtime.hpp>
@@ -76,6 +79,12 @@ public:
     [[nodiscard]] const runtime::Scheduler& scheduler() const noexcept;
     [[nodiscard]] runtime::TaskRuntime& tasks() noexcept;
     [[nodiscard]] const runtime::TaskRuntime& tasks() const noexcept;
+    [[nodiscard]] observability::LocalTraceService& traces() noexcept;
+    [[nodiscard]] const observability::LocalTraceService& traces() const noexcept;
+    [[nodiscard]] observability::LocalMetricsService& metrics() noexcept;
+    [[nodiscard]] const observability::LocalMetricsService& metrics() const noexcept;
+    [[nodiscard]] observability::DiagnosticsService& diagnostics() noexcept;
+    [[nodiscard]] const observability::DiagnosticsService& diagnostics() const noexcept;
     [[nodiscard]] AppKernelState state() const noexcept;
 
 private:
@@ -86,6 +95,9 @@ private:
     runtime::ExecutionServices executionServices_;
     runtime::CapabilityService capabilities_;
     messaging::EventBus events_;
+    observability::LocalTraceService traces_;
+    observability::LocalMetricsService metrics_;
+    observability::DiagnosticsService diagnostics_;
     runtime::CommandRegistry commandRegistry_;
     runtime::QueryRegistry queryRegistry_;
     runtime::TaskRegistry taskRegistry_;
