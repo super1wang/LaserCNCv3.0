@@ -1,5 +1,6 @@
 #include <lasercnc/infrastructure/jsoncons_adapter.hpp>
 #include <lasercnc/infrastructure/sha256_hash_service.hpp>
+#include <lasercnc/infrastructure/filesystem_snapshot_store.hpp>
 #include <lasercnc/infrastructure/sqlite_persistence_backend.hpp>
 #include <lasercnc/kernel/app_kernel.hpp>
 #include <lasercnc/persistence/persistence_service.hpp>
@@ -11,6 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -47,6 +49,15 @@ std::filesystem::path uniqueDatabasePath()
            + '-' + std::to_string(sequence.fetch_add(1U)) + ".db");
 }
 
+std::filesystem::path uniqueSnapshotDirectory()
+{
+    static std::atomic_ullong sequence {0U};
+    return std::filesystem::temp_directory_path()
+        / ("lasercnc-persistence-snapshots-"
+           + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())
+           + '-' + std::to_string(sequence.fetch_add(1U)));
+}
+
 TransactionCommit commit(
     const char* transaction,
     RevisionSet before,
@@ -79,6 +90,12 @@ void removeDatabase(const std::filesystem::path& path)
     static_cast<void>(std::filesystem::remove(path.string() + "-shm", ignored));
 }
 
+void removeSnapshotDirectory(const std::filesystem::path& path)
+{
+    std::error_code ignored;
+    static_cast<void>(std::filesystem::remove_all(path, ignored));
+}
+
 void configureService(PersistenceService& service, const std::filesystem::path& path)
 {
     auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
@@ -88,6 +105,26 @@ void configureService(PersistenceService& service, const std::filesystem::path& 
                     std::move(backend).value(),
                     std::make_shared<JsonconsAdapter>(),
                     std::make_shared<Sha256HashService>())
+                .hasValue());
+    REQUIRE(service.initialize().hasValue());
+}
+
+void configureService(
+    PersistenceService& service,
+    const std::filesystem::path& path,
+    const std::filesystem::path& snapshotDirectory)
+{
+    auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+    REQUIRE(backend.hasValue());
+    auto snapshots = FilesystemSnapshotStore::create(
+        FilesystemSnapshotStoreOptions {snapshotDirectory, 1024U * 1024U});
+    REQUIRE(snapshots.hasValue());
+    REQUIRE(service
+                .configure(
+                    std::move(backend).value(),
+                    std::make_shared<JsonconsAdapter>(),
+                    std::make_shared<Sha256HashService>(),
+                    std::move(snapshots).value())
                 .hasValue());
     REQUIRE(service.initialize().hasValue());
 }
@@ -280,6 +317,410 @@ TEST_CASE("PersistenceService fails closed on journal corruption", "[persistence
     removeDatabase(path);
 }
 
+TEST_CASE("PersistenceService captures immutable snapshots aligned with the journal", "[persistence][snapshot]")
+{
+    const auto path = uniqueDatabasePath();
+    const auto snapshotDirectory = uniqueSnapshotDirectory();
+    removeDatabase(path);
+    removeSnapshotDirectory(snapshotDirectory);
+    const auto projectId = validId<ProjectId>("project.snapshot");
+    const auto documentId = validId<DocumentId>("document.snapshot");
+    const auto objectId = validId<ObjectId>("object.snapshot");
+    const auto firstSnapshotId = validId<SnapshotId>("snapshot.capture-1");
+    const auto secondSnapshotId = validId<SnapshotId>("snapshot.capture-2");
+
+    {
+        DocumentStore documents;
+        REQUIRE(documents.addDocument(projectId, documentId).hasValue());
+        PersistenceService persistence;
+        configureService(persistence, path, snapshotDirectory);
+        TransactionManager transactions(documents, &persistence);
+
+        auto firstTransaction = transactions.begin(
+            validId<TransactionId>("transaction.snapshot.1"), documentId);
+        REQUIRE(firstTransaction.hasValue());
+        REQUIRE(firstTransaction.value()
+                    ->createObject(ObjectRecord {
+                        objectId,
+                        validId<ObjectTypeId>("kernel.persistence.snapshot"),
+                        Value {"first"}})
+                    .hasValue());
+        REQUIRE(firstTransaction.value()->touchRevision(RevisionScope::Geometry).hasValue());
+        REQUIRE(firstTransaction.value()->commit().hasValue());
+
+        auto document = documents.snapshot(documentId);
+        REQUIRE(document.hasValue());
+        auto first = persistence.captureSnapshot(firstSnapshotId, document.value());
+        REQUIRE(first.hasValue());
+        CHECK(first.value().journalSequence == 1U);
+        CHECK(first.value().revisions == document.value().revisions());
+        CHECK(std::string(first.value().digest.value()).starts_with("sha256:"));
+        CHECK(std::filesystem::is_regular_file(
+            snapshotDirectory / "snapshot.capture-1.snapshot"));
+
+        auto repeated = persistence.captureSnapshot(firstSnapshotId, document.value());
+        REQUIRE(repeated.hasValue());
+        CHECK(repeated.value().payload == first.value().payload);
+        CHECK(repeated.value().digest == first.value().digest);
+        auto latest = persistence.latestSnapshot(documentId);
+        REQUIRE(latest.hasValue());
+        REQUIRE(latest.value().has_value());
+        CHECK(latest.value()->snapshotId == firstSnapshotId);
+
+        auto secondTransaction = transactions.begin(
+            validId<TransactionId>("transaction.snapshot.2"), documentId);
+        REQUIRE(secondTransaction.hasValue());
+        REQUIRE(secondTransaction.value()->replaceObjectData(objectId, Value {"second"}).hasValue());
+        REQUIRE(secondTransaction.value()->commit().hasValue());
+        document = documents.snapshot(documentId);
+        REQUIRE(document.hasValue());
+
+        auto identityConflict = persistence.captureSnapshot(
+            firstSnapshotId, document.value());
+        REQUIRE_FALSE(identityConflict.hasValue());
+        CHECK(std::string(identityConflict.error().code.value())
+              == "Persistence.SnapshotIdentityConflict");
+        auto second = persistence.captureSnapshot(secondSnapshotId, document.value());
+        REQUIRE(second.hasValue());
+        CHECK(second.value().journalSequence == 2U);
+    }
+
+    {
+        PersistenceService reopened;
+        configureService(reopened, path, snapshotDirectory);
+        auto latest = reopened.latestSnapshot(documentId);
+        REQUIRE(latest.hasValue());
+        REQUIRE(latest.value().has_value());
+        CHECK(latest.value()->snapshotId == secondSnapshotId);
+        CHECK(latest.value()->journalSequence == 2U);
+
+        std::ofstream tampered(
+            snapshotDirectory / "snapshot.capture-2.snapshot",
+            std::ios::binary | std::ios::trunc);
+        REQUIRE(tampered.good());
+        tampered << "tampered";
+        tampered.close();
+        auto rejected = reopened.latestSnapshot(documentId);
+        REQUIRE_FALSE(rejected.hasValue());
+        CHECK((std::string(rejected.error().code.value())
+                   == "Persistence.SnapshotSizeMismatch"
+               || std::string(rejected.error().code.value())
+                   == "Persistence.SnapshotDigestMismatch"));
+        auto recovery = reopened.recover();
+        REQUIRE_FALSE(recovery.hasValue());
+        CHECK((std::string(recovery.error().code.value())
+                   == "Persistence.SnapshotSizeMismatch"
+               || std::string(recovery.error().code.value())
+                   == "Persistence.SnapshotDigestMismatch"));
+    }
+    removeDatabase(path);
+    removeSnapshotDirectory(snapshotDirectory);
+}
+
+TEST_CASE("PersistenceService rejects snapshots ahead of the journal", "[persistence][snapshot][recovery]")
+{
+    const auto path = uniqueDatabasePath();
+    const auto snapshotDirectory = uniqueSnapshotDirectory();
+    removeDatabase(path);
+    removeSnapshotDirectory(snapshotDirectory);
+    const auto projectId = validId<ProjectId>("project.snapshot-boundary");
+    const auto emptyDocumentId = validId<DocumentId>("document.snapshot-empty");
+    const auto advancedDocumentId = validId<DocumentId>("document.snapshot-ahead");
+
+    {
+        PersistenceService persistence;
+        configureService(persistence, path, snapshotDirectory);
+        DocumentStore documents;
+        REQUIRE(documents.addDocument(projectId, emptyDocumentId).hasValue());
+        REQUIRE(documents.addDocument(projectId, advancedDocumentId).hasValue());
+
+        auto empty = documents.snapshot(emptyDocumentId);
+        REQUIRE(empty.hasValue());
+        auto captured = persistence.captureSnapshot(
+            validId<SnapshotId>("snapshot.empty"), empty.value());
+        REQUIRE(captured.hasValue());
+        CHECK(captured.value().journalSequence == 0U);
+
+        TransactionManager memoryOnly(documents);
+        auto transaction = memoryOnly.begin(
+            validId<TransactionId>("transaction.snapshot-ahead"), advancedDocumentId);
+        REQUIRE(transaction.hasValue());
+        REQUIRE(transaction.value()
+                    ->createObject(ObjectRecord {
+                        validId<ObjectId>("object.snapshot-ahead"),
+                        validId<ObjectTypeId>("kernel.persistence.snapshot"),
+                        Value {"not-journaled"}})
+                    .hasValue());
+        REQUIRE(transaction.value()->commit().hasValue());
+        auto advanced = documents.snapshot(advancedDocumentId);
+        REQUIRE(advanced.hasValue());
+        auto rejected = persistence.captureSnapshot(
+            validId<SnapshotId>("snapshot.ahead"), advanced.value());
+        REQUIRE_FALSE(rejected.hasValue());
+        CHECK(std::string(rejected.error().code.value())
+              == "Persistence.SnapshotRevisionNotJournaled");
+        CHECK_FALSE(std::filesystem::exists(
+            snapshotDirectory / "snapshot.ahead.snapshot"));
+    }
+    removeDatabase(path);
+    removeSnapshotDirectory(snapshotDirectory);
+}
+
+TEST_CASE("PersistenceService restores a snapshot and replays only its journal tail", "[persistence][recovery]")
+{
+    const auto path = uniqueDatabasePath();
+    const auto snapshotDirectory = uniqueSnapshotDirectory();
+    removeDatabase(path);
+    removeSnapshotDirectory(snapshotDirectory);
+    const auto projectId = validId<ProjectId>("project.recovery");
+    const auto documentId = validId<DocumentId>("document.recovery");
+    const auto objectId = validId<ObjectId>("object.recovery");
+
+    {
+        PersistenceService persistence;
+        configureService(persistence, path, snapshotDirectory);
+        DocumentStore documents;
+        REQUIRE(documents.addDocument(projectId, documentId).hasValue());
+        TransactionManager transactions(documents, &persistence);
+
+        auto first = transactions.begin(
+            validId<TransactionId>("transaction.recovery.1"), documentId);
+        REQUIRE(first.hasValue());
+        REQUIRE(first.value()
+                    ->createObject(ObjectRecord {
+                        objectId,
+                        validId<ObjectTypeId>("kernel.persistence.recovery"),
+                        Value {"snapshot-state"}})
+                    .hasValue());
+        REQUIRE(first.value()->collectEvent(lasercnc::messaging::PendingDomainEvent {
+            validId<EventName>("kernel.recovery.history"),
+            Version {1U, 0U, 0U},
+            objectId,
+            Value {"must-not-republish"}}).hasValue());
+        REQUIRE(first.value()->commit().hasValue());
+        auto snapshotState = documents.snapshot(documentId);
+        REQUIRE(snapshotState.hasValue());
+        REQUIRE(persistence
+                    .captureSnapshot(
+                        validId<SnapshotId>("snapshot.recovery"),
+                        snapshotState.value())
+                    .hasValue());
+
+        auto second = transactions.begin(
+            validId<TransactionId>("transaction.recovery.2"), documentId);
+        REQUIRE(second.hasValue());
+        REQUIRE(second.value()->replaceObjectData(objectId, Value {"journal-tail"}).hasValue());
+        REQUIRE(second.value()->touchRevision(RevisionScope::Cam).hasValue());
+        REQUIRE(second.value()->commit().hasValue());
+    }
+
+    {
+        PersistenceService verifier;
+        configureService(verifier, path, snapshotDirectory);
+        auto recovered = verifier.recover();
+        REQUIRE(recovered.hasValue());
+        REQUIRE(recovered.value().documents.size() == 1U);
+        CHECK(recovered.value().latestJournalSequence == 2U);
+        CHECK(recovered.value().journalRecordsReplayed == 1U);
+        REQUIRE(recovered.value().documents.front().objects.size() == 1U);
+        CHECK(recovered.value().documents.front().objects.front().data
+              == Value {"journal-tail"});
+    }
+
+    {
+        lasercnc::kernel::AppKernel kernel;
+        auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+        REQUIRE(backend.hasValue());
+        auto snapshots = FilesystemSnapshotStore::create(
+            FilesystemSnapshotStoreOptions {snapshotDirectory, 1024U * 1024U});
+        REQUIRE(snapshots.hasValue());
+        REQUIRE(kernel.persistence()
+                    .configure(
+                        std::move(backend).value(),
+                        std::make_shared<JsonconsAdapter>(),
+                        std::make_shared<Sha256HashService>(),
+                        std::move(snapshots).value())
+                    .hasValue());
+        std::size_t delivered = 0U;
+        auto subscription = kernel.events().subscribe(
+            validId<SubscriptionId>("subscription.recovery"),
+            lasercnc::messaging::EventFilter {
+                lasercnc::messaging::EventKind::Domain,
+                validId<EventName>("kernel.recovery.history")},
+            lasercnc::messaging::DeliveryMode::Immediate,
+            [&delivered](const lasercnc::messaging::EventEnvelope&) { ++delivered; });
+        REQUIRE(subscription.hasValue());
+        REQUIRE(kernel.bootstrap().hasValue());
+        CHECK(delivered == 0U);
+        auto restored = kernel.documents().snapshot(documentId);
+        REQUIRE(restored.hasValue());
+        const auto* object = restored.value().objects().find(objectId);
+        REQUIRE(object != nullptr);
+        CHECK(object->data == Value {"journal-tail"});
+        CHECK(restored.value().revisions().at(RevisionScope::Document) == Revision {2U});
+        CHECK(restored.value().revisions().at(RevisionScope::Cam) == Revision {1U});
+        REQUIRE(kernel.shutdown().hasValue());
+    }
+    removeDatabase(path);
+    removeSnapshotDirectory(snapshotDirectory);
+}
+
+TEST_CASE("Recovery keeps staggered document snapshots on one project revision chain", "[persistence][snapshot][recovery]")
+{
+    const auto path = uniqueDatabasePath();
+    const auto snapshotDirectory = uniqueSnapshotDirectory();
+    removeDatabase(path);
+    removeSnapshotDirectory(snapshotDirectory);
+    const auto projectId = validId<ProjectId>("project.recovery-multi");
+    const auto firstDocumentId = validId<DocumentId>("document.recovery-a");
+    const auto secondDocumentId = validId<DocumentId>("document.recovery-b");
+    const auto firstObjectId = validId<ObjectId>("object.recovery-a");
+    const auto secondObjectId = validId<ObjectId>("object.recovery-b");
+
+    {
+        PersistenceService persistence;
+        configureService(persistence, path, snapshotDirectory);
+        DocumentStore documents;
+        REQUIRE(documents.addDocument(projectId, firstDocumentId).hasValue());
+        REQUIRE(documents.addDocument(projectId, secondDocumentId).hasValue());
+        TransactionManager transactions(documents, &persistence);
+        const auto create = [&](const char* transactionId,
+                                const DocumentId& documentId,
+                                const ObjectId& objectId,
+                                const char* value) {
+            auto transaction = transactions.begin(
+                validId<TransactionId>(transactionId), documentId);
+            REQUIRE(transaction.hasValue());
+            REQUIRE(transaction.value()
+                        ->createObject(ObjectRecord {
+                            objectId,
+                            validId<ObjectTypeId>("kernel.persistence.recovery"),
+                            Value {value}})
+                        .hasValue());
+            REQUIRE(transaction.value()->commit().hasValue());
+        };
+        const auto update = [&](const char* transactionId,
+                                const DocumentId& documentId,
+                                const ObjectId& objectId,
+                                const char* value) {
+            auto transaction = transactions.begin(
+                validId<TransactionId>(transactionId), documentId);
+            REQUIRE(transaction.hasValue());
+            REQUIRE(transaction.value()->replaceObjectData(objectId, Value {value}).hasValue());
+            REQUIRE(transaction.value()->commit().hasValue());
+        };
+
+        create("transaction.recovery-multi.1", firstDocumentId, firstObjectId, "a1");
+        create("transaction.recovery-multi.2", secondDocumentId, secondObjectId, "b1");
+        auto firstDocument = documents.snapshot(firstDocumentId);
+        REQUIRE(firstDocument.hasValue());
+        auto firstSnapshot = persistence.captureSnapshot(
+            validId<SnapshotId>("snapshot.recovery-a"), firstDocument.value());
+        REQUIRE(firstSnapshot.hasValue());
+        CHECK(firstSnapshot.value().journalSequence == 2U);
+
+        update("transaction.recovery-multi.3", firstDocumentId, firstObjectId, "a2");
+        auto secondDocument = documents.snapshot(secondDocumentId);
+        REQUIRE(secondDocument.hasValue());
+        auto secondSnapshot = persistence.captureSnapshot(
+            validId<SnapshotId>("snapshot.recovery-b"), secondDocument.value());
+        REQUIRE(secondSnapshot.hasValue());
+        CHECK(secondSnapshot.value().journalSequence == 3U);
+        update("transaction.recovery-multi.4", secondDocumentId, secondObjectId, "b2");
+    }
+
+    {
+        PersistenceService reopened;
+        configureService(reopened, path, snapshotDirectory);
+        auto recovered = reopened.recover();
+        REQUIRE(recovered.hasValue());
+        REQUIRE(recovered.value().documents.size() == 2U);
+        CHECK(recovered.value().latestJournalSequence == 4U);
+        CHECK(recovered.value().journalRecordsReplayed == 2U);
+        for(const auto& document : recovered.value().documents) {
+            CHECK(document.revisions.at(RevisionScope::Project) == Revision {4U});
+            REQUIRE(document.objects.size() == 1U);
+            if(document.documentId == firstDocumentId) {
+                CHECK(document.objects.front().data == Value {"a2"});
+            } else {
+                CHECK(document.documentId == secondDocumentId);
+                CHECK(document.objects.front().data == Value {"b2"});
+            }
+        }
+    }
+    removeDatabase(path);
+    removeSnapshotDirectory(snapshotDirectory);
+}
+
+TEST_CASE("Crash recovery fails closed on journal gaps", "[persistence][recovery]")
+{
+    const auto path = uniqueDatabasePath();
+    const auto snapshotDirectory = uniqueSnapshotDirectory();
+    removeDatabase(path);
+    removeSnapshotDirectory(snapshotDirectory);
+    const RevisionSet zero;
+    const RevisionSet one {
+        Revision {1U}, Revision {1U}, Revision {1U}, Revision {}, Revision {}, Revision {}};
+    const RevisionSet two {
+        Revision {2U}, Revision {2U}, Revision {2U}, Revision {}, Revision {}, Revision {}};
+
+    {
+        PersistenceService persistence;
+        configureService(persistence, path, snapshotDirectory);
+        REQUIRE(persistence.append(
+            commit("transaction.recovery-gap.1", zero, one, "one")).hasValue());
+        REQUIRE(persistence.append(
+            commit("transaction.recovery-gap.2", one, two, "two")).hasValue());
+    }
+    {
+        auto tamper = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+        REQUIRE(tamper.hasValue());
+        const std::array parameters {Value {"transaction.recovery-gap.1"}};
+        REQUIRE(tamper.value()
+                    ->execute(
+                        "DELETE FROM state_journal WHERE transaction_id=?",
+                        parameters)
+                    .hasValue());
+    }
+    {
+        PersistenceService reopened;
+        configureService(reopened, path, snapshotDirectory);
+        auto recovered = reopened.recover();
+        REQUIRE_FALSE(recovered.hasValue());
+        CHECK(std::string(recovered.error().code.value())
+              == "Persistence.JournalSequenceGap");
+    }
+    removeDatabase(path);
+    removeSnapshotDirectory(snapshotDirectory);
+}
+
+TEST_CASE("Crash recovery validates object before state", "[persistence][recovery]")
+{
+    const auto path = uniqueDatabasePath();
+    const auto snapshotDirectory = uniqueSnapshotDirectory();
+    removeDatabase(path);
+    removeSnapshotDirectory(snapshotDirectory);
+    const RevisionSet zero;
+    const RevisionSet one {
+        Revision {1U}, Revision {1U}, Revision {1U}, Revision {}, Revision {}, Revision {}};
+    const RevisionSet two {
+        Revision {2U}, Revision {2U}, Revision {2U}, Revision {}, Revision {}, Revision {}};
+    {
+        PersistenceService persistence;
+        configureService(persistence, path, snapshotDirectory);
+        REQUIRE(persistence.append(
+            commit("transaction.replay-conflict.1", zero, one, "one")).hasValue());
+        REQUIRE(persistence.append(
+            commit("transaction.replay-conflict.2", one, two, "two")).hasValue());
+        auto recovered = persistence.recover();
+        REQUIRE_FALSE(recovered.hasValue());
+        CHECK(std::string(recovered.error().code.value())
+              == "Persistence.ReplayObjectConflict");
+    }
+    removeDatabase(path);
+    removeSnapshotDirectory(snapshotDirectory);
+}
+
 TEST_CASE("PersistenceService rolls back migration exceptions and rejects newer schemas", "[persistence][migration]")
 {
     auto throwing = std::make_unique<ThrowingBackend>();
@@ -308,7 +749,7 @@ TEST_CASE("PersistenceService rolls back migration exceptions and rejects newer 
                         "CREATE TABLE schema_migrations("
                         "version INTEGER PRIMARY KEY NOT NULL,applied_at TEXT NOT NULL)")
                     .hasValue());
-        const std::array parameters {Value {std::int64_t {2}}, Value {"future"}};
+        const std::array parameters {Value {std::int64_t {3}}, Value {"future"}};
         REQUIRE(backend.value()
                     ->execute(
                         "INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)",

@@ -77,16 +77,9 @@ foundation::Result<void> AppKernel::bootstrap()
     }
 
     state_ = AppKernelState::Starting;
-    auto result = modules_.bootstrap(*this);
-    if(!result) {
-        state_ = AppKernelState::Failed;
-        return result;
-    }
-
     if(persistence_.configured()) {
         auto initialized = persistence_.initialize();
         if(!initialized) {
-            auto stopped = modules_.shutdown(*this);
             state_ = AppKernelState::Failed;
             return foundation::Result<void>::failure(foundation::makeError(
                 "Persistence.KernelInitializationFailed",
@@ -97,6 +90,36 @@ foundation::Result<void> AppKernel::bootstrap()
                 std::make_shared<const foundation::Error>(
                     std::move(initialized).error())));
         }
+        auto recovered = persistence_.recover();
+        if(!recovered) {
+            state_ = AppKernelState::Failed;
+            return foundation::Result<void>::failure(foundation::makeError(
+                "Persistence.KernelRecoveryFailed",
+                foundation::ErrorCategory::Infrastructure,
+                "The application kernel could not recover durable state",
+                foundation::Value {},
+                foundation::Severity::Error,
+                std::make_shared<const foundation::Error>(
+                    std::move(recovered).error())));
+        }
+        auto restored = documents_.restoreDocuments(recovered.value().documents);
+        if(!restored) {
+            state_ = AppKernelState::Failed;
+            return foundation::Result<void>::failure(foundation::makeError(
+                "Persistence.KernelRestoreFailed",
+                foundation::ErrorCategory::Infrastructure,
+                "The application kernel could not install recovered state",
+                foundation::Value {},
+                foundation::Severity::Error,
+                std::make_shared<const foundation::Error>(
+                    std::move(restored).error())));
+        }
+    }
+
+    auto result = modules_.bootstrap(*this);
+    if(!result) {
+        state_ = AppKernelState::Failed;
+        return result;
     }
 
     if((commandRegistry_.size() != 0U || queryRegistry_.size() != 0U

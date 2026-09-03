@@ -3,6 +3,7 @@
 #include <lasercnc/foundation/error.hpp>
 
 #include <mutex>
+#include <span>
 #include <string>
 #include <utility>
 
@@ -76,6 +77,71 @@ foundation::Result<Document> DocumentStore::snapshot(
         documentIterator->first,
         std::move(revisions),
         documentIterator->second.objects});
+}
+
+foundation::Result<void> DocumentStore::restoreDocuments(
+    std::span<const DocumentImage> images)
+{
+    std::unique_lock lock(mutex_);
+    auto nextProjectRevisions = projectRevisions_;
+    auto nextDocuments = documents_;
+    for(const auto& image : images) {
+        ObjectRegistry objects;
+        for(const auto& object : image.objects) {
+            const auto [unused, inserted] = objects.objects_.emplace(object.id, object);
+            static_cast<void>(unused);
+            if(!inserted) {
+                return foundation::Result<void>::failure(documentError(
+                    "Document.RecoveryDuplicateObject",
+                    foundation::ErrorCategory::Infrastructure,
+                    "A recovered document contains duplicate object identities",
+                    image.documentId));
+            }
+        }
+
+        const auto existing = nextDocuments.find(image.documentId);
+        if(existing != nextDocuments.end()
+           && existing->second.projectId != image.projectId) {
+            return foundation::Result<void>::failure(documentError(
+                "Document.RecoveryOwnershipConflict",
+                foundation::ErrorCategory::Conflict,
+                "A recovered document conflicts with its configured project ownership",
+                image.documentId));
+        }
+
+        const auto project = nextProjectRevisions.find(image.projectId);
+        if(project != nextProjectRevisions.end()
+           && project->second.value() != 0U
+           && project->second != image.revisions.at(RevisionScope::Project)) {
+            return foundation::Result<void>::failure(documentError(
+                "Document.RecoveryProjectRevisionConflict",
+                foundation::ErrorCategory::Infrastructure,
+                "Recovered documents disagree on their project revision",
+                image.documentId));
+        }
+        nextProjectRevisions[image.projectId] = image.revisions.at(RevisionScope::Project);
+        auto revisions = image.revisions;
+        nextDocuments.insert_or_assign(
+            image.documentId,
+            StoredDocument {image.projectId, std::move(revisions)});
+        nextDocuments.at(image.documentId).objects.swap(objects);
+    }
+
+    for(auto& [unusedDocumentId, document] : nextDocuments) {
+        static_cast<void>(unusedDocumentId);
+        const auto project = nextProjectRevisions.find(document.projectId);
+        if(project == nextProjectRevisions.end()) {
+            return foundation::Result<void>::failure(documentError(
+                "Document.ProjectRevisionMissing",
+                foundation::ErrorCategory::Internal,
+                "A recovered document project revision is missing",
+                unusedDocumentId));
+        }
+        document.revisions.atMutable(RevisionScope::Project) = project->second;
+    }
+    projectRevisions_.swap(nextProjectRevisions);
+    documents_.swap(nextDocuments);
+    return foundation::Result<void>::success();
 }
 
 bool DocumentStore::contains(const kernel::DocumentId& documentId) const

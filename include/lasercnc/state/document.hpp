@@ -4,7 +4,16 @@
 #include <lasercnc/state/object_registry.hpp>
 #include <lasercnc/state/revision.hpp>
 
+#include <vector>
+
 namespace lasercnc::state {
+
+struct DocumentImage final {
+    kernel::ProjectId projectId;
+    kernel::DocumentId documentId;
+    RevisionSet revisions;
+    std::vector<ObjectRecord> objects;
+};
 
 class DocumentStore;
 

@@ -5,11 +5,16 @@
 
 #include <cstddef>
 #include <map>
+#include <span>
 #include <shared_mutex>
 #include <utility>
 
 namespace lasercnc::runtime {
 class TransactionManager;
+}
+
+namespace lasercnc::kernel {
+class AppKernel;
 }
 
 namespace lasercnc::state {
@@ -30,7 +35,11 @@ public:
     [[nodiscard]] std::size_t size() const;
 
 private:
+    friend class kernel::AppKernel;
     friend class runtime::TransactionManager;
+
+    [[nodiscard]] foundation::Result<void> restoreDocuments(
+        std::span<const DocumentImage> images);
 
     struct StoredDocument final {
         StoredDocument(kernel::ProjectId project, RevisionSet revisionSet)

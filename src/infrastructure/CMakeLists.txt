@@ -9,6 +9,7 @@ target_sources(
         hash/windows/sha256_hash_service.cpp
         logging/spdlog/spdlog_log_service.cpp
         persistence/sqlite/sqlite_persistence_backend.cpp
+        persistence/filesystem/windows/filesystem_snapshot_store.cpp
         serialization/jsoncons/jsoncons_adapter.cpp
     PUBLIC
         FILE_SET HEADERS
@@ -19,6 +20,7 @@ target_sources(
             "${PROJECT_SOURCE_DIR}/include/lasercnc/infrastructure/sha256_hash_service.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/infrastructure/spdlog_log_service.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/infrastructure/sqlite_persistence_backend.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/infrastructure/filesystem_snapshot_store.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/infrastructure/toml_config_adapter.hpp"
 )
 

@@ -340,7 +340,8 @@ constexpr std::string_view selectColumns =
 foundation::Result<void> PersistenceService::configure(
     std::unique_ptr<platform::IPersistenceBackend> backend,
     std::shared_ptr<foundation::IValueSerializer> serializer,
-    std::shared_ptr<platform::IHashService> hashes)
+    std::shared_ptr<platform::IHashService> hashes,
+    std::unique_ptr<platform::ISnapshotStore> snapshotStore)
 {
     if(backend == nullptr || serializer == nullptr || hashes == nullptr) {
         return foundation::Result<void>::failure(persistenceError(
@@ -364,6 +365,7 @@ foundation::Result<void> PersistenceService::configure(
     backend_ = std::move(backend);
     serializer_ = std::move(serializer);
     hashes_ = std::move(hashes);
+    snapshotStore_ = std::move(snapshotStore);
     return foundation::Result<void>::success();
 }
 
@@ -407,7 +409,7 @@ foundation::Result<void> PersistenceService::initialize()
         if(!version) {
             return rollback(*backend_, std::move(version).error());
         }
-        if(version.value() > 1) {
+        if(version.value() > 2) {
             return rollback(*backend_, persistenceError(
                 "Persistence.SchemaTooNew",
                 foundation::ErrorCategory::Conflict,
@@ -433,6 +435,24 @@ foundation::Result<void> PersistenceService::initialize()
         if(!index) {
             return rollback(*backend_, std::move(index).error());
         }
+        auto snapshots = backend_->execute(
+            "CREATE TABLE IF NOT EXISTS snapshot_index("
+            "snapshot_id TEXT PRIMARY KEY NOT NULL,project_id TEXT NOT NULL,"
+            "document_id TEXT NOT NULL,journal_sequence INTEGER NOT NULL,"
+            "project_revision TEXT NOT NULL,document_revision TEXT NOT NULL,"
+            "geometry_revision TEXT NOT NULL,cam_revision TEXT NOT NULL,"
+            "machine_context_revision TEXT NOT NULL,environment_revision TEXT NOT NULL,"
+            "storage_key TEXT NOT NULL,digest TEXT NOT NULL,payload_size INTEGER NOT NULL,"
+            "created_at_ms INTEGER NOT NULL)");
+        if(!snapshots) {
+            return rollback(*backend_, std::move(snapshots).error());
+        }
+        auto snapshotIndex = backend_->execute(
+            "CREATE INDEX IF NOT EXISTS idx_snapshot_document_sequence "
+            "ON snapshot_index(document_id,journal_sequence DESC,created_at_ms DESC)");
+        if(!snapshotIndex) {
+            return rollback(*backend_, std::move(snapshotIndex).error());
+        }
         const std::array migrationParameters {foundation::Value {std::int64_t {1}}};
         auto recorded = backend_->execute(
             "INSERT OR IGNORE INTO schema_migrations(version,applied_at) "
@@ -440,6 +460,15 @@ foundation::Result<void> PersistenceService::initialize()
             migrationParameters);
         if(!recorded) {
             return rollback(*backend_, std::move(recorded).error());
+        }
+        const std::array snapshotMigrationParameters {
+            foundation::Value {std::int64_t {2}}};
+        auto snapshotMigration = backend_->execute(
+            "INSERT OR IGNORE INTO schema_migrations(version,applied_at) "
+            "VALUES(?,CURRENT_TIMESTAMP)",
+            snapshotMigrationParameters);
+        if(!snapshotMigration) {
+            return rollback(*backend_, std::move(snapshotMigration).error());
         }
         auto committed = backend_->commitTransaction();
         if(!committed) {

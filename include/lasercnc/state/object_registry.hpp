@@ -32,6 +32,7 @@ public:
     [[nodiscard]] std::vector<ObjectRecord> all() const;
 
 private:
+    friend class DocumentStore;
     friend class runtime::ApplicationTransaction;
     friend class runtime::TransactionManager;
 
