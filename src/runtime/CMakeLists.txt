@@ -29,6 +29,7 @@ target_sources(
         persistence/object_record_codec.cpp
         assets/asset_validation.cpp
         persistence/document_persistence.cpp
+        persistence/project_persistence.cpp
         persistence/idempotency_persistence.cpp
         persistence/effect_persistence.cpp
         persistence/recovery.cpp

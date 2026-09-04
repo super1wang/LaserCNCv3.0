@@ -1,6 +1,6 @@
 # LaserCNC v3.0
 
-LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9 及 K10A–K10E 收口节点，具备版本化执行、文档生命周期、History、模块治理与 ExecutionGateway、对象类型和资产状态准入。K10F 的 F1 故障注入、F2 独立进程恢复、F3 并发与生命周期、F4 性能/内存基线已验收，下一步为 F5 最终门禁；Kernel 1.0 尚未 Frozen。仓库坚持 Command-First、Automation-First、Headless-First 和 Infrastructure-Adapter；CAD、CAM、Machine、Process、Qt GUI、产品 RPC/CLI 与 AI 等上层模块仍未开始。
+LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9 及 K10A–K10E 的既有收口节点，具备版本化执行、文档生命周期、History、模块治理与 ExecutionGateway、对象类型和资产状态准入。K10F 的 F1–F5 工程门禁已形成固定版本检查点，当前继续补齐 ST1 独立项目生命周期，Kernel 1.0 尚未 Frozen。仓库坚持 Command-First、Automation-First、Headless-First 和 Infrastructure-Adapter；CAD、CAM、Machine、Process、Qt GUI、产品 RPC/CLI 与 AI 等上层模块仍未开始。
 
 ## 已完成阶段
 
@@ -15,7 +15,10 @@ LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9 及 K10A–K10E 收�
 - Phase 9：Workflow Runtime 与结构化 Script Runtime
 - Kernel 1.0 Closure：K10A–K10E 已验收；K10F 的 F1–F4 已验收；F5 待闭合，不能宣布 Kernel Frozen
 
-F5A/B/C 工程加固节点已验收：隔离 ASan 与真实探针、进程退出门禁、History/Persistence/Scheduler 的 Host 只读边界、未知契约状态拒绝及四 scope 输出断言均已闭合。最终代码 Debug/Release 各 264/264、ASan 267/267，全集 792 次、故障矩阵 180 次、独立进程恢复 580 次连续执行全部通过；21 份新基线报告已归档。见 [F5C 记录](docs/内核契约/K10F-F5C-执行边界与状态终审.md) 和 [阶段交付](docs/阶段交付/2026-09-04-K10F-F5-工程加固与最终门禁.md)。Project 级生命周期表述与 K10B 的 DocumentRuntime 细则仍存在差异，已提请确认；见 [逐项审计清单](docs/内核契约/Kernel-1.0-冻结审计清单.md)，不得以测试全绿替代未闭合范围，Kernel 尚未 Frozen。
+F5A/B/C 工程加固检查点已验收：隔离 ASan 与真实探针、进程退出门禁、History/Persistence/Scheduler 的 Host 只读边界、未知契约状态拒绝及四 scope 输出断言均已闭合。固定实现 `0cbd348` 的 Debug/Release 各 264/264、ASan 267/267，全集 792 次、故障矩阵 180 次、独立进程恢复 580 次连续执行全部通过；21 份基线报告已归档。见 [F5C 记录](docs/内核契约/K10F-F5C-执行边界与状态终审.md) 和 [阶段交付](docs/阶段交付/2026-09-04-K10F-F5-工程加固与最终门禁.md)。
+
+复核原规划后，ST1 按完整目标补齐独立 Project 生命周期，不再等待“是否实现”的额外决策，也不缩减为 Document ownership。ST1A 版本化持久目录与迁移基础已通过 Debug 275/275、专项 36 次和纯生产门禁，ProjectRuntime、执行准入及最终恢复认证尚未完成；见 [ST1 收口契约](docs/内核契约/ST1-独立项目生命周期收口.md) 与 [逐项审计清单](docs/内核契约/Kernel-1.0-冻结审计清单.md)。F5C 的旧固定版本成绩不替代 ST1 新代码的最终门禁。
+
 - 标准：C++20
 - 测试：Catch2 + CTest
 

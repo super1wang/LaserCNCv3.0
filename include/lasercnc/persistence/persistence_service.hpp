@@ -19,6 +19,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -64,6 +65,21 @@ struct DocumentCatalogRecord final {
     kernel::ProjectId projectId;
     kernel::DocumentId documentId;
     DocumentPersistenceState state{DocumentPersistenceState::Detached};
+    bool interruptedTransition{false};
+    std::chrono::system_clock::time_point updatedAt;
+};
+
+enum class ProjectPersistenceState : std::uint8_t {
+    Closed,
+    Opening,
+    Open,
+    Closing,
+    Failed
+};
+
+struct ProjectCatalogRecord final {
+    kernel::ProjectId projectId;
+    ProjectPersistenceState state{ProjectPersistenceState::Closed};
     bool interruptedTransition{false};
     std::chrono::system_clock::time_point updatedAt;
 };
@@ -148,6 +164,12 @@ public:
         const kernel::DocumentId& documentId);
     [[nodiscard]] foundation::Result<std::vector<DocumentCatalogRecord>>
         documentCatalog() const;
+    [[nodiscard]] foundation::Result<bool> projectCatalogMigrationPending() const;
+    [[nodiscard]] foundation::Result<void> completeProjectCatalogMigration(
+        std::span<const kernel::ProjectId> verifiedLegacyProjects);
+    [[nodiscard]] foundation::Result<void> saveProjectLifecycle(
+        const kernel::ProjectId& projectId, ProjectPersistenceState state);
+    [[nodiscard]] foundation::Result<std::vector<ProjectCatalogRecord>> projectCatalog() const;
     [[nodiscard]] foundation::Result<IdempotencyClaim> claimCommand(
         const kernel::IdempotencyKey& key,
         const foundation::Value& signature);

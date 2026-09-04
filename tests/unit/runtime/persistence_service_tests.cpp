@@ -2134,7 +2134,7 @@ TEST_CASE("PersistenceService rolls back migration exceptions and rejects newer 
                         "CREATE TABLE schema_migrations("
                         "version INTEGER PRIMARY KEY NOT NULL,applied_at TEXT NOT NULL)")
                     .hasValue());
-        const std::array parameters {Value {std::int64_t {9}}, Value {"future"}};
+        const std::array parameters {Value {std::int64_t {10}}, Value {"future"}};
         REQUIRE(backend.value()
                     ->execute(
                         "INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)",

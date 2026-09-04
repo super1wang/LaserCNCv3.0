@@ -510,7 +510,7 @@ foundation::Result<void> PersistenceService::initialize()
         if(!version) {
             return rollback(*backend_, std::move(version).error());
         }
-        if(version.value() > 8) {
+        if(version.value() > 9) {
             return rollback(*backend_, persistenceError(
                 "Persistence.SchemaTooNew",
                 foundation::ErrorCategory::Conflict,
@@ -650,6 +650,40 @@ foundation::Result<void> PersistenceService::initialize()
         if(!documentCatalog) {
             return rollback(*backend_, std::move(documentCatalog).error());
         }
+        if(version.value() < 9) {
+            auto projects = backend_->execute(
+                "CREATE TABLE project_catalog("
+                "project_id TEXT PRIMARY KEY NOT NULL,state TEXT NOT NULL,"
+                "payload TEXT NOT NULL,digest TEXT NOT NULL,updated_at_ms INTEGER NOT NULL)");
+            if(!projects) { return rollback(*backend_, std::move(projects).error()); }
+            auto marker = backend_->execute(
+                "CREATE TABLE project_catalog_migration("
+                "singleton INTEGER PRIMARY KEY CHECK(singleton=1),"
+                "completed INTEGER NOT NULL CHECK(completed IN (0,1)))");
+            if(!marker) { return rollback(*backend_, std::move(marker).error()); }
+            auto pending = backend_->execute(
+                "INSERT INTO project_catalog_migration(singleton,completed) VALUES(1,0)");
+            if(!pending) { return rollback(*backend_, std::move(pending).error()); }
+        } else {
+            auto marker = backend_->query("SELECT singleton,completed FROM project_catalog_migration");
+            if(!marker) { return rollback(*backend_, std::move(marker).error()); }
+            if(marker.value().size() != 1U) {
+                return rollback(*backend_, persistenceError(
+                    "Persistence.InvalidProjectCatalogMigration", foundation::ErrorCategory::Infrastructure,
+                    "The project catalog migration marker is missing or ambiguous"));
+            }
+            auto singleton = integerColumn(marker.value().front(), "singleton");
+            auto completed = integerColumn(marker.value().front(), "completed");
+            if(!singleton || !completed || singleton.value() != 1
+               || (completed.value() != 0 && completed.value() != 1)) {
+                return rollback(*backend_, persistenceError(
+                    "Persistence.InvalidProjectCatalogMigration", foundation::ErrorCategory::Infrastructure,
+                    "The project catalog migration marker is invalid"));
+            }
+            auto columns = backend_->query(
+                "SELECT project_id,state,payload,digest,updated_at_ms FROM project_catalog LIMIT 0");
+            if(!columns) { return rollback(*backend_, std::move(columns).error()); }
+        }
         const std::array migrationParameters {foundation::Value {std::int64_t {1}}};
         auto recorded = backend_->execute(
             "INSERT OR IGNORE INTO schema_migrations(version,applied_at) "
@@ -722,6 +756,11 @@ foundation::Result<void> PersistenceService::initialize()
             return rollback(
                 *backend_, std::move(documentLifecycleMigration).error());
         }
+        const std::array projectMigrationParameters {foundation::Value {std::int64_t {9}}};
+        auto projectMigration = backend_->execute(
+            "INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(?,CURRENT_TIMESTAMP)",
+            projectMigrationParameters);
+        if(!projectMigration) { return rollback(*backend_, std::move(projectMigration).error()); }
         auto committed = backend_->commitTransaction();
         if(!committed) {
             return rollback(*backend_, std::move(committed).error());

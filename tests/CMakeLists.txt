@@ -119,6 +119,7 @@ add_executable(
     unit/infrastructure/toml_config_adapter_tests.cpp
     unit/runtime/task_runtime_tests.cpp
     unit/runtime/persistence_service_tests.cpp
+    unit/runtime/project_persistence_tests.cpp
     unit/runtime/history_runtime_tests.cpp
     unit/runtime/asset_state_tests.cpp
     unit/runtime/kernel_concurrency_tests.cpp

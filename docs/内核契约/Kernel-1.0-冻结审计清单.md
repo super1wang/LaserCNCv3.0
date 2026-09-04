@@ -1,10 +1,16 @@
 # Kernel 1.0 冻结逐项审计清单
 
-## 当前结论
+## 当前工作状态：ST1 补齐中
+
+复核原规划总览、K10B 标题和 State 清单后，独立 Project 生命周期被确认为原目标内的必需能力，不再作为额外范围决策阻塞。ST1A 的项目持久目录和一次性迁移已通过组件检查点，尚未提供完整 ProjectRuntime 与项目级执行准入；详见 [ST1 收口契约](ST1-独立项目生命周期收口.md)。
+
+ST1 将影响状态、执行、持久化和恢复；以下 31 项通过记录属于 F5C 固定版本，不自动延伸到新增代码。所有受影响项须在 ST1D 完成三配置、故障/恢复/压力与新基线后重新签核，当前仍不得宣布 Frozen。
+
+## F5C 固定版本结论（历史检查点）
 
 尚未冻结。本表逐项承接《Kernel 1.0 最终收口设计规划》第 5 节。F5C 最终实现 `0cbd348` 已完成 Debug/Release 各 264/264、ASan 267/267、纯生产与架构门禁，全集各 3 次共 792 次、故障矩阵各 20 次共 180 次、独立进程恢复各 20 次共 580 次；21 份新基线报告已归档。逐项证据已回链至本轮受测代码和实际断言，除 ST1 的独立 Project 生命周期外，其余 31 项在本文列明的软件契约和验证范围内通过。ST1 未闭合，因此不得签发整体 Frozen。
 
-## 需要先明确的验收范围
+## F5C 时发现的范围差异（已按原目标决定补齐）
 
 最终清单的 State 第一项写明“Project/Document 可以运行期创建、打开、关闭”；K10B 细则则只指定 DocumentRuntime 的 create/attach/open/snapshot/close/detach/remove/list，以及 Project ownership 冲突。当前代码只有后者：Document 归属 ProjectId，Project Revision 按项目共享，没有独立 ProjectRuntime、ProjectLifecycle 或项目级 create/open/close。
 
