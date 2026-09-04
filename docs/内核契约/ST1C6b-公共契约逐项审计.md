@@ -4,7 +4,7 @@
 
 起点 `7377f14`，承接 [C6 总计划](ST1C6-公共契约与输入预算.md) 和 [71 个公共头差异基线](Kernel-1.0-公共头清单.md)。本表区分“声明已登记”“行为已有证据”“缺口待实现”；不以文件数量或源码阅读替代逐入口负例、预算和最终签核。
 
-本轮先登记 Infrastructure 的 8 个公开类、5 个 Options 的全部 13 个字段，以及对应 6 个 platform 端口。路径编码的真实缺陷作为 C6b1 修复；日志别名按 [C6b2 契约](ST1C6b2-日志文件身份与轮转准入.md) 补回归并实现。继续登记 Foundation 的 7 个头、Observability 的 5 个头和 Messaging 的 2 个头所含声明与待验证点；这些登记不等于行为签核。C6b17 已补 Journal/Task/Workflow 持久写入的枚举与关键形状，C6b18 已补 Task terminal cause v2 与 v1 兼容；[C6b19](ST1C6b19-Host与State状态边界.md) 已按可达能力区分 Host/Runtime 只读状态、State 闭集输入及 Project/Document 生命周期持久状态；[C6b20](ST1C6b20-持久执行与诊断格式边界.md) 已补 Idempotency、ExternalEffect、Diagnostic 与恢复/会话 DTO。71 个公共头最终对账仍未完成，不宣称 C6b 已收口。
+本轮先登记 Infrastructure 的 8 个公开类、5 个 Options 的全部 13 个字段，以及对应 6 个 platform 端口。路径编码的真实缺陷作为 C6b1 修复；日志别名按 [C6b2 契约](ST1C6b2-日志文件身份与轮转准入.md) 补回归并实现。继续登记 Foundation 的 7 个头、Observability 的 5 个头和 Messaging 的 2 个头所含声明与待验证点；这些登记不等于行为签核。C6b17 已补 Journal/Task/Workflow 持久写入的枚举与关键形状，C6b18 已补 Task terminal cause v2 与 v1 兼容；[C6b19](ST1C6b19-Host与State状态边界.md) 已按可达能力区分 Host/Runtime 只读状态、State 闭集输入及 Project/Document 生命周期持久状态；[C6b20](ST1C6b20-持久执行与诊断格式边界.md) 已补 Idempotency、ExternalEffect、Diagnostic 与恢复/会话 DTO。[C6b21 最终对账](ST1C6b21-71公共头与兼容清单最终对账.md) 已确认 71/71 摘要一致、每个公共头均有审计归属、51/51 新增/变更错误码可追溯并完成格式/权限矩阵；C6b 现已收口，但不代签 C6c/d 或 Kernel Frozen。
 
 ## Infrastructure 的配置字段
 
@@ -175,7 +175,7 @@ C6b5 登记的观察负例中，前三类由 C6b6 取得真实红灯并修复；
 
 以上与观察身份淘汰复用、活动总量、时间顺序和资源预算账本并存；不能以修好某一个枚举后删掉其他必须项。
 
-1. C6b2–b20 检查点保留；最新 [C6b20 契约](ST1C6b20-持久执行与诊断格式边界.md) 已补剩余 Persistence 族。不以独立 PersistenceService 的组件写能力误记为 AppKernel Host 业务旁路，也不以摘要正确代替格式/身份认证。
-2. C6b 最终对账 71 个公共头以及 Foundation、Observability、Messaging、Host/执行/State/Persistence 已登记项，确认新增错误码、权限阶段、线程/寿命、Error cause 和全部持久版本均可追溯；有实现缺口先补回归和修复，纯说明项不得冒充行为签核。
-3. C6c 执行统一输入/输出尺寸、深度、数量和累计预算；局部 StrongId、Snapshot/Asset、Script 或 Error cause 限制不能代签跨入口预算。
-4. C6d 执行同步与 Task、取消/deadline 和有界终态保留；C7 测容量，C8 完整日志/脚本/私有头门禁，ST1D 最终三配置签核。上述均未被局部枚举、格式或状态证据替代。
+1. C6b1–b20 行为检查点与 [C6b21 最终对账](ST1C6b21-71公共头与兼容清单最终对账.md) 共同保留；不以独立 PersistenceService 的组件写能力误记为 AppKernel Host 业务旁路，也不以摘要正确代替格式/身份认证。
+2. C6b 已确认 71 个公共头、Foundation/Observability/Messaging/Host/执行/State/Persistence 登记项、51 个新增/变更错误码、权限阶段、线程/寿命、Error cause 和全部持久版本可追溯。该结果是 C6b 子节点签核，不是跨工具链 ABI、统一预算或 Kernel Frozen。
+3. 下一活动节点 C6c 执行统一输入/输出尺寸、深度、数量和累计预算；局部 StrongId、Snapshot/Asset、Script 或 Error cause 限制不能代签跨入口预算。
+4. C6d 执行同步与 Task、取消/deadline 和有界终态保留；C7 测容量，C8 完整日志/脚本/私有头门禁，ST1D 最终三配置签核。上述均未被 C6b 的枚举、格式或状态证据替代。

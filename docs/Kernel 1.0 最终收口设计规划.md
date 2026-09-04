@@ -14,7 +14,7 @@
 
 后续 CAD、CAM、OCCT、Machine、Collision、Process、Qt、CLI、RPC、AI 等均作为 Kernel 之上的模块开发，原则上不得再因为单个业务需求修改 Kernel 核心语义。
 
-> 2026-09-05 执行更新：本文件保留总体蓝图，当前可执行节点以 [ST1C 补充执行计划](内核契约/ST1C-补充审计与剩余执行计划.md) 为准。C6b20 已修复 Idempotency 首次占位未核验精确影响行数的缺陷，并冻结 ExternalEffect、Diagnostic、Recovery/Session DTO 与 command outcome v1–v3 兼容边界。下一步依次为 71 个公共头及 C6b1–b20 最终对账、C6c 统一预算、C6d 同步/Task/终态保留，再进入 C7/C8 与 ST1D；在这些节点完成前不得把局部持久格式证据写成 Kernel Frozen。
+> 2026-09-05 执行更新：本文件保留总体蓝图，当前可执行节点以 [ST1C 补充执行计划](内核契约/ST1C-补充审计与剩余执行计划.md) 为准。[C6b21 最终对账](内核契约/ST1C6b21-71公共头与兼容清单最终对账.md) 已确认 71 个公共头与 C6a 基线逐文件摘要一致，并完成 C6b1–b20 的声明、权限、错误码和持久格式兼容矩阵对账。下一步依次为 C6c 统一预算、C6d 同步/Task/终态保留，再进入 C7/C8 与 ST1D；在这些节点完成前不得把 C6b 通过写成 C6、ST1 或 Kernel Frozen。
 
 ---
 
