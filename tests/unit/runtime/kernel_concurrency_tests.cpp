@@ -237,11 +237,10 @@ struct Fixture final {
             std::make_shared<JsonconsAdapter>(), std::make_shared<Sha256HashService>(), std::move(snapshotStore)));
         take(kernel.bootstrap());
         if(seed) {
-            // Seed durable state through a fixture-owned connection, not a Host write bypass.
-            // 中文翻译：通过夹具自有连接建立持久基线，不借用 Host 写旁路。
-            auto persistence = test::openPersistenceFixture(root / "state.db", root / "snapshots");
-            take(persistence->captureSnapshot(id<SnapshotId>("snapshot.stress.baseline"),
-                take(kernel.documents().snapshot(document))));
+            // Seed through the owning Kernel's normal close/open path.
+            // 中文翻译：由持有所有权的 Kernel 经正常关闭/打开建立持久基线。
+            take(kernel.documentRuntime().close(document));
+            take(kernel.documentRuntime().open(document));
         }
     }
     AppKernel kernel;
@@ -558,6 +557,37 @@ void exerciseWorkflowCancellation(CancelOrder order)
     }
 }
 } // namespace
+
+TEST_CASE("Persistence Host rejects a second Kernel without abandoning a running command", "[persistence][host-session][concurrency]")
+{
+    const auto root = newRoot();
+    INFO("Retained Host evidence: " << root.string());
+    Fixture first{root};
+    auto gate = std::make_shared<TimedGate>();
+    first.command->gate = gate;
+    auto request = createRequest();
+    request.idempotencyKey = id<IdempotencyKey>("key.host.running");
+    auto running = std::async(std::launch::async, [&] { return first.kernel.execution().executeCommand(request); });
+    ReleaseOnExit release{*gate};
+    REQUIRE(gate->awaitArrivals(1U));
+    auto observer = take(SqlitePersistenceBackend::open({root / "state.db"}));
+    const auto before = take(observer->query("SELECT * FROM command_idempotency"));
+    REQUIRE(before.size() == 1U);
+    REQUIRE(before.front().at("status") == Value{"pending"});
+    AppKernel second;
+    take(second.configurePersistence(take(SqlitePersistenceBackend::open({root / "state.db"})),
+        std::make_shared<JsonconsAdapter>(), std::make_shared<Sha256HashService>(),
+        take(FilesystemSnapshotStore::create({root / "snapshots", 1024U * 1024U}))));
+    const auto booted = second.bootstrap();
+    CHECK_FALSE(booted);
+    CHECK(take(observer->query("SELECT * FROM command_idempotency")) == before);
+    CHECK(first.kernel.state() == AppKernelState::Ready);
+    gate->release();
+    REQUIRE(completed(running));
+    verifyState(first.kernel, 1U);
+    CHECK(take(observer->query("SELECT status FROM command_idempotency")).front().at("status") == Value{"completed"});
+    REQUIRE(first.kernel.shutdown());
+}
 
 TEST_CASE("Kernel task stress repeated cancellation preserves running ownership", "[runtime][stress][f3b]")
 { exerciseTaskCancellation(CancelOrder::BeforeCompletion); }

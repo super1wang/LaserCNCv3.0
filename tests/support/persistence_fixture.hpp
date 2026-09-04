@@ -14,8 +14,8 @@
 
 namespace lasercnc::test {
 
-// This fixture owns a separate database connection, never a mutable AppKernel service.
-// 中文翻译：夹具拥有独立数据库连接，不取得 AppKernel 的可变服务。
+// This fixture is a Host; the previous Host must be destroyed before opening it.
+// 中文翻译：本夹具本身也是 Host，打开前必须销毁同一数据库的前任 Host。
 inline std::unique_ptr<persistence::PersistenceService> openPersistenceFixture(
     const std::filesystem::path& database,
     const std::filesystem::path& snapshots = {},
@@ -37,6 +37,41 @@ inline std::unique_ptr<persistence::PersistenceService> openPersistenceFixture(
     auto initialized = service->initialize();
     if(!initialized) { throw std::runtime_error(initialized.error().message); }
     return service;
+}
+
+// Deliberately corrupt a live database using raw SQL, outside the trusted Host contract.
+// 中文翻译：仅负向测试使用原始 SQL 注入损坏材料；这是可信 Host 契约外的破坏，不是第二 Host 准入。
+inline void injectJournalFixture(const std::filesystem::path& database,
+    const runtime::TransactionCommit& commit)
+{
+    auto encoded = openPersistenceFixture(":memory:");
+    auto appended = encoded->append(commit);
+    if(!appended) { throw std::runtime_error(appended.error().message); }
+    const auto& record = appended.value();
+    std::vector<foundation::Value> parameters{
+        foundation::Value{std::string(record.transactionId.value())},
+        foundation::Value{std::string(record.projectId.value())},
+        foundation::Value{std::string(record.documentId.value())}};
+    for(const auto& revisions : {record.revisionsBefore, record.revisionsAfter}) {
+        for(const auto scope : {state::RevisionScope::Project, state::RevisionScope::Document,
+                state::RevisionScope::Geometry, state::RevisionScope::Cam,
+                state::RevisionScope::MachineContext, state::RevisionScope::Environment}) {
+            parameters.emplace_back(std::to_string(revisions.at(scope).value()));
+        }
+    }
+    parameters.emplace_back(record.payload);
+    parameters.emplace_back(std::string(record.digest.value()));
+    parameters.emplace_back(static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        record.committedAt.time_since_epoch()).count()));
+    auto backend = infrastructure::SqlitePersistenceBackend::open({database});
+    if(!backend) { throw std::runtime_error(backend.error().message); }
+    auto inserted = backend.value()->execute("INSERT INTO state_journal("
+        "transaction_id,project_id,document_id,project_revision_before,document_revision_before,"
+        "geometry_revision_before,cam_revision_before,machine_context_revision_before,environment_revision_before,"
+        "project_revision_after,document_revision_after,geometry_revision_after,cam_revision_after,"
+        "machine_context_revision_after,environment_revision_after,payload,digest,committed_at_ms)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", parameters);
+    if(!inserted) { throw std::runtime_error(inserted.error().message); }
 }
 
 } // namespace lasercnc::test

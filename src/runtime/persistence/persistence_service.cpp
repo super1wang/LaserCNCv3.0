@@ -387,7 +387,15 @@ public:
 
     foundation::Result<platform::PersistenceSessionInfo> acquireHostSession() override
     {
-        return failed_ ? unavailable<platform::PersistenceSessionInfo>() : delegate_->acquireHostSession();
+        if(failed_) { return unavailable<platform::PersistenceSessionInfo>(); }
+        try {
+            auto admitted = delegate_->acquireHostSession();
+            if(!admitted && initialized_) { failed_ = true; initialized_ = false; }
+            return admitted;
+        } catch(...) {
+            if(initialized_) { failed_ = true; initialized_ = false; }
+            throw;
+        }
     }
 
     foundation::Result<std::size_t> execute(std::string_view sql,
@@ -402,7 +410,13 @@ public:
     }
     foundation::Result<void> beginTransaction() override
     {
-        return failed_ ? unavailable<void>() : delegate_->beginTransaction();
+        if(failed_) { return unavailable<void>(); }
+        auto begun = delegate_->beginTransaction();
+        if(!begun && begun.error().code.value().starts_with("Persistence.HostSession")) {
+            failed_ = true;
+            initialized_ = false;
+        }
+        return begun;
     }
     foundation::Result<void> commitTransaction() override
     {
@@ -484,11 +498,15 @@ foundation::Result<void> PersistenceService::initialize()
             foundation::ErrorCategory::Conflict,
             "Persistence services have not been configured"));
     }
-    if(initialized_) {
-        return foundation::Result<void>::success();
-    }
     bool transactionOpen = false;
     try {
+        // Ownership and effective policy precede every schema or interrupted-state mutation.
+        // 中文翻译：所有权与生效策略必须先于任何 schema 或中断状态改写；重复初始化也重新验证准入。
+        sessionAttempted_ = true;
+        auto admitted = backend_->acquireHostSession();
+        if(!admitted) { return foundation::Result<void>::failure(std::move(admitted).error()); }
+        sessionInfo_ = std::move(admitted).value();
+        if(initialized_) { return foundation::Result<void>::success(); }
         auto begun = backend_->beginTransaction();
         if(!begun) {
             return begun;
@@ -1054,6 +1072,14 @@ bool PersistenceService::ready() const
 {
     std::lock_guard lock(mutex_);
     return initialized_;
+}
+
+PersistenceSessionStatus PersistenceService::sessionStatus() const
+{
+    std::lock_guard lock(mutex_);
+    return {sessionInfo_.has_value() ? PersistenceOwnershipState::Acquired
+        : sessionAttempted_ ? PersistenceOwnershipState::Unconfirmed : PersistenceOwnershipState::NotRequested,
+        initialized_, sessionInfo_};
 }
 
 bool PersistenceService::frozen() const

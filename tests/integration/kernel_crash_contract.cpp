@@ -618,10 +618,8 @@ int runKernelCrashContract(std::string_view mode, const std::filesystem::path& r
     }
     if(seed) {
         take(kernel.execution().executeCommand(createRequest(true)));
-        {
-            auto persistence = test::openPersistenceFixture(root / "state.db", root / "snapshots");
-            take(persistence->captureSnapshot(id<SnapshotId>("snapshot.crash.baseline"), take(kernel.documents().snapshot(document))));
-        }
+        take(kernel.documentRuntime().close(document));
+        take(kernel.documentRuntime().open(document));
         if(scenario.starts_with("undo-") || scenario.starts_with("redo-")) {
             take(kernel.execution().executeCommand(createRequest()));
         }

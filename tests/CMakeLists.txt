@@ -64,6 +64,14 @@ if(WIN32)
             -P "${PROJECT_SOURCE_DIR}/cmake/RunVerifiedProgram.cmake")
     set_tests_properties(integration.persistence_host_session_process PROPERTIES
         TIMEOUT 45 RUN_SERIAL TRUE)
+    add_test(NAME integration.persistence_host_initialization_process
+        COMMAND "${CMAKE_COMMAND}"
+            "-DLCNC_EXECUTABLE=${LCNC_WINDOWS_POWERSHELL}"
+            "-DLCNC_ARGUMENTS=-NoProfile;-ExecutionPolicy;Bypass;-File;${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_persistence_session.ps1;-Executable;$<TARGET_FILE:lasercnc_persistence_session_probe>;-EvidenceRoot;${CMAKE_CURRENT_BINARY_DIR}/host-initialization-process-runs;-Service"
+            "-DLCNC_EXPECTED_OUTPUT=host-session-process-verified" "-DLCNC_TIMEOUT=35"
+            -P "${PROJECT_SOURCE_DIR}/cmake/RunVerifiedProgram.cmake")
+    set_tests_properties(integration.persistence_host_initialization_process PROPERTIES
+        TIMEOUT 45 RUN_SERIAL TRUE)
 
     add_executable(lasercnc_kernel_benchmark benchmark/kernel_benchmark.cpp)
     target_link_libraries(lasercnc_kernel_benchmark PRIVATE LaserCNC::Infrastructure Psapi)

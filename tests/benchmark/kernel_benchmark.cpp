@@ -249,19 +249,10 @@ struct Report final {
 
 template<typename Target>
 void configurePersistence(Target& persistence, const std::filesystem::path& root,
-    Report& report)
+    Report&)
 {
     std::filesystem::create_directories(root);
     auto backend = take(SqlitePersistenceBackend::open({root / "state.db"}));
-    if(!report.metadata.contains("sqlite_settings")) {
-        Value::Object settings;
-        for(const auto* pragma : {"journal_mode", "synchronous", "page_size", "cache_size", "foreign_keys"}) {
-            const auto result = take(backend->query(std::string("PRAGMA ") + pragma));
-            check(result.size() == 1U && result.front().size() == 1U, "Unexpected PRAGMA response");
-            settings.emplace(pragma, result.front().begin()->second);
-        }
-        report.metadata.emplace("sqlite_settings", Value{std::move(settings)});
-    }
     auto snapshots = take(FilesystemSnapshotStore::create({root / "snapshots", 256U * 1024U * 1024U}));
     if constexpr(std::is_same_v<Target, AppKernel>) {
         take(persistence.configurePersistence(std::move(backend), std::make_shared<JsonconsAdapter>(),
@@ -277,6 +268,17 @@ public:
     Result<void> write(const observability::LogRecord&) override { return Result<void>::success(); }
     Result<void> flush() override { return Result<void>::success(); }
 };
+
+void recordPersistenceSettings(const persistence::PersistenceService& service, Report& report)
+{
+    const auto status = service.sessionStatus();
+    check(status.ready && status.lastAdmission.has_value(), "Missing admitted persistence session");
+    const auto& info = *status.lastAdmission->configuration.getIf<Value::Object>();
+    report.metadata.insert_or_assign("sqlite_settings", Value{Value::Object{
+        {"journal_mode", info.at("journalMode")}, {"synchronous", info.at("synchronous")},
+        {"page_size", info.at("pageSize")}, {"cache_size", info.at("cacheSize")},
+        {"foreign_keys", info.at("foreignKeys")}}});
+}
 class ReadHandler final : public IQueryHandler, public IReadOnlyCommandHandler {
 public:
     Result<Value> execute(const QueryRequest&, const QueryContext& context) override
@@ -314,15 +316,16 @@ std::unique_ptr<AppKernel> configuredKernel(Report& report, const std::filesyste
     if(durable) { configurePersistence(*kernel, root, report); }
     return kernel;
 }
-void seedKernel(AppKernel& kernel, Report& report, bool durable, const std::filesystem::path& root = {})
+void seedKernel(AppKernel& kernel, Report& report, bool durable, const std::filesystem::path& = {})
 {
     const auto start = Clock::now();
     take(kernel.bootstrap());
     take(kernel.projectRuntime().create(project));
     take(kernel.documentRuntime().attach({project, document, {}, objects(report.opts.count)}));
     if(durable) {
-        auto persistence = test::openPersistenceFixture(root / "state.db", root / "snapshots", 256U * 1024U * 1024U);
-        take(persistence->captureSnapshot(id<SnapshotId>("snapshot.benchmark.baseline"), take(kernel.documents().snapshot(document))));
+        recordPersistenceSettings(kernel.persistence(), report);
+        take(kernel.documentRuntime().close(document));
+        take(kernel.documentRuntime().open(document));
     }
     report.metadata.insert_or_assign("last_seed_ms", Value{elapsed(start)});
 }
@@ -351,7 +354,7 @@ void component(Report& report)
     take(types.registerType(objectType()));
     types.freeze();
     persistence::PersistenceService persistence;
-    if(report.opts.durable()) { configurePersistence(persistence, report.root / "component", report); take(persistence.initialize()); }
+    if(report.opts.durable()) { configurePersistence(persistence, report.root / "component", report); take(persistence.initialize()); recordPersistenceSettings(persistence, report); }
     TransactionManager transactions{store, report.opts.durable() ? &persistence : nullptr, nullptr, nullptr, &types};
     const auto start = Clock::now();
     take(store.addDocument(project, document));
@@ -449,32 +452,35 @@ void journal(Report& report)
     const auto storageRoot = report.root / "journal";
     auto source = configuredKernel(report, report.root / "source", false);
     seedKernel(*source, report, false);
-    persistence::PersistenceService target;
-    configurePersistence(target, storageRoot, report);
-    take(target.initialize());
-    take(target.saveDocumentLifecycle(project, document, persistence::DocumentPersistenceState::Open));
-    take(target.captureSnapshot(id<SnapshotId>("snapshot.benchmark.baseline"), take(source->documents().snapshot(document))));
-    report.metadata.emplace("snapshot_objects", number(report.opts.count));
-    std::optional<TransactionCommit> receipt;
-    report.measure("journal.append", [&](std::size_t index) {
-        receipt = take(source->execution().executeCommand(command("bench.update", false, index))).commit;
-        check(receipt.has_value(), "Missing source commit");
-    }, [&](std::size_t) { return take(target.append(*receipt)); }, [&](const auto& record, std::size_t index) {
-        check(record.sequence == index + 1U && record.transactionId == receipt->transactionId, "Journal sequence changed");
-        verifyRevisions(record.revisionsAfter, index + 1U);
-    });
     const auto tail = report.opts.warmup + report.opts.samples;
-    report.metadata.emplace("journal_tail_records", number(tail));
-    take(source->shutdown());
-    source.reset();
-    receipt.reset();
-    report.measure("journal.recover_material", [&](std::size_t) { return take(target.recover()); },
-        [&](const persistence::RecoveryReport& recovered, std::size_t) {
-            check(recovered.documents.size() == 1U && recovered.journalRecordsReplayed == tail
-                && recovered.historyCommits.size() == tail, "Recovery extent changed");
-            verifyObjects(recovered.documents.front().objects, report.opts.count, changedFill(tail - 1U));
-            verifyRevisions(recovered.documents.front().revisions, tail);
+    {
+        persistence::PersistenceService target;
+        configurePersistence(target, storageRoot, report);
+        take(target.initialize());
+        recordPersistenceSettings(target, report);
+        take(target.saveDocumentLifecycle(project, document, persistence::DocumentPersistenceState::Open));
+        take(target.captureSnapshot(id<SnapshotId>("snapshot.benchmark.baseline"), take(source->documents().snapshot(document))));
+        report.metadata.emplace("snapshot_objects", number(report.opts.count));
+        std::optional<TransactionCommit> receipt;
+        report.measure("journal.append", [&](std::size_t index) {
+            receipt = take(source->execution().executeCommand(command("bench.update", false, index))).commit;
+            check(receipt.has_value(), "Missing source commit");
+        }, [&](std::size_t) { return take(target.append(*receipt)); }, [&](const auto& record, std::size_t index) {
+            check(record.sequence == index + 1U && record.transactionId == receipt->transactionId, "Journal sequence changed");
+            verifyRevisions(record.revisionsAfter, index + 1U);
         });
+        report.metadata.emplace("journal_tail_records", number(tail));
+        take(source->shutdown());
+        source.reset();
+        receipt.reset();
+        report.measure("journal.recover_material", [&](std::size_t) { return take(target.recover()); },
+            [&](const persistence::RecoveryReport& recovered, std::size_t) {
+                check(recovered.documents.size() == 1U && recovered.journalRecordsReplayed == tail
+                    && recovered.historyCommits.size() == tail, "Recovery extent changed");
+                verifyObjects(recovered.documents.front().objects, report.opts.count, changedFill(tail - 1U));
+                verifyRevisions(recovered.documents.front().revisions, tail);
+            });
+    }
     std::unique_ptr<AppKernel> recovered;
     report.measure("kernel.bootstrap_recovery", [&](std::size_t) { recovered = configuredKernel(report, storageRoot, true); },
         [&](std::size_t) { take(recovered->bootstrap()); return true; }, [&](bool, std::size_t) {

@@ -1166,6 +1166,7 @@ TEST_CASE("Snapshot publication failures preserve the indexed state and permit o
                 const auto candidate = validId<SnapshotId>("snapshot.candidate");
                 RevisionSet revisions;
                 std::vector<ObjectRecord> objects;
+                std::optional<Document> imageForReuse;
                 {
                     AppKernel kernel;
                     auto sqlite = SqlitePersistenceBackend::open({path});
@@ -1181,7 +1182,9 @@ TEST_CASE("Snapshot publication failures preserve the indexed state and permit o
                     REQUIRE(fixture.configure(std::move(backend), std::make_shared<JsonconsAdapter>(),
                         hashes, std::move(snapshots)).hasValue());
                     REQUIRE(fixture.initialize().hasValue());
-                    auto kernelBackend = SqlitePersistenceBackend::open({path});
+                    // The seed Kernel owns a private database; only the fixture owns the fault database.
+                    // 中文翻译：种子 Kernel 使用私有数据库，仅故障夹具拥有待注入的文件数据库。
+                    auto kernelBackend = SqlitePersistenceBackend::open({":memory:"});
                     auto kernelFiles = FilesystemSnapshotStore::create({directory, 1024U * 1024U});
                     REQUIRE(kernelBackend.hasValue());
                     REQUIRE(kernelFiles.hasValue());
@@ -1190,8 +1193,13 @@ TEST_CASE("Snapshot publication failures preserve the indexed state and permit o
                         std::move(kernelFiles).value()).hasValue());
                     configureRuntime(kernel, project, document, session, true);
                     REQUIRE(kernel.bootstrap().hasValue());
-                    REQUIRE(kernel.execution().executeCommand(request("request.snapshot.seed", "kernel.history.create",
-                        project, document, session, "object.snapshot")).hasValue());
+                    const auto seeded = kernel.execution().executeCommand(request("request.snapshot.seed", "kernel.history.create",
+                        project, document, session, "object.snapshot"));
+                    REQUIRE(seeded.hasValue());
+                    REQUIRE(seeded.value().commit.has_value());
+                    REQUIRE(fixture.append(*seeded.value().commit).hasValue());
+                    REQUIRE(fixture.saveDocumentLifecycle(project, document,
+                        lasercnc::persistence::DocumentPersistenceState::Open).hasValue());
                     const auto image = kernel.documents().snapshot(document).value();
                     revisions = image.revisions();
                     objects = image.objects().all();
@@ -1211,11 +1219,11 @@ TEST_CASE("Snapshot publication failures preserve the indexed state and permit o
                     auto indexed = db->query("SELECT * FROM snapshot_index");
                     REQUIRE(indexed.hasValue());
                     CHECK(indexed.value().size() == 1U);
-                    CHECK(kernel.persistence().latestSnapshot(document).value()->snapshotId == baseline);
+                    CHECK(fixture.latestSnapshot(document).value()->snapshotId == baseline);
                     CHECK(kernel.documents().snapshot(document).value().objects().all() == objects);
                     CHECK(kernel.documents().snapshot(document).value().revisions() == revisions);
                     CHECK(kernel.history().snapshot(document).value().cursor == HistoryCursor{1U, 1U});
-                    CHECK(kernel.persistence().journalAfter(document, 0U).value().size() == 1U);
+                    CHECK(fixture.journalAfter(document, 0U).value().size() == 1U);
                     CHECK(std::filesystem::exists(directory / "snapshot.candidate.snapshot") ==
                         (stage == "write-after" || stage == "index" || stage == "commit"));
                     REQUIRE(kernel.shutdown().hasValue());
@@ -1234,11 +1242,15 @@ TEST_CASE("Snapshot publication failures preserve the indexed state and permit o
                     CHECK(image.objects().all() == objects);
                     CHECK(image.revisions() == revisions);
                     CHECK(kernel.history().snapshot(document).value().cursor == HistoryCursor{1U, 1U});
-                    auto fixture = lasercnc::test::openPersistenceFixture(path, directory);
-                    REQUIRE(fixture->captureSnapshot(candidate, image).hasValue());
-                    REQUIRE(fixture->captureSnapshot(candidate, image).hasValue());
-                    CHECK(kernel.persistence().latestSnapshot(document).value()->snapshotId == candidate);
+                    imageForReuse = image;
                     REQUIRE(kernel.shutdown().hasValue());
+                }
+                {
+                    auto fixture = lasercnc::test::openPersistenceFixture(path, directory);
+                    REQUIRE(imageForReuse.has_value());
+                    REQUIRE(fixture->captureSnapshot(candidate, *imageForReuse).hasValue());
+                    REQUIRE(fixture->captureSnapshot(candidate, *imageForReuse).hasValue());
+                    CHECK(fixture->latestSnapshot(document).value()->snapshotId == candidate);
                 }
                 removeDatabase(path);
                 std::filesystem::remove_all(directory);

@@ -1,8 +1,10 @@
-﻿param([Parameter(Mandatory=$true)][string]$Executable, [Parameter(Mandatory=$true)][string]$EvidenceRoot)
+﻿param([Parameter(Mandatory=$true)][string]$Executable, [Parameter(Mandatory=$true)][string]$EvidenceRoot, [switch]$Service)
 $ErrorActionPreference = 'Stop'
 $runRoot = Join-Path $EvidenceRoot ([Guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($runRoot) | Out-Null
 $database = Join-Path $runRoot 'state.db'
+$probeMode = if ($Service) { 'probe-service' } else { 'probe' }
+$holdMode = if ($Service) { 'hold-service' } else { 'hold' }
 function Start-Probe([string]$Mode) {
     $info = [Diagnostics.ProcessStartInfo]::new()
     $info.FileName = $Executable
@@ -18,7 +20,7 @@ function Start-Probe([string]$Mode) {
     return $process
 }
 function Check-Probe([int]$ExpectedExit, [string]$Marker) {
-    $probe = Start-Probe 'probe'
+    $probe = Start-Probe $probeMode
     try {
         if (-not $probe.WaitForExit(5000)) { throw '所有权探针超时' }
         $output = $probe.StandardOutput.ReadToEnd() + $probe.StandardError.ReadToEnd()
@@ -31,7 +33,7 @@ function Check-Probe([int]$ExpectedExit, [string]$Marker) {
     }
 }
 foreach ($mode in @('clean', 'killed')) {
-    $holder = Start-Probe 'hold'
+    $holder = Start-Probe $holdMode
     try {
         $line = $holder.StandardOutput.ReadLineAsync()
         if (-not $line.Wait(5000) -or $line.Result -ne 'host-session-ready') { throw '持有进程没有就绪' }

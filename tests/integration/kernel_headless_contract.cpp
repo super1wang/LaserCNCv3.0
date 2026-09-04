@@ -765,7 +765,8 @@ int runTaskRoundTrip()
 
 int seedPersistence(const std::filesystem::path& stateRoot)
 {
-    lasercnc::kernel::AppKernel kernel;
+    auto owner = std::make_unique<lasercnc::kernel::AppKernel>();
+    auto& kernel = *owner;
     const auto project = requiredId<ProjectId>("project.persistence-contract");
     const auto document = requiredId<DocumentId>("document.persistence-contract");
     auto added = kernel.addDocument(project, document);
@@ -794,12 +795,12 @@ int seedPersistence(const std::filesystem::path& stateRoot)
     if(!image) {
         return fail("persistence snapshot source", image.error());
     }
-    auto fixture = lasercnc::test::openPersistenceFixture(stateRoot / "kernel.db", stateRoot / "snapshots");
-    auto captured = fixture->captureSnapshot(
-        requiredId<SnapshotId>("snapshot.persistence-contract"), image.value());
+    auto captured = kernel.documentRuntime().close(document);
     if(!captured) {
         return fail("persistence snapshot", captured.error());
     }
+    auto reopened = kernel.documentRuntime().open(document);
+    if(!reopened) { return fail("persistence reopen", reopened.error()); }
     auto second = kernel.execution().executeCommand(persistenceCommand(
         "request.persistence.second",
         "object.persistence.tail",
@@ -813,6 +814,13 @@ int seedPersistence(const std::filesystem::path& stateRoot)
     if(!latest) {
         return fail("persistence latest document", latest.error());
     }
+    auto diagnostic = kernel.diagnostics().run(
+        requiredId<DiagnosticId>("kernel.contract.persistence"));
+    if(!diagnostic) { return fail("persistence diagnostic", diagnostic.error()); }
+    auto stopped = kernel.shutdown();
+    if(!stopped) { return fail("persistence seed shutdown", stopped.error()); }
+    owner.reset();
+    auto fixture = lasercnc::test::openPersistenceFixture(stateRoot / "kernel.db", stateRoot / "snapshots");
     auto accepted = fixture->acceptTask(
         TaskRequest {
             requiredId<TaskId>("task.persistence.interrupted"),
@@ -825,11 +833,6 @@ int seedPersistence(const std::filesystem::path& stateRoot)
         latest.value().revisions());
     if(!accepted) {
         return fail("persistence interrupted task", accepted.error());
-    }
-    auto diagnostic = kernel.diagnostics().run(
-        requiredId<DiagnosticId>("kernel.contract.persistence"));
-    if(!diagnostic) {
-        return fail("persistence diagnostic", diagnostic.error());
     }
     std::cout << "persistence-seeded\n" << std::flush;
     std::_Exit(EXIT_SUCCESS);
@@ -908,7 +911,8 @@ int recoverPersistence(const std::filesystem::path& stateRoot)
 
 int seedWorkflowRecovery(const std::filesystem::path& stateRoot)
 {
-    lasercnc::kernel::AppKernel kernel;
+    auto owner = std::make_unique<lasercnc::kernel::AppKernel>();
+    auto& kernel = *owner;
     const auto project = requiredId<ProjectId>("project.persistence-contract");
     const auto document = requiredId<DocumentId>("document.persistence-contract");
     auto added = kernel.addDocument(project, document);
@@ -928,13 +932,12 @@ int seedWorkflowRecovery(const std::filesystem::path& stateRoot)
     if(!documentSnapshot) {
         return fail("workflow seed document snapshot", documentSnapshot.error());
     }
-    auto fixture = lasercnc::test::openPersistenceFixture(stateRoot / "kernel.db", stateRoot / "snapshots");
-    auto captured = fixture->captureSnapshot(
-        requiredId<SnapshotId>("snapshot.persistence-workflow"),
-        documentSnapshot.value());
+    auto captured = kernel.documentRuntime().close(document);
     if(!captured) {
         return fail("workflow seed snapshot", captured.error());
     }
+    auto reopened = kernel.documentRuntime().open(document);
+    if(!reopened) { return fail("workflow seed reopen", reopened.error()); }
 
     const auto request = persistenceWorkflowRequest();
     auto started = kernel.execution().startWorkflow(request);
@@ -945,6 +948,10 @@ int seedWorkflowRecovery(const std::filesystem::path& stateRoot)
     interrupted.state = WorkflowState::Running;
     interrupted.steps.front().state = WorkflowStepState::Running;
     interrupted.steps.front().attempt = 1U;
+    auto stopped = kernel.shutdown();
+    if(!stopped) { return fail("workflow seed shutdown", stopped.error()); }
+    owner.reset();
+    auto fixture = lasercnc::test::openPersistenceFixture(stateRoot / "kernel.db", stateRoot / "snapshots");
     auto checkpointed = fixture->saveWorkflowCheckpoint(
         request, persistenceWorkflowDefinition(), interrupted, {});
     if(!checkpointed) {

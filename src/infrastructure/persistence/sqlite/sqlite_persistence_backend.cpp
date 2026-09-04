@@ -280,9 +280,13 @@ public:
         auto journal = pragma("PRAGMA main.journal_mode");
         auto synchronous = pragma("PRAGMA main.synchronous");
         auto foreignKeys = pragma("PRAGMA foreign_keys");
+        auto pageSize = pragma("PRAGMA main.page_size");
+        auto cacheSize = pragma("PRAGMA main.cache_size");
         if(!journal) { return fail(std::move(journal).error()); }
         if(!synchronous) { return fail(std::move(synchronous).error()); }
         if(!foreignKeys) { return fail(std::move(foreignKeys).error()); }
+        if(!pageSize) { return fail(std::move(pageSize).error()); }
+        if(!cacheSize) { return fail(std::move(cacheSize).error()); }
         if(journal.value() != foundation::Value{privateMemory_ ? "memory" : "delete"}
            || synchronous.value() != foundation::Value{std::int64_t{3}}
            || foreignKeys.value() != foundation::Value{std::int64_t{1}}) {
@@ -294,6 +298,8 @@ public:
                 {"journalMode", std::move(journal).value()},
                 {"synchronous", std::move(synchronous).value()},
                 {"foreignKeys", std::move(foreignKeys).value()},
+                {"pageSize", std::move(pageSize).value()},
+                {"cacheSize", std::move(cacheSize).value()},
                 {"ownership", foundation::Value{privateMemory_ ? "private-memory" : "native-file-range-lock-v1"}},
             }}};
         return foundation::Result<platform::PersistenceSessionInfo>::success(*session_);

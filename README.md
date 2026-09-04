@@ -6,7 +6,7 @@ LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9 及 K10A–K10E 的�
 
 当前收口按 [ST1C 补充执行计划](docs/内核契约/ST1C-补充审计与剩余执行计划.md) 继续：C1a 非零 ProjectRevision 独立恢复已通过本地检查点（Debug 286/286、专项 16/16、新增 2 项各 3 次、纯生产通过），见 [C1a 交付](docs/阶段交付/2026-09-04-ST1C1a-项目修订独立恢复.md)。下一步 C5 单 Host/耐久配置、C1b 写入端修订检查，再按计划闭合整体准入、存储键、可信装载及冻结契约；历史门禁成绩不表示剩余新发现已解决。
 
-C5a 会话端口与 SQLite/Windows 独占基础已通过本地组件检查点：专项 21/21、新增 8 项各 10 次、纯生产及架构检查通过，见 [C5a 交付](docs/阶段交付/2026-09-04-ST1C5a-持久化会话端口与独占基础.md)。C5b 尚需将该端口强制接入初始化并验证第二 Host 不改写活动 claim；目前不能宣称 AppKernel 已强制独占。
+C5a/b 已完成持久化会话端口、SQLite/Windows 独占及强制初始化的本地检查点：C5b Debug 299/299、专项 56/56、新增 5 项各 10 次、纯生产及架构检查通过，见 [C5b 交付](docs/阶段交付/2026-09-04-ST1C5b-初始化独占与活动状态保护.md)。第二 Host 不再改写运行中 claim，隔离后仍保留所有权；下一步 C1b 写入端修订检查。C2c 生命周期及 ST1D 最终签核仍未闭合，不宣称 Frozen。
 
 - Phase 1：Foundation（`StrongId`、`Value`、`Result`、`Error`、`Schema`）
 - Phase 2：Application Composition（`AppKernel`、`ServiceRegistry`、`ModuleRuntime`）

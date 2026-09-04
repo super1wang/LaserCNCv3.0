@@ -187,6 +187,7 @@ TEST_CASE("ProjectRuntime recovers interrupted empty transitions as Failed witho
         auto fixture = openPersistenceFixture(root / "state.db");
         REQUIRE(fixture->completeProjectCatalogMigration({}));
         REQUIRE(fixture->saveProjectLifecycle(project, state));
+        fixture.reset();
         AppKernel kernel;
         configure(kernel, root);
         REQUIRE(kernel.bootstrap());
@@ -197,7 +198,7 @@ TEST_CASE("ProjectRuntime recovers interrupted empty transitions as Failed witho
         CHECK_FALSE(kernel.projectRuntime().open(project));
         CHECK_FALSE(kernel.projectRuntime().close(project));
         CHECK_FALSE(kernel.documentRuntime().create(project, id<DocumentId>("document.rejected")));
-        CHECK(fixture->projectCatalog().value().front().interruptedTransition == (state != ProjectPersistenceState::Failed));
+        CHECK(kernel.persistence().projectCatalog().value().front().interruptedTransition == (state != ProjectPersistenceState::Failed));
         REQUIRE(kernel.shutdown());
     }
 }
@@ -213,13 +214,19 @@ TEST_CASE("ProjectRuntime rejects configured reopen and inconsistent durable chi
         if(!configured) {
             REQUIRE(fixture->saveDocumentLifecycle(project, id<DocumentId>("document.invalid"), DocumentPersistenceState::Open));
         }
+        fixture.reset();
         AppKernel kernel;
         configure(kernel, root);
         if(configured) { REQUIRE(kernel.addProject(project)); }
-        CHECK_FALSE(kernel.bootstrap());
+        const auto booted = kernel.bootstrap();
+        REQUIRE_FALSE(booted);
+        const Error* cause = &booted.error();
+        while(cause->cause) { cause = cause->cause.get(); }
+        CHECK(std::string(cause->code.value()) ==
+            (configured ? "Project.RecoveryStateConflict" : "Project.RecoveryChildStateConflict"));
         CHECK(kernel.state() == AppKernelState::Failed);
         CHECK_FALSE(kernel.projectRuntime().accepting());
-        CHECK(fixture->projectCatalog().value().front().state == ProjectPersistenceState::Closed);
+        CHECK(kernel.persistence().projectCatalog().value().front().state == ProjectPersistenceState::Closed);
     }
 }
 
@@ -253,9 +260,8 @@ TEST_CASE("ProjectRuntime retains truthful partial document close on persistence
         // 中文翻译：第二个文档的 Closing 写入失败，持久状态仍为 Open；启动拒绝不一致的父子状态。
         CHECK_FALSE(recovered.bootstrap());
         CHECK_FALSE(recovered.projectRuntime().accepting());
-        auto observer = openPersistenceFixture(root / "state.db");
-        CHECK(observer->projectCatalog().value().front().state == ProjectPersistenceState::Failed);
-        CHECK(observer->documentCatalog().value().front().state == DocumentPersistenceState::Detached);
+        CHECK(recovered.persistence().projectCatalog().value().front().state == ProjectPersistenceState::Failed);
+        CHECK(recovered.persistence().documentCatalog().value().front().state == DocumentPersistenceState::Detached);
     }
 }
 
@@ -281,8 +287,7 @@ TEST_CASE("ProjectRuntime fails closed at both durable writes of create open and
                 CHECK(kernel.projectRuntime().lifecycle(project).value().error.has_value());
                 CHECK_FALSE(kernel.projectRuntime().create(project));
                 CHECK_FALSE(kernel.projectRuntime().open(project));
-                auto observer = openPersistenceFixture(root / "state.db");
-                CHECK(observer->projectCatalog().value().front().state == ProjectPersistenceState::Failed);
+                CHECK(kernel.persistence().projectCatalog().value().front().state == ProjectPersistenceState::Failed);
                 REQUIRE(kernel.shutdown());
             }
         }

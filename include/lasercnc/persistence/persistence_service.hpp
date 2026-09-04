@@ -135,6 +135,16 @@ struct WorkflowCheckpoint final {
     std::chrono::system_clock::time_point updatedAt;
 };
 
+enum class PersistenceOwnershipState : std::uint8_t { NotRequested, Unconfirmed, Acquired };
+
+// Last successful admission is evidence, not a live policy read or permission to release ownership.
+// 中文翻译：最近成功准入仅为诊断证据，不是实时策略读取或释放所有权的授权；隔离后仍保留。
+struct PersistenceSessionStatus final {
+    PersistenceOwnershipState ownership{PersistenceOwnershipState::NotRequested};
+    bool ready{false};
+    std::optional<platform::PersistenceSessionInfo> lastAdmission;
+};
+
 class PersistenceService final {
 public:
     [[nodiscard]] foundation::Result<void> configure(
@@ -215,6 +225,7 @@ public:
 
     [[nodiscard]] bool configured() const;
     [[nodiscard]] bool ready() const;
+    [[nodiscard]] PersistenceSessionStatus sessionStatus() const;
     [[nodiscard]] bool frozen() const;
 
 private:
@@ -235,6 +246,8 @@ private:
     std::shared_ptr<foundation::IValueSerializer> serializer_;
     std::shared_ptr<platform::IHashService> hashes_;
     std::unique_ptr<platform::ISnapshotStore> snapshotStore_;
+    bool sessionAttempted_{false};
+    std::optional<platform::PersistenceSessionInfo> sessionInfo_;
     bool initialized_{false};
     bool frozen_{false};
 };

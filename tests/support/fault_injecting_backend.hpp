@@ -37,6 +37,7 @@ public:
     foundation::Result<std::size_t> execute(std::string_view sql,
         std::span<const foundation::Value> parameters = {}) override
     {
+        ++sqlCalls;
         auto checked = check(BackendPoint::Execute, sql);
         if(!checked) { return foundation::Result<std::size_t>::failure(std::move(checked).error()); }
         transactionSql_.append(sql);
@@ -46,12 +47,14 @@ public:
     foundation::Result<std::vector<platform::PersistenceRow>> query(std::string_view sql,
         std::span<const foundation::Value> parameters = {}) override
     {
+        ++sqlCalls;
         auto checked = check(BackendPoint::Query, sql);
         if(!checked) { return foundation::Result<std::vector<platform::PersistenceRow>>::failure(std::move(checked).error()); }
         return delegate_->query(sql, parameters);
     }
     foundation::Result<void> beginTransaction() override
     {
+        ++beginCalls;
         auto checked = check(BackendPoint::Begin);
         transactionSql_.clear();
         return checked ? delegate_->beginTransaction() : checked;
@@ -75,6 +78,8 @@ public:
         return checked ? delegate_->rollbackTransaction() : checked;
     }
     unsigned int hits{0U};
+    unsigned int beginCalls{0U};
+    unsigned int sqlCalls{0U};
     bool failRollback{false};
     bool throwRollback{false};
     unsigned int rollbackHits{0U};

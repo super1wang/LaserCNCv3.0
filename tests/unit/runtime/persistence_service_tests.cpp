@@ -13,6 +13,7 @@
 #include <catch2/generators/catch_generators.hpp>
 #include "kernel_test_module.hpp"
 #include "fault_injecting_backend.hpp"
+#include "persistence_fixture.hpp"
 #include "fault_injecting_data_plane.hpp"
 
 #include <array>
@@ -160,10 +161,10 @@ void configureKernelPersistence(
 
 class ThrowingBackend final : public lasercnc::platform::IPersistenceBackend {
 public:
+    ThrowingBackend() : sessionBackend_(std::move(SqlitePersistenceBackend::open({":memory:"})).value()) {}
     Result<lasercnc::platform::PersistenceSessionInfo> acquireHostSession() override
     {
-        return Result<lasercnc::platform::PersistenceSessionInfo>::failure(makeError(
-            "Test.HostSessionUnavailable", ErrorCategory::Infrastructure, "Synthetic backend has no Host session"));
+        return sessionBackend_->acquireHostSession();
     }
     Result<std::size_t> execute(std::string_view, std::span<const Value>) override
     {
@@ -200,6 +201,8 @@ public:
     std::size_t begins{0U};
     std::size_t rollbacks{0U};
     bool active{false};
+private:
+    std::unique_ptr<SqlitePersistenceBackend> sessionBackend_;
 };
 
 class FailingTaskTerminalBackend final
@@ -885,9 +888,7 @@ TEST_CASE("Document open refuses unsupported durable object versions and remains
         TransactionCommit injected {validId<TransactionId>("tx.open-admission.injected"),
             project, document, first.revisionsAfter, revisions.value(),
             {{ObjectChangeKind::Updated, after.id, first.changes.front().after, after}}, {}};
-        PersistenceService fixture;
-        configureService(fixture, path);
-        REQUIRE(fixture.append(injected).hasValue());
+        REQUIRE_NOTHROW(lasercnc::test::injectJournalFixture(path, injected));
         auto opened = kernel.documentRuntime().open(document);
         REQUIRE_FALSE(opened.hasValue());
         CHECK(std::string(opened.error().code.value()) == "ObjectType.UnsupportedVersion");
@@ -2507,6 +2508,15 @@ TEST_CASE("Standalone quarantined persistence cannot be reinitialized", "[persis
                 const auto reinitialized = service.initialize();
                 REQUIRE_FALSE(reinitialized.hasValue());
                 CHECK(std::string(reinitialized.error().code.value()) == "Persistence.BackendQuarantined");
+                CHECK(service.sessionStatus().ownership == PersistenceOwnershipState::Acquired);
+                PersistenceService competitor;
+                auto competingBackend = SqlitePersistenceBackend::open({path});
+                REQUIRE(competingBackend);
+                REQUIRE(competitor.configure(std::move(competingBackend).value(),
+                    std::make_shared<JsonconsAdapter>(), std::make_shared<Sha256HashService>()));
+                const auto denied = competitor.initialize();
+                REQUIRE_FALSE(denied);
+                CHECK(std::string(denied.error().code.value()) == "Persistence.HostAlreadyOwned");
                 auto observer = SqlitePersistenceBackend::open({path});
                 REQUIRE(observer.hasValue());
                 const auto rows = observer.value()->query("SELECT * FROM state_journal");
@@ -2514,6 +2524,100 @@ TEST_CASE("Standalone quarantined persistence cannot be reinitialized", "[persis
                 CHECK(rows.value().empty());
             }
             removeDatabase(path);
+        }
+    }
+}
+
+TEST_CASE("Persistence Host refuses second service before changing active claims", "[persistence][host-session]")
+{
+    const auto root = std::filesystem::path{LCNC_STRESS_TEST_ROOT} / "host-service" / uniqueDatabasePath().stem();
+    std::filesystem::create_directories(root);
+    const auto path = root / "state.db";
+    PersistenceService first;
+    configureService(first, path);
+    const auto key = validId<IdempotencyKey>("key.host.pending");
+    const Value signature{Value::Object{{"test", Value{"host"}}}};
+    REQUIRE(first.claimCommand(key, signature));
+    auto observer = SqlitePersistenceBackend::open({path});
+    REQUIRE(observer);
+    const auto before = observer.value()->query("SELECT * FROM command_idempotency");
+    REQUIRE(before);
+    REQUIRE(first.initialize());
+    CHECK(observer.value()->query("SELECT * FROM command_idempotency").value() == before.value());
+    PersistenceService second;
+    auto backend = SqlitePersistenceBackend::open({path});
+    REQUIRE(backend);
+    REQUIRE(second.configure(std::move(backend).value(), std::make_shared<JsonconsAdapter>(), std::make_shared<Sha256HashService>()));
+    CHECK_FALSE(second.initialize());
+    CHECK(observer.value()->query("SELECT * FROM command_idempotency").value() == before.value());
+    REQUIRE(first.releaseCommandClaim(key, signature));
+    REQUIRE(first.claimCommand(key, signature));
+}
+
+TEST_CASE("Persistence Host admission error and exception precede all initialization SQL", "[persistence][host-session][fault-matrix]")
+{
+    for(const bool throws : {false, true}) {
+        auto sqlite = SqlitePersistenceBackend::open({":memory:"});
+        REQUIRE(sqlite);
+        auto backend = std::make_unique<lasercnc::test::FaultInjectingBackend>(std::move(sqlite).value());
+        auto* observed = backend.get();
+        observed->arm(lasercnc::test::BackendPoint::HostSession, "", 1U, throws);
+        PersistenceService service;
+        CHECK(service.sessionStatus().ownership == PersistenceOwnershipState::NotRequested);
+        REQUIRE(service.configure(std::move(backend), std::make_shared<JsonconsAdapter>(), std::make_shared<Sha256HashService>()));
+        CHECK_FALSE(service.initialize());
+        CHECK_FALSE(service.ready());
+        CHECK(service.sessionStatus().ownership == PersistenceOwnershipState::Unconfirmed);
+        CHECK_FALSE(service.sessionStatus().lastAdmission.has_value());
+        CHECK(observed->hits == 1U);
+        CHECK(observed->beginCalls == 0U);
+        CHECK(observed->sqlCalls == 0U);
+    }
+}
+
+TEST_CASE("Persistence Host policy quarantine retains ownership and last verified diagnostics", "[persistence][host-session]")
+{
+    for(const bool reinitialize : {false, true}) {
+        DYNAMIC_SECTION("reinitialize=" << reinitialize) {
+            const auto root = std::filesystem::path{LCNC_STRESS_TEST_ROOT} / "host-policy" / uniqueDatabasePath().stem();
+            std::filesystem::create_directories(root);
+            const auto path = root / "state.db";
+            auto sqlite = SqlitePersistenceBackend::open({path});
+            REQUIRE(sqlite);
+            auto* control = sqlite.value().get();
+            auto owner = std::make_unique<PersistenceService>();
+            REQUIRE(owner->configure(std::move(sqlite).value(), std::make_shared<JsonconsAdapter>(), std::make_shared<Sha256HashService>()));
+            CHECK(owner->sessionStatus().ownership == PersistenceOwnershipState::NotRequested);
+            REQUIRE(owner->initialize());
+            const auto admitted = owner->sessionStatus();
+            CHECK(admitted.ownership == PersistenceOwnershipState::Acquired);
+            CHECK(admitted.ready);
+            REQUIRE(admitted.lastAdmission.has_value());
+            CHECK(admitted.lastAdmission->persistent);
+            const auto& configuration = *admitted.lastAdmission->configuration.getIf<Value::Object>();
+            CHECK(configuration.at("journalMode") == Value{"delete"});
+            CHECK(configuration.at("synchronous") == Value{std::int64_t{3}});
+            CHECK(configuration.at("foreignKeys") == Value{std::int64_t{1}});
+            CHECK(configuration.at("pageSize") == control->query("PRAGMA page_size").value().front().at("page_size"));
+            CHECK(configuration.at("cacheSize") == control->query("PRAGMA cache_size").value().front().at("cache_size"));
+            REQUIRE(control->execute("PRAGMA synchronous=OFF"));
+            if(reinitialize) { CHECK_FALSE(owner->initialize()); }
+            else { CHECK_FALSE(owner->claimCommand(validId<IdempotencyKey>("key.policy"), Value{"policy"})); }
+            CHECK_FALSE(owner->ready());
+            CHECK(owner->sessionStatus().ownership == PersistenceOwnershipState::Acquired);
+            CHECK(owner->sessionStatus().lastAdmission->configuration == admitted.lastAdmission->configuration);
+            REQUIRE(control->execute("PRAGMA synchronous=EXTRA"));
+            CHECK_FALSE(owner->initialize());
+            PersistenceService competitor;
+            auto next = SqlitePersistenceBackend::open({path});
+            REQUIRE(next);
+            REQUIRE(competitor.configure(std::move(next).value(), std::make_shared<JsonconsAdapter>(), std::make_shared<Sha256HashService>()));
+            const auto denied = competitor.initialize();
+            REQUIRE_FALSE(denied);
+            CHECK(std::string(denied.error().code.value()) == "Persistence.HostAlreadyOwned");
+            owner.reset();
+            REQUIRE(competitor.initialize());
+            CHECK(competitor.sessionStatus().ownership == PersistenceOwnershipState::Acquired);
         }
     }
 }
