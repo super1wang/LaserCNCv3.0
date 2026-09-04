@@ -157,9 +157,14 @@ foundation::Result<std::unique_ptr<ITraceSpan>> LocalTraceService::startSpan(
 
     class Span final : public ITraceSpan {
     public:
-        Span(kernel::TraceId traceId, kernel::SpanId spanId, Completion completion)
+        Span(
+            kernel::TraceId traceId,
+            kernel::SpanId spanId,
+            std::shared_ptr<Core> core,
+            Completion completion)
             : traceId_(std::move(traceId)),
               spanId_(std::move(spanId)),
+              core_(std::move(core)),
               completion_(std::move(completion))
         {
         }
@@ -174,6 +179,7 @@ foundation::Result<std::unique_ptr<ITraceSpan>> LocalTraceService::startSpan(
                         "A trace span was destroyed before explicit completion",
                         spanId_));
                 } catch(...) {
+                    discardActive();
                 }
             }
         }
@@ -208,12 +214,28 @@ foundation::Result<std::unique_ptr<ITraceSpan>> LocalTraceService::startSpan(
                 }
                 completion_(status, std::move(error));
             } catch(...) {
+                // A noexcept handle must still surrender its active identity if diagnostics,
+                // record retention, or exporter snapshot allocation fails.
+                // 中文翻译：即使诊断、记录或出口快照分配失败，noexcept 句柄也必须释放活动身份。
+                discardActive();
             }
         }
 
     private:
+        void discardActive() noexcept
+        {
+            try {
+                std::lock_guard lock(core_->mutex);
+                core_->active.erase(spanId_);
+            } catch(...) {
+                // Lock failures are not recoverable inside a noexcept completion handle.
+                // 中文翻译：锁获取失败无法在 noexcept 完成句柄内部恢复。
+            }
+        }
+
         kernel::TraceId traceId_;
         kernel::SpanId spanId_;
+        std::shared_ptr<Core> core_;
         Completion completion_;
         std::atomic_bool ended_{false};
         bool armed_{false};
@@ -223,7 +245,7 @@ foundation::Result<std::unique_ptr<ITraceSpan>> LocalTraceService::startSpan(
     // handle is inert if allocation or duplicate admission fails; after insertion no allocation
     // is needed to transfer its ownership into Result.
     // 中文翻译：先完成句柄全部可失败分配，再发布活动身份；未准入的句柄析构不会生成虚假完成。
-    auto span = std::make_unique<Span>(traceId, spanId, std::move(completion));
+    auto span = std::make_unique<Span>(traceId, spanId, core_, std::move(completion));
     {
         std::lock_guard lock(core_->mutex);
         const auto completed = std::find_if(

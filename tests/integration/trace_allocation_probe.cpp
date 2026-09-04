@@ -19,22 +19,26 @@ thread_local bool armed = false;
 thread_local std::size_t calls = 0;
 thread_local std::size_t failAt = std::numeric_limits<std::size_t>::max();
 thread_local bool injected = false;
+thread_local bool persistent = false;
 
 void beforeAllocation()
 {
-    if(armed && calls++ == failAt) {
-        armed = false;
+    if(!armed) { return; }
+    const auto index = calls++;
+    if(index == failAt || (persistent && index > failAt)) {
         injected = true;
+        if(!persistent) { armed = false; }
         throw std::bad_alloc{};
     }
 }
 
 struct Scope final {
-    explicit Scope(std::size_t index)
+    explicit Scope(std::size_t index, bool remainFailing = false)
     {
         calls = 0;
         failAt = index;
         injected = false;
+        persistent = remainFailing;
         armed = true;
     }
     ~Scope() { armed = false; }
@@ -155,6 +159,67 @@ bool attempt(std::size_t failIndex, std::size_t& allocations, bool expectFailure
     ok &= require(fixture.service.exporterFailures().empty(), "no synthetic exporter failure", failIndex);
     return ok;
 }
+
+bool completionAttempt(
+    std::size_t failIndex,
+    std::size_t& allocations,
+    bool expectFailure,
+    TraceStatus requestedStatus,
+    bool persistentFailure = false,
+    bool abandon = false)
+{
+    Fixture fixture;
+    auto started = fixture.service.startSpan(request());
+    if(!started) { throw std::logic_error("Completion target setup failed"); }
+    auto target = std::move(started).value();
+    {
+        allocation_probe::Scope scope{failIndex, persistentFailure};
+        if(abandon) { target.reset(); }
+        else { target->end(requestedStatus); }
+    }
+    allocations = allocation_probe::calls;
+    bool ok = require(allocation_probe::injected == expectFailure, "completion injection coverage", failIndex);
+    ok &= require(fixture.service.activeSpanCount() == 1U,
+        "completed handle must never leave an active orphan", failIndex);
+    target.reset();
+    ok &= require(fixture.service.activeSpanCount() == 1U,
+        "completed handle destruction must remain idempotent", failIndex);
+
+    const auto records = fixture.service.records();
+    const auto targetId = id<SpanId>("span.allocation.long-identity-outside-small-string-storage");
+    bool targetRetained = false;
+    for(const auto& record : records) {
+        if(record.spanId == targetId) { targetRetained = true; }
+    }
+    auto retry = fixture.service.startSpan(request());
+    ok &= require(retry.hasValue() != targetRetained,
+        "identity retry must agree with bounded retained history", failIndex);
+    if(retry) { retry.value()->end(TraceStatus::Cancelled); }
+    fixture.other->end(TraceStatus::Cancelled);
+    ok &= require(fixture.service.activeSpanCount() == 0U, "completion cleanup has no orphan", failIndex);
+    return ok;
+}
+
+bool verifyCompletionPath(TraceStatus status, std::size_t& count, bool abandon = false)
+{
+    if(!completionAttempt(std::numeric_limits<std::size_t>::max(), count, false, status, false, abandon)
+       || count == 0 || count > 1000) {
+        return false;
+    }
+    bool ok = true;
+    for(std::size_t index = 0; index < count; ++index) {
+        std::size_t observed = 0;
+        ok &= completionAttempt(index, observed, true, status, false, abandon);
+        ok &= require(observed == index + 1, "exact completion allocation index reached", index);
+        observed = 0;
+        ok &= completionAttempt(index, observed, true, status, true, abandon);
+        ok &= require(observed >= index + 1, "persistent completion failure reached", index);
+    }
+    std::size_t observed = 0;
+    ok &= completionAttempt(count, observed, false, status, false, abandon);
+    ok &= require(observed == count, "stable completion allocation path", count);
+    return ok;
+}
 }
 
 int main()
@@ -183,8 +248,15 @@ int main()
         std::size_t observed = 0;
         ok &= attempt(count, observed, false);
         ok &= require(observed == count, "stable allocation path", count);
+        std::size_t validCompletionCount = 0;
+        std::size_t invalidCompletionCount = 0;
+        std::size_t abandonedCompletionCount = 0;
+        ok &= verifyCompletionPath(TraceStatus::Succeeded, validCompletionCount);
+        ok &= verifyCompletionPath(static_cast<TraceStatus>(255U), invalidCompletionCount);
+        ok &= verifyCompletionPath(TraceStatus::Failed, abandonedCompletionCount, true);
         if(!ok) { return 3; }
-        std::printf("trace-start-allocation-verified injected=%zu baseline=%zu retry-and-state=passed\n", count, observed);
+        std::printf("trace-start-allocation-verified start=%zu completion-valid=%zu completion-invalid=%zu completion-abandoned=%zu retry-and-state=passed\n",
+            count, validCompletionCount, invalidCompletionCount, abandonedCompletionCount);
         return 0;
     } catch(const std::exception& error) {
         std::fprintf(stderr, "trace-allocation-unexpected: %s\n", error.what());

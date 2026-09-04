@@ -15,6 +15,7 @@ Phase 7 建立 Kernel 自有的 Trace、Metrics 与 Diagnostics 语义，并确�
 - C6b6 规定 end 只允许四种具名终态；首次 Running/未知值归一为 Failed + Trace.InvalidTerminalStatus，原 Error 保留 cause，不重复结束，见 [准入契约](ST1C6b6-观察状态与聚合准入.md)。
 - Span 必须显式 end；句柄销毁前未完成时自动记录 `Trace.SpanAbandoned`，不能静默丢失。
 - C6b8 要求 `startSpan` 在发布活动身份前完成句柄资源分配；准入异常不留下无句柄活动记录或占用 SpanId。身份只在活动和有界完成窗口内保留，窗口淘汰后允许复用；句柄持有共享 Core，可晚于服务外层所有者完成。见 [准入原子性契约](ST1C6b8-Trace准入原子性与身份保留.md)。
+- C6b9 进一步规定首次 `end` 或 abandoned 析构一旦消费句柄，即使诊断、完成记录或 exporter 快照分配失败也必须释放活动身份；完成记录与 exporter 在资源耗尽时为尽力观察，不伪称必达。见 [完成资源失败契约](ST1C6b9-Trace完成资源失败原子性.md)。
 - LocalTraceService 先在锁内完成本地记录，再复制 exporter 快照并在锁外调用；exporter 返回失败或抛异常只进入有界 exporterFailures，不反转 Span 或业务结果。
 - 完成记录采用有界 FIFO 保留。容量至少为 1，默认记录 4096 条、exporter 失败 256 条。
 - AppKernel 拥有 LocalTraceService，并在 Ready 边界冻结 exporter 组合；运行期可读取完成记录、活动数量和 exporter 失败快照，但不能改变组合。
