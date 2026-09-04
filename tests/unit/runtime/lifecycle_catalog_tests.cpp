@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <string>
 #include <thread>
 
 using namespace lasercnc;
@@ -97,6 +98,48 @@ template<typename Host> void documentCatalogChanges(Host& host)
         CHECK(recreated.value().entries.front().state == created.value().entries.front().state);
     } else { FAIL("Document catalog has no atomic versioned snapshot contract"); }
 }
+}
+
+TEST_CASE("Lifecycle state names preserve closed sets and mark undefined values",
+          "[lifecycle][state][c6b19]")
+{
+    CHECK(std::string(runtime::projectLifecycleStateName(
+              runtime::ProjectLifecycleState::Closed))
+          == "closed");
+    CHECK(std::string(runtime::projectLifecycleStateName(
+              runtime::ProjectLifecycleState::Opening))
+          == "opening");
+    CHECK(std::string(runtime::projectLifecycleStateName(
+              runtime::ProjectLifecycleState::Open))
+          == "open");
+    CHECK(std::string(runtime::projectLifecycleStateName(
+              runtime::ProjectLifecycleState::Closing))
+          == "closing");
+    CHECK(std::string(runtime::projectLifecycleStateName(
+              runtime::ProjectLifecycleState::Failed))
+          == "failed");
+    CHECK(std::string(runtime::projectLifecycleStateName(
+              static_cast<runtime::ProjectLifecycleState>(255U)))
+          == "unknown");
+
+    CHECK(std::string(runtime::documentLifecycleStateName(
+              runtime::DocumentLifecycleState::Detached))
+          == "detached");
+    CHECK(std::string(runtime::documentLifecycleStateName(
+              runtime::DocumentLifecycleState::Opening))
+          == "opening");
+    CHECK(std::string(runtime::documentLifecycleStateName(
+              runtime::DocumentLifecycleState::Open))
+          == "open");
+    CHECK(std::string(runtime::documentLifecycleStateName(
+              runtime::DocumentLifecycleState::Closing))
+          == "closing");
+    CHECK(std::string(runtime::documentLifecycleStateName(
+              runtime::DocumentLifecycleState::Failed))
+          == "failed");
+    CHECK(std::string(runtime::documentLifecycleStateName(
+              static_cast<runtime::DocumentLifecycleState>(255U)))
+          == "unknown");
 }
 
 TEST_CASE("Lifecycle catalog project versions reject unchanged-state ABA", "[lifecycle-catalog]")

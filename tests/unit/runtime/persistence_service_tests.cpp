@@ -3150,6 +3150,49 @@ TEST_CASE("Document lifecycle catalog survives close open remove and restart",
     removeSnapshotDirectory(snapshots);
 }
 
+TEST_CASE("Document lifecycle persistence rejects undefined states before mutation",
+          "[persistence][document][state][c6b19]")
+{
+    const auto path = uniqueDatabasePath();
+    removeDatabase(path);
+    const auto project = validId<ProjectId>("project.lifecycle.state");
+    const auto document = validId<DocumentId>("document.lifecycle.state");
+
+    {
+        PersistenceService service;
+        configureService(service, path);
+        REQUIRE(service.saveDocumentLifecycle(
+                    project, document, DocumentPersistenceState::Open)
+                    .hasValue());
+
+        auto observer = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+        REQUIRE(observer.hasValue());
+        auto initial = observer.value()->query(
+            "SELECT * FROM document_catalog ORDER BY document_id");
+        REQUIRE(initial.hasValue());
+        const auto before = initial.value();
+        REQUIRE(before.size() == 1U);
+
+        for(const auto unknown : {6U, 255U}) {
+            DYNAMIC_SECTION("state=" << unknown) {
+                auto rejected = service.saveDocumentLifecycle(
+                    project,
+                    document,
+                    static_cast<DocumentPersistenceState>(unknown));
+                REQUIRE_FALSE(rejected.hasValue());
+                CHECK(std::string(rejected.error().code.value())
+                      == "Persistence.InvalidDocumentLifecycleState");
+                auto after = observer.value()->query(
+                    "SELECT * FROM document_catalog ORDER BY document_id");
+                REQUIRE(after.hasValue());
+                CHECK(after.value() == before);
+            }
+        }
+    }
+
+    removeDatabase(path);
+}
+
 TEST_CASE("Document lifecycle catalog rejects ownership drift and tampering",
           "[persistence][document][integrity]")
 {

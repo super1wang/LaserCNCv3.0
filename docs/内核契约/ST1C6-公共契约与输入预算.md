@@ -7,7 +7,7 @@
 | 子节点 | 实施与验收 | 状态 |
 | --- | --- | --- |
 | C6a | 公共文件路径精确性：NUL 在 OS/库调用前拒绝，保留合法 Unicode，多个日志输出先完成参数预检；对真实副作用取得红灯并修复 | 本地检查点通过：四项新测试原实现 0/4；修复后日志/路径 6 项各三次、全量 Debug 412/412、定向 ASan 54 项各三次、纯生产/架构通过，见 [交付](../阶段交付/2026-09-04-ST1C6a-文件路径精确性与Unicode日志.md) |
-| C6b | 逐公共入口/DTO/错误 cause/持久版本清单；配置期、执行期、诊断、生命周期与内部恢复的可达权限区分；明确源码兼容和回滚边界 | [71 公共头基线](Kernel-1.0-公共头清单.md) 与 [声明账本](ST1C6b-公共契约逐项审计.md) 保留；最新 [C6b18 Task 错误 cause 版本化持久化](ST1C6b18-Task错误cause版本化持久化.md) 关闭 Task terminal cause 丢失、图形准入和 v1 升级幂等缺口，C6b17 写前准入保留。下一步补 Host、State 及其他持久类型/字段/格式；不声称已冻结 |
+| C6b | 逐公共入口/DTO/错误 cause/持久版本清单；配置期、执行期、诊断、生命周期与内部恢复的可达权限区分；明确源码兼容和回滚边界 | [71 公共头基线](Kernel-1.0-公共头清单.md) 与 [声明账本](ST1C6b-公共契约逐项审计.md) 保留；最新 [C6b19 Host 与 State 状态边界](ST1C6b19-Host与State状态边界.md) 区分只读观察、闭集输入和直接访问器前置条件，并补 Document 生命周期未知持久状态零变更证据。下一步 C6b20 审计剩余 Persistence DTO/格式，再做 71 头最终对账；不声称已冻结 |
 | C6c | Value/Schema/序列化/配置与命令、查询、任务、工作流、脚本及恢复材料的统一尺寸、深度、数量和累计预算；输入/输出均检查，拒绝不留部分提交 | 待实现；现有局部限制不得代签统一预算 |
 | C6d | 同步调用与 Task 的可取消/超时边界；活动、终态发布、身份/幂等保护及有界内存保留 | 待实现与验证；不得靠删除未完成记录或丢失防重身份满足“有界” |
 | C6 汇总 | 各子项闭合、兼容清单可检查、负例/全集/ASan/生产/架构通过后作为远端大节点 | 未达到；子节点独立本地提交 |
@@ -60,8 +60,10 @@ Workflow/Script 每实例最多观察 256 个步骤/节点，不等于 instances
 
 C6b2 的日志预检枚举 base 与全部保留轮转目标，具有 O(N log N) 集合成本和逐目标元数据查询。锁定库允许的 200000 数值上限不是实测容量；C6c/C7 必须测量保留数、目录深度、已有文件规模与初始化耗时/内存，并据证据制定支持配置。Foundation 逐项账本登记的未知 SchemaKind 风险已在 C6b3 取得真实红灯并修复，规则与兼容性见 [根类型准入](ST1C6b3-Schema根类型准入.md)。消息风险由下述 C6b4 承接，之后推进剩余声明和统一预算，不用单个枚举修复代签所有值/错误/Schema 契约。
 
-C6b4–b10 修复消息、观察资源及 Diagnostics 并发，[C6b11](ST1C6b11-观察出口失败记录资源隔离.md) 隔离三服务 exporter 失败记录 OOM，[C6b12](ST1C6b12-观察出口快照无分配发布.md) 消除完整 exporter 向量复制分配，[C6b13](ST1C6b13-编排定义枚举准入.md) 补 Workflow/Script 定义枚举，[C6b14](ST1C6b14-资源声明枚举与算术准入.md) 补资源声明准入，[C6b15](ST1C6b15-版本解析策略枚举准入.md) 补 Command/Query 解析策略与观察精确性，[C6b16](ST1C6b16-快照存储写入证明准入.md) 验证 Snapshot Store 写入证明，[C6b17](ST1C6b17-持久DTO写前准入.md) 补 Journal/Task/Workflow 持久 DTO 写前闭集与形状准入，[C6b18](ST1C6b18-Task错误cause版本化持久化.md) 补 Task terminal cause v2 与 v1 兼容。队列、资源声明与槽位总量、失效候选保留、共享实例/回调原件、观察与编排内容成本继续由后续 C6b/c/d/C7 收口。
+C6b4–b10 修复消息、观察资源及 Diagnostics 并发，[C6b11](ST1C6b11-观察出口失败记录资源隔离.md) 隔离三服务 exporter 失败记录 OOM，[C6b12](ST1C6b12-观察出口快照无分配发布.md) 消除完整 exporter 向量复制分配，[C6b13](ST1C6b13-编排定义枚举准入.md) 补 Workflow/Script 定义枚举，[C6b14](ST1C6b14-资源声明枚举与算术准入.md) 补资源声明准入，[C6b15](ST1C6b15-版本解析策略枚举准入.md) 补 Command/Query 解析策略与观察精确性，[C6b16](ST1C6b16-快照存储写入证明准入.md) 验证 Snapshot Store 写入证明，[C6b17](ST1C6b17-持久DTO写前准入.md) 补 Journal/Task/Workflow 持久 DTO 写前闭集与形状准入，[C6b18](ST1C6b18-Task错误cause版本化持久化.md) 补 Task terminal cause v2 与 v1 兼容，[C6b19](ST1C6b19-Host与State状态边界.md) 补 Host/Runtime/State 状态分类和 Project/Document 生命周期持久状态证据。队列、资源声明与槽位总量、失效候选保留、共享实例/回调原件、观察与编排内容成本继续由后续 C6b/c/d/C7 收口。
 
 C6b18 本地检查点：真实 Release 红灯确认 Task terminal v1 静默丢弃 cause，嵌套非法枚举、环和第 33 层均可写入，升级后等价 v1 重放还会误判冲突。修复为 v2 有界 cause、写读双向失败关闭及精确 v1 读取/幂等兼容；Release 全集 484/484、Debug/Release 扩大选集各 225+4、ASan 三轮 687 次通过，见 [交付](../阶段交付/2026-09-05-ST1C6b18-Task错误cause版本化持久化.md)。下一步继续 Host、State 与其他持久类型/格式。
+
+C6b19 执行方向按可达入口重新分层：AppKernel/Module/Project/Document/PersistenceOwnership 状态是观察结果，不新增任意整数写入口；RevisionScope 与 ObjectPersistencePolicy 保留既有闭集准入；Project/Document persistence state 是实际写入材料，必须在序列化和事务前拒绝未知值。源码确认生产实现已经满足，新增 Document 6/255 负例和行级零变更证明，不为 `RevisionSet::at()` 的合法闭集前置条件引入静默默认。最终 Release 全集 486/486、定向 Debug/Release 各 11/11、ASan 三轮 33 次通过，见 [交付](../阶段交付/2026-09-05-ST1C6b19-Host与State状态边界.md)。下一步 C6b20 逐项审计 Idempotency、ExternalEffect、Diagnostic、恢复/会话 DTO 与剩余版本，再对账 71 个公共头；随后才进入 C6c/d。
 
 同步 handler/validator/日志回调不会因设置 timeout 就获得可抢占中断能力。C6d 必须区分执行预算、等待超时、协作取消、Task 完成与最终 executor drain；不能将调用返回超时当成副作用已停止或资源可销毁。
