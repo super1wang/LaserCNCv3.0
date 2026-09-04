@@ -889,6 +889,74 @@ TEST_CASE("WorkflowRegistry rejects dependency errors and invalid step shapes", 
     CHECK(std::string(retry.error().code.value()) == "Workflow.RetryUnsupported");
 }
 
+TEST_CASE("Workflow and Script registries reject unknown definition enum values",
+          "[workflow][script][registry][c6b13]")
+{
+    SECTION("workflow step kind") {
+        CommandRegistry commands;
+        QueryRegistry queries;
+        WorkflowRegistry workflows(commands, queries);
+        auto step = barrierStep("step.unknown-kind", {});
+        step.kind = static_cast<WorkflowStepKind>(255U);
+        auto registered = workflows.registerDefinition(workflowDefinition({std::move(step)}));
+        REQUIRE_FALSE(registered.hasValue());
+        CHECK(std::string(registered.error().code.value()) == "Workflow.InvalidStepKind");
+    }
+
+    SECTION("workflow predicate kind") {
+        CommandRegistry commands;
+        QueryRegistry queries;
+        WorkflowRegistry workflows(commands, queries);
+        auto step = barrierStep("step.unknown-predicate", {});
+        step.kind = WorkflowStepKind::Assert;
+        step.condition = WorkflowPredicate {
+            static_cast<WorkflowPredicateKind>(255U), "flag", Value {true}};
+        auto registered = workflows.registerDefinition(workflowDefinition({std::move(step)}));
+        REQUIRE_FALSE(registered.hasValue());
+        CHECK(std::string(registered.error().code.value()) == "Workflow.InvalidPredicateKind");
+    }
+
+    SECTION("script node kind") {
+        CommandRegistry commands;
+        QueryRegistry queries;
+        WorkflowRegistry workflows(commands, queries);
+        ScriptRegistry scripts(commands, queries, workflows);
+        auto node = scriptNode("node.unknown-kind", static_cast<ScriptNodeKind>(255U));
+        auto registered = scripts.registerDefinition(
+            scriptDefinition("script.unknown-node-kind", {std::move(node)}));
+        REQUIRE_FALSE(registered.hasValue());
+        CHECK(std::string(registered.error().code.value()) == "Script.InvalidNodeKind");
+    }
+
+    SECTION("script predicate kind") {
+        CommandRegistry commands;
+        QueryRegistry queries;
+        WorkflowRegistry workflows(commands, queries);
+        ScriptRegistry scripts(commands, queries, workflows);
+        auto node = scriptNode("node.unknown-predicate", ScriptNodeKind::Assert);
+        node.predicate = WorkflowPredicate {
+            static_cast<WorkflowPredicateKind>(255U), "flag", Value {true}};
+        auto registered = scripts.registerDefinition(
+            scriptDefinition("script.unknown-predicate", {std::move(node)}));
+        REQUIRE_FALSE(registered.hasValue());
+        CHECK(std::string(registered.error().code.value()) == "Script.InvalidPredicateKind");
+    }
+
+    SECTION("script wait target") {
+        CommandRegistry commands;
+        QueryRegistry queries;
+        WorkflowRegistry workflows(commands, queries);
+        ScriptRegistry scripts(commands, queries, workflows);
+        auto node = scriptNode("node.unknown-wait-target", ScriptNodeKind::Wait);
+        node.wait = ScriptWait {
+            static_cast<ScriptWaitTarget>(255U), "waitingId", "waitingResult"};
+        auto registered = scripts.registerDefinition(
+            scriptDefinition("script.unknown-wait-target", {std::move(node)}));
+        REQUIRE_FALSE(registered.hasValue());
+        CHECK(std::string(registered.error().code.value()) == "Script.InvalidWaitTarget");
+    }
+}
+
 TEST_CASE("AppKernel freezes only workflows with exact idempotent operations", "[workflow][kernel]")
 {
     AppKernel kernel;

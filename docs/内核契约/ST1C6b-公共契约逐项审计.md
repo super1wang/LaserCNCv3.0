@@ -88,6 +88,15 @@ SQLite 的失败为 Validation/Persistence.InvalidOptions；Snapshot 为 Validat
 | 同上：EventFilter、EventDeliveryFailure/Report、EventCallback | Filter：optional kind/name；Failure：subscriptionId/error；Report：matched/delivered/queued/coalesced 四个 size_t 默认 0、failures 数组；Callback=function&lt;void(const EventEnvelope&)&gt; | Report 的 Result 成功不等于全部 subscriber 成功；失败在 failures 内，Queued 更不等于已送达。计数、错误总量和回调 payload 寿命需声明；不能在回调返回后保留指向临时 envelope 的引用 |
 | 同上：EventSubscription、EventBus | Subscription 不可复制、可移动，id/cancel noexcept，析构取消；Bus 不可复制，subscribe(id,filter,mode,callback) → Result&lt;Subscription&gt;；两种 publish → Result&lt;Report&gt;；drainQueued(maximumDeliveries=size_t(-1)) → Report；subscriptionCount/queuedCount | C6b4 拒绝未知 mode/filter.kind，并以私有实例身份防同名复用错投。C6b5 锁外释放捕获资源、锁外逐次复制并将复制异常按订阅隔离，见 [回调资源契约](ST1C6b5-消息回调资源与异常边界.md)。取消不排空已有快照，原件可延迟销毁；按值参数和全局 OOM 不承诺 noexcept。队列/订阅/合并 key 总量归 C6c/d |
 
+## Workflow 与 Script 定义声明
+
+| 文件与声明 | 字段及公开操作 | 已知边界与必须补查 |
+| --- | --- | --- |
+| [workflow.hpp](../../include/lasercnc/runtime/workflow.hpp)：WorkflowStepKind、WorkflowPredicateKind、Retry/Call/Step/Definition | StepKind 六种 Command/Query/WaitTask/Assign/Assert/Barrier；PredicateKind 五种 Exists/IsTrue/Equals/NotEquals/ArrayNotEmpty。Step 还含依赖、condition、command/query、模板与绑定、timeout、retry、compensation；Definition 含 descriptor、steps、resultTemplate | C6b13 在 registerDefinition 前白名单验证 StepKind 与所有可选 PredicateKind，未知值分别为 Workflow.InvalidStepKind/InvalidPredicateKind。图、引用和摘要既有规则不变；字符串、Value、节点/依赖/重试总量与持久状态/wire 仍须审计 |
+| [script.hpp](../../include/lasercnc/runtime/script.hpp)：ScriptNodeKind、ScriptWaitTarget、Call/Wait/Include/Node/Definition | NodeKind 九种 Command/Query/Workflow/Wait/Assign/Assert/If/ForEach/Include；WaitTarget 为 Task/Workflow。Node 含五类可选调用、谓词、三组递归子节点、模板/绑定与 maxIterations；Definition 含 descriptor、nodes、resultTemplate | C6b13 在 registerDefinition 前白名单验证 NodeKind、复用的 PredicateKind及 WaitTarget，未知值分别为 Script.InvalidNodeKind/InvalidPredicateKind/InvalidWaitTarget。已有深度 32、节点 10000、单循环 10000 是局部定义限制，不等于 Value/字符串/执行总量和持久恢复预算已签核 |
+
+C6b13 只修改 Registry 私有实现与错误分支，不改两份公共头、枚举底层值或定义 DTO；非法定义从“可注册、以后行为不确定/失败”收紧为组合期 Validation 拒绝。Workflow/Script 的 Request、Snapshot、状态机与 SQLite 检查点字段仍须在后续状态/持久族账本逐项登记。
+
 ## 后续顺序（保留完整目标）
 
 C6b5 登记的观察负例中，前三类由 C6b6 取得真实红灯并修复；以下按证据区分已补范围与剩余项：
@@ -99,6 +108,6 @@ C6b5 登记的观察负例中，前三类由 C6b6 取得真实红灯并修复；
 
 以上与观察身份淘汰复用、活动总量、时间顺序和资源预算账本并存；不能以修好某一个枚举后删掉其他必须项。
 
-1. C6b2–b10 检查点保留；C6b11 隔离三服务 exporter 失败记录 OOM，C6b12 消除完整 exporter 向量快照分配，见 [交付](../阶段交付/2026-09-05-ST1C6b12-观察出口快照无分配发布.md)。下一步补 Host/执行/状态/持久族 DTO 与格式；不以观察局部修复代签其他入口。
+1. C6b2–b12 检查点保留；C6b13 补 Workflow/Script 定义枚举准入，见 [交付](../阶段交付/2026-09-05-ST1C6b13-编排定义枚举准入.md)。下一步补 Host/执行/状态/持久族 DTO 与格式；不以观察或编排局部修复代签其他入口。
 2. 继续 Foundation、Observability、Messaging 已登记的行为缺口及 Host/执行/状态/持久族逐类型、枚举和 DTO 字段；将源码兼容、权限阶段、线程/寿命、Error cause 和 wire 版本分别关联到测试。已修复的 Schema/消息枚举与合并/错投仅覆盖各子节点列出的范围；观察记录的未知枚举、数值/终态/寿命问题不因“非业务真值”而免审。
 3. C6c/d 执行统一预算、同步与 Task、终态保留；C7 测容量，C8 完整日志/脚本/私有头门禁，ST1D 最终三配置签核。上述均未被本轮 8 个 Adapter 声明登记替代。

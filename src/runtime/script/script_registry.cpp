@@ -36,6 +36,46 @@ foundation::Error scriptError(
         std::move(code), category, std::move(message), foundation::Value {std::move(details)});
 }
 
+bool validNodeKind(ScriptNodeKind kind) noexcept
+{
+    switch(kind) {
+    case ScriptNodeKind::Command:
+    case ScriptNodeKind::Query:
+    case ScriptNodeKind::Workflow:
+    case ScriptNodeKind::Wait:
+    case ScriptNodeKind::Assign:
+    case ScriptNodeKind::Assert:
+    case ScriptNodeKind::If:
+    case ScriptNodeKind::ForEach:
+    case ScriptNodeKind::Include:
+        return true;
+    }
+    return false;
+}
+
+bool validPredicateKind(WorkflowPredicateKind kind) noexcept
+{
+    switch(kind) {
+    case WorkflowPredicateKind::Exists:
+    case WorkflowPredicateKind::IsTrue:
+    case WorkflowPredicateKind::Equals:
+    case WorkflowPredicateKind::NotEquals:
+    case WorkflowPredicateKind::ArrayNotEmpty:
+        return true;
+    }
+    return false;
+}
+
+bool validWaitTarget(ScriptWaitTarget target) noexcept
+{
+    switch(target) {
+    case ScriptWaitTarget::Task:
+    case ScriptWaitTarget::Workflow:
+        return true;
+    }
+    return false;
+}
+
 foundation::Result<void> validateNodeShape(
     const ScriptDefinition& definition,
     const ScriptNode& node)
@@ -48,6 +88,12 @@ foundation::Result<void> validateNodeShape(
             definition.descriptor.name,
             &node.nodeId));
     };
+    if(!validNodeKind(node.kind)) {
+        return fail("Script.InvalidNodeKind", "Script node kind is invalid");
+    }
+    if(node.predicate.has_value() && !validPredicateKind(node.predicate->kind)) {
+        return fail("Script.InvalidPredicateKind", "Script predicate kind is invalid");
+    }
     const auto callCount = static_cast<std::size_t>(node.command.has_value())
         + static_cast<std::size_t>(node.query.has_value())
         + static_cast<std::size_t>(node.workflow.has_value())
@@ -73,6 +119,9 @@ foundation::Result<void> validateNodeShape(
         if(!node.wait.has_value() || callCount != 1U
            || node.wait->identityVariablePath.empty()) {
             return fail("Script.InvalidWaitNode", "A script wait node is invalid");
+        }
+        if(!validWaitTarget(node.wait->target)) {
+            return fail("Script.InvalidWaitTarget", "Script wait target is invalid");
         }
         break;
     case ScriptNodeKind::Assign:

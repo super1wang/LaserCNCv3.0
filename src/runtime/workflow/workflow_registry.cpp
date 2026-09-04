@@ -32,6 +32,33 @@ foundation::Error workflowError(
         std::move(code), category, std::move(message), foundation::Value {std::move(details)});
 }
 
+bool validStepKind(WorkflowStepKind kind) noexcept
+{
+    switch(kind) {
+    case WorkflowStepKind::Command:
+    case WorkflowStepKind::Query:
+    case WorkflowStepKind::WaitTask:
+    case WorkflowStepKind::Assign:
+    case WorkflowStepKind::Assert:
+    case WorkflowStepKind::Barrier:
+        return true;
+    }
+    return false;
+}
+
+bool validPredicateKind(WorkflowPredicateKind kind) noexcept
+{
+    switch(kind) {
+    case WorkflowPredicateKind::Exists:
+    case WorkflowPredicateKind::IsTrue:
+    case WorkflowPredicateKind::Equals:
+    case WorkflowPredicateKind::NotEquals:
+    case WorkflowPredicateKind::ArrayNotEmpty:
+        return true;
+    }
+    return false;
+}
+
 foundation::Result<void> validateStepShape(
     const WorkflowDefinition& definition,
     const WorkflowStep& step)
@@ -44,6 +71,13 @@ foundation::Result<void> validateStepShape(
             definition.descriptor.name,
             &step.stepId));
     };
+
+    if(!validStepKind(step.kind)) {
+        return fail("Workflow.InvalidStepKind", "Workflow step kind is invalid");
+    }
+    if(step.condition.has_value() && !validPredicateKind(step.condition->kind)) {
+        return fail("Workflow.InvalidPredicateKind", "Workflow predicate kind is invalid");
+    }
 
     if(step.retry.maxAttempts == 0U || step.retry.backoff.count() < 0) {
         return fail("Workflow.InvalidRetryPolicy", "Workflow retry policy is invalid");

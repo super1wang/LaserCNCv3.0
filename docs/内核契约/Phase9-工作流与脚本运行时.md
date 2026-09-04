@@ -8,6 +8,8 @@ Phase 9 已验收。本阶段只实现 Application Kernel 自有的 Workflow Run
 
 当前已完成 Workflow 类型/Registry、有界推进器、Task 等待、重试/取消/补偿、SQLite v6 检查点、AppKernel 恢复、结构化 Script Runtime、全链路观测和独立进程恢复门禁。Debug、Release、重复性、Production-only 与架构扫描均已通过，Phase 9 可以作为上层模块建设前的内核基线。
 
+C6b13 补充冻结准入：WorkflowRegistry 显式拒绝未知 WorkflowStepKind/WorkflowPredicateKind，ScriptRegistry 显式拒绝未知 ScriptNodeKind/WorkflowPredicateKind/ScriptWaitTarget；非法结构化定义不得进入注册表、引用解析、Freeze、实例执行或恢复。错误与兼容边界见 [编排定义枚举契约](ST1C6b13-编排定义枚举准入.md)。该增量不代签 DTO 内容预算、持久状态枚举或同步推进取消。
+
 ## 总体边界
 
 ```text
