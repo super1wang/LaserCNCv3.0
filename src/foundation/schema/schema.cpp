@@ -2,9 +2,39 @@
 
 #include <algorithm>
 #include <cctype>
+#include <string>
 #include <utility>
 
 namespace lasercnc::foundation {
+namespace {
+
+std::size_t budgetLimit(ValueBudgetViolation violation) noexcept
+{
+    switch(violation) {
+    case ValueBudgetViolation::Depth: return kernelValueBudget.maximumDepth;
+    case ValueBudgetViolation::Nodes: return kernelValueBudget.maximumNodes;
+    case ValueBudgetViolation::TextBytes: return kernelValueBudget.maximumTextBytes;
+    case ValueBudgetViolation::None:
+    case ValueBudgetViolation::InvalidBudget:
+        return 0U;
+    }
+    return 0U;
+}
+
+std::size_t budgetActual(const ValueBudgetAssessment& assessment) noexcept
+{
+    switch(assessment.violation) {
+    case ValueBudgetViolation::Depth: return assessment.maximumDepth;
+    case ValueBudgetViolation::Nodes: return assessment.nodes;
+    case ValueBudgetViolation::TextBytes: return assessment.textBytes;
+    case ValueBudgetViolation::None:
+    case ValueBudgetViolation::InvalidBudget:
+        return 0U;
+    }
+    return 0U;
+}
+
+} // namespace
 
 Result<Schema> Schema::create(
     SchemaId id,
@@ -37,7 +67,34 @@ Result<Schema> Schema::create(
             "Schema constraints must be a Value object"));
     }
 
+    const auto constraintBudget = assessValueBudget(constraints);
+    if(!constraintBudget.accepted()) {
+        return Result<Schema>::failure(makeError(
+            "Foundation.SchemaBudgetExceeded",
+            ErrorCategory::Validation,
+            "Schema constraints exceed the Kernel Value budget",
+            Value {Value::Object {
+                {"actual", Value {std::to_string(budgetActual(constraintBudget))}},
+                {"dimension", Value {std::string(valueBudgetViolationName(
+                    constraintBudget.violation))}},
+                {"limit", Value {std::to_string(budgetLimit(constraintBudget.violation))}},
+                {"material", Value {"constraints"}},
+            }}));
+    }
+
     if(unit.has_value()) {
+        if(unit->size() > kernelValueBudget.maximumTextBytes) {
+            return Result<Schema>::failure(makeError(
+                "Foundation.SchemaUnitBudgetExceeded",
+                ErrorCategory::Validation,
+                "Schema unit exceeds the Kernel text byte budget",
+                Value {Value::Object {
+                    {"actual", Value {std::to_string(unit->size())}},
+                    {"dimension", Value {"textBytes"}},
+                    {"limit", Value {std::to_string(kernelValueBudget.maximumTextBytes)}},
+                    {"material", Value {"unit"}},
+                }}));
+        }
         const bool onlyWhitespace = unit->empty()
             || std::all_of(
                 unit->begin(),

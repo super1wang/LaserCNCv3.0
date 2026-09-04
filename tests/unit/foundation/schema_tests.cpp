@@ -5,6 +5,7 @@
 #include <compare>
 #include <cstdint>
 #include <string>
+#include <utility>
 
 using namespace lasercnc::foundation;
 
@@ -105,4 +106,35 @@ TEST_CASE("Schema preserves every declared root kind without changing metadata",
             CHECK(schema.value().unit() == std::optional<std::string>{"mm"});
         }
     }
+}
+
+TEST_CASE("Schema rejects constraints beyond the kernel value budget", "[foundation][schema][budget][c6c1]")
+{
+    Value nested {Value::Object {}};
+    for(std::size_t depth = 0U; depth < kernelValueBudget.maximumDepth; ++depth) {
+        nested = Value {Value::Object {{"level", std::move(nested)}}};
+    }
+    auto id = SchemaId::create("schema.over-budget");
+    REQUIRE(id);
+    const auto schema = Schema::create(
+        std::move(id).value(),
+        Version {1U, 0U, 0U},
+        SchemaKind::Object,
+        std::move(nested));
+    REQUIRE_FALSE(schema);
+    CHECK(std::string(schema.error().code.value()) == "Foundation.SchemaBudgetExceeded");
+}
+
+TEST_CASE("Schema rejects unit text beyond the kernel value budget", "[foundation][schema][budget][c6c1]")
+{
+    auto id = SchemaId::create("schema.unit-over-budget");
+    REQUIRE(id);
+    const auto schema = Schema::create(
+        std::move(id).value(),
+        Version {1U, 0U, 0U},
+        SchemaKind::Number,
+        Value {Value::Object {}},
+        std::string(kernelValueBudget.maximumTextBytes + 1U, 'u'));
+    REQUIRE_FALSE(schema);
+    CHECK(std::string(schema.error().code.value()) == "Foundation.SchemaUnitBudgetExceeded");
 }

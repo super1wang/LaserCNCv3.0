@@ -1,8 +1,10 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -61,5 +63,43 @@ public:
 private:
     Storage storage_;
 };
+
+struct ValueBudget final {
+    std::size_t maximumDepth{64U};
+    std::size_t maximumNodes{100000U};
+    std::size_t maximumTextBytes{16U * 1024U * 1024U};
+    std::size_t maximumEncodedBytes{64U * 1024U * 1024U};
+};
+
+inline constexpr ValueBudget kernelValueBudget {};
+
+enum class ValueBudgetViolation : std::uint8_t {
+    None,
+    InvalidBudget,
+    Depth,
+    Nodes,
+    TextBytes
+};
+
+struct ValueBudgetAssessment final {
+    std::size_t maximumDepth{0U};
+    std::size_t nodes{0U};
+    std::size_t textBytes{0U};
+    ValueBudgetViolation violation{ValueBudgetViolation::None};
+
+    [[nodiscard]] bool accepted() const noexcept
+    {
+        return violation == ValueBudgetViolation::None;
+    }
+};
+
+// Limits passed here may tighten, but never widen, the Kernel hard ceiling.
+// 中文翻译：传入限制可以收紧，但不能放宽内核硬上限。
+[[nodiscard]] ValueBudgetAssessment assessValueBudget(
+    const Value& value,
+    const ValueBudget& budget = kernelValueBudget) noexcept;
+
+[[nodiscard]] std::string_view valueBudgetViolationName(
+    ValueBudgetViolation violation) noexcept;
 
 } // namespace lasercnc::foundation

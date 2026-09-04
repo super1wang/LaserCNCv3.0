@@ -2,6 +2,8 @@
 
 #include <lasercnc/foundation/error.hpp>
 
+#include "../../value_budget_support.hpp"
+
 #include <jsoncons/json.hpp>
 #include <jsoncons_ext/jsonschema/jsonschema.hpp>
 
@@ -9,12 +11,16 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace lasercnc::infrastructure {
 namespace {
 
 using Json = jsoncons::json;
+using detail::ConversionBudget;
+using detail::ValueBudgetExceeded;
+using detail::budgetError;
 
 Json toJson(const foundation::Value& value)
 {
@@ -47,8 +53,9 @@ Json toJson(const foundation::Value& value)
     throw std::logic_error("Unknown Kernel Value kind");
 }
 
-foundation::Value fromJson(const Json& value)
+foundation::Value fromJson(const Json& value, ConversionBudget& budget, std::size_t depth)
 {
+    budget.enter(depth);
     if(value.is_null()) {
         return foundation::Value {};
     }
@@ -69,20 +76,24 @@ foundation::Value fromJson(const Json& value)
         return foundation::Value {value.as<double>()};
     }
     if(value.is_string()) {
-        return foundation::Value {value.as<std::string>()};
+        auto text = value.as<std::string>();
+        budget.addText(text.size());
+        return foundation::Value {std::move(text)};
     }
     if(value.is_array()) {
         foundation::Value::Array result;
         result.reserve(value.size());
         for(const auto& item : value.array_range()) {
-            result.push_back(fromJson(item));
+            result.push_back(fromJson(item, budget, depth + 1U));
         }
         return foundation::Value {std::move(result)};
     }
     if(value.is_object()) {
         foundation::Value::Object result;
         for(const auto& member : value.object_range()) {
-            result.emplace(std::string(member.key()), fromJson(member.value()));
+            std::string key(member.key());
+            budget.addText(key.size());
+            result.emplace(std::move(key), fromJson(member.value(), budget, depth + 1U));
         }
         return foundation::Value {std::move(result)};
     }
@@ -122,9 +133,26 @@ foundation::Error adapterError(const char* code, const char* message, const std:
 
 foundation::Result<std::string> JsonconsAdapter::serialize(const foundation::Value& value) const
 {
+    const auto assessment = foundation::assessValueBudget(value);
+    if(!assessment.accepted()) {
+        return foundation::Result<std::string>::failure(budgetError(
+            "Serialization.ValueBudgetExceeded",
+            "Kernel Value exceeds the serialization budget",
+            assessment,
+            "value"));
+    }
     try {
         std::string output;
         jsoncons::encode_json(toJson(value), output);
+        if(output.size() > foundation::kernelValueBudget.maximumEncodedBytes) {
+            return foundation::Result<std::string>::failure(budgetError(
+                "Serialization.OutputBudgetExceeded",
+                "JSON output exceeds the encoded byte budget",
+                "encodedBytes",
+                output.size(),
+                foundation::kernelValueBudget.maximumEncodedBytes,
+                "output"));
+        }
         return foundation::Result<std::string>::success(std::move(output));
     } catch(const std::exception& exception) {
         return foundation::Result<std::string>::failure(
@@ -134,9 +162,43 @@ foundation::Result<std::string> JsonconsAdapter::serialize(const foundation::Val
 
 foundation::Result<foundation::Value> JsonconsAdapter::deserialize(std::string_view payload) const
 {
+    if(payload.size() > foundation::kernelValueBudget.maximumEncodedBytes) {
+        return foundation::Result<foundation::Value>::failure(budgetError(
+            "Serialization.InputBudgetExceeded",
+            "JSON input exceeds the encoded byte budget",
+            "encodedBytes",
+            payload.size(),
+            foundation::kernelValueBudget.maximumEncodedBytes,
+            "input"));
+    }
     try {
-        return foundation::Result<foundation::Value>::success(
-            fromJson(Json::parse(std::string(payload))));
+        jsoncons::json_options options;
+        options.max_nesting_depth(
+            static_cast<int>(foundation::kernelValueBudget.maximumDepth));
+        ConversionBudget budget;
+        auto value = fromJson(
+            Json::parse(payload.data(), payload.size(), options),
+            budget,
+            1U);
+        return foundation::Result<foundation::Value>::success(std::move(value));
+    } catch(const ValueBudgetExceeded& exception) {
+        return foundation::Result<foundation::Value>::failure(budgetError(
+            "Serialization.ValueBudgetExceeded",
+            "Decoded JSON exceeds the Kernel Value budget",
+            exception,
+            "input"));
+    } catch(const jsoncons::ser_error& exception) {
+        if(exception.code() == jsoncons::json_errc::max_nesting_depth_exceeded) {
+            return foundation::Result<foundation::Value>::failure(budgetError(
+                "Serialization.ValueBudgetExceeded",
+                "Decoded JSON exceeds the Kernel Value nesting budget",
+                "depth",
+                foundation::kernelValueBudget.maximumDepth + 1U,
+                foundation::kernelValueBudget.maximumDepth,
+                "input"));
+        }
+        return foundation::Result<foundation::Value>::failure(
+            adapterError("Serialization.JsonParseFailed", "JSON parsing failed", exception));
     } catch(const std::exception& exception) {
         return foundation::Result<foundation::Value>::failure(
             adapterError("Serialization.JsonParseFailed", "JSON parsing failed", exception));
@@ -147,6 +209,22 @@ foundation::Result<void> JsonconsAdapter::validate(
     const foundation::Schema& schema,
     const foundation::Value& value) const
 {
+    const auto constraints = foundation::assessValueBudget(schema.constraints());
+    if(!constraints.accepted()) {
+        return foundation::Result<void>::failure(budgetError(
+            "Serialization.ValueBudgetExceeded",
+            "Schema constraints exceed the Kernel Value budget",
+            constraints,
+            "schema.constraints"));
+    }
+    const auto input = foundation::assessValueBudget(value);
+    if(!input.accepted()) {
+        return foundation::Result<void>::failure(budgetError(
+            "Serialization.ValueBudgetExceeded",
+            "Schema input exceeds the Kernel Value budget",
+            input,
+            "value"));
+    }
     try {
         Json schemaJson = toJson(schema.constraints());
         if(const char* type = schemaType(schema.rootKind()); type != nullptr) {

@@ -5,6 +5,7 @@ target_sources(
     lasercnc_infrastructure
     PRIVATE
         file_path_validation.hpp
+        value_budget_support.hpp
         config/toml11/toml_config_adapter.cpp
         execution/bs_thread_pool/bs_thread_pool_executor.cpp
         hash/windows/sha256_hash_service.cpp
