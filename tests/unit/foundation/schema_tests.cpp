@@ -66,3 +66,43 @@ TEST_CASE("Schema rejects invalid constraint and unit metadata", "[foundation][s
     REQUIRE_FALSE(badUnit.hasValue());
     CHECK(std::string(badUnit.error().code.value()) == "Foundation.SchemaUnitInvalid");
 }
+
+TEST_CASE("Schema rejects every undefined root kind before other metadata", "[foundation][schema][c6]")
+{
+    for(unsigned int raw = 8U; raw <= 255U; ++raw) {
+        DYNAMIC_SECTION("rootKind=" << raw) {
+            auto id = SchemaId::create("schema.unknown-kind");
+            REQUIRE(id);
+            for(const bool invalidMetadata : {false, true}) {
+                INFO("invalidMetadata=" << invalidMetadata);
+                auto schema = Schema::create(id.value(), Version{1U, 0U, 0U},
+                    static_cast<SchemaKind>(raw), invalidMetadata ? Value{"not-object"} : Value{Value::Object{}},
+                    invalidMetadata ? std::optional<std::string>{"   "} : std::nullopt);
+                CHECK_FALSE(schema);
+                if(!schema) {
+                    CHECK(std::string(schema.error().code.value()) == "Foundation.SchemaKindInvalid");
+                    CHECK(schema.error().category == ErrorCategory::Validation);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("Schema preserves every declared root kind without changing metadata", "[foundation][schema][c6]")
+{
+    for(const auto kind : {SchemaKind::Any, SchemaKind::Null, SchemaKind::Boolean,
+            SchemaKind::Integer, SchemaKind::Number, SchemaKind::String, SchemaKind::Array, SchemaKind::Object}) {
+        DYNAMIC_SECTION("rootKind=" << static_cast<unsigned int>(kind)) {
+            auto id = SchemaId::create("schema.known-kind");
+            REQUIRE(id);
+            const Value constraints{Value::Object{{"description", Value{"unchanged"}}}};
+            auto schema = Schema::create(id.value(), Version{2U, 3U, 4U}, kind, constraints, "mm");
+            REQUIRE(schema);
+            CHECK(schema.value().id() == id.value());
+            CHECK(schema.value().version() == Version{2U, 3U, 4U});
+            CHECK(schema.value().rootKind() == kind);
+            CHECK(schema.value().constraints() == constraints);
+            CHECK(schema.value().unit() == std::optional<std::string>{"mm"});
+        }
+    }
+}

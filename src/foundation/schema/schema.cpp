@@ -13,6 +13,23 @@ Result<Schema> Schema::create(
     Value constraints,
     std::optional<std::string> unit)
 {
+    switch(rootKind) {
+    case SchemaKind::Any:
+    case SchemaKind::Null:
+    case SchemaKind::Boolean:
+    case SchemaKind::Integer:
+    case SchemaKind::Number:
+    case SchemaKind::String:
+    case SchemaKind::Array:
+    case SchemaKind::Object:
+        break;
+    default:
+        return Result<Schema>::failure(makeError(
+            "Foundation.SchemaKindInvalid",
+            ErrorCategory::Validation,
+            "Schema root kind must be a declared SchemaKind"));
+    }
+
     if(constraints.kind() != Value::Kind::Object) {
         return Result<Schema>::failure(makeError(
             "Foundation.SchemaConstraintsInvalid",

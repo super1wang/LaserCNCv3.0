@@ -101,7 +101,9 @@ const char* schemaType(foundation::SchemaKind kind)
     case foundation::SchemaKind::Object: return "object";
     case foundation::SchemaKind::Any: return nullptr;
     }
-    return nullptr;
+    // Only explicit Any may omit the root type constraint.
+    // 中文翻译：只有显式 Any 可以省略根类型约束，未知枚举不得弱化为任意类型。
+    throw std::invalid_argument("Unknown Kernel Schema kind");
 }
 
 foundation::Error adapterError(const char* code, const char* message, const std::exception& exception)

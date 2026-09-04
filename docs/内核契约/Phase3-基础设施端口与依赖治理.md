@@ -97,6 +97,8 @@ GitHub 依赖同时记录发布版本与不可变提交。SQLite 使用官方 am
 
 C6b2 补充：[日志身份与轮转准入](ST1C6b2-日志文件身份与轮转准入.md) 将 Windows 文件元数据查询放在 persistence/filesystem/windows，spdlog 的命名与冲突编排留在 logging/spdlog。公共 Options/方法及依赖锁定版本不变；新增路径准入与失败语义按该契约执行，以下 Phase3 历史成绩不自动覆盖新增代码。
 
+C6b3 补充：[Schema 根类型准入](ST1C6b3-Schema根类型准入.md) 先在 Foundation 工厂拒绝未知枚举，jsoncons 仅对显式 Any 省略 type。合法 Any 的其他约束继续执行；Unknown 不得隐式降级。此改动不代替所有 Schema 关键字、数值、编码或统一预算的验证。
+
 2026-09-03：
 
 - 五项 Production 依赖均按固定提交或官方 SHA3-256 获取，版本、许可证和来源统一记录；

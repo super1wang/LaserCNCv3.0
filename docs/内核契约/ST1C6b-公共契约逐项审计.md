@@ -62,7 +62,7 @@ SQLite 的失败为 Validation/Persistence.InvalidOptions；Snapshot 为 Validat
 | [result.hpp](../../include/lasercnc/foundation/result.hpp)：Result&lt;T&gt;、Result&lt;void&gt; | success/failure、hasValue、显式 bool；T 的 value 有 &/const&/&& 重载，error 有 const&/&&；void 无 value 方法。模板拒绝引用和 Error 元素类型 | 错误分支读取 value 或成功分支读取 error 会抛 logic_error；分配、拷贝/移动异常不被 Result 容器自动吸收，不承诺整个接口 noexcept |
 | [strong_id.hpp](../../include/lasercnc/foundation/strong_id.hpp)：StrongId&lt;Tag&gt;、StrongIdHash | create(string) → Result；value → string_view，默认三路比较；Hash 使用 string_view hash；不同 Tag 不互相转换 | 当前按字节使用 iscntrl/isspace 拒绝空/空白/控制字符，无统一长度或 UTF-8 校验；不得当作路径、认证凭据或跨进程持久稳定 hash。locale 对准入是否有影响仍须回归，不能从 ASCII 用例推导任意编码 |
 | [version.hpp](../../include/lasercnc/foundation/version.hpp)：Version | major/minor/patch 三个 uint32_t，均默认 0；toString、默认三路比较 | 没有字符串 parse 或自行协商版本接口；0 值是否合法由所属契约决定，不能从 DTO 构造推出任何协议版本已受支持 |
-| [schema.hpp](../../include/lasercnc/foundation/schema.hpp)：SchemaId、SchemaKind、Schema、ISchemaValidator | SchemaId 是 StrongId 标签；SchemaKind:uint8_t 为 Any/Null/Boolean/Integer/Number/String/Array/Object；create(id,version,rootKind,constraints=空Object,unit=无)；只读 id/version/rootKind/constraints/unit；validate(Schema,Value) | create 当前检查 constraints 为 Object、unit 非空/非全空白；未知 rootKind 的拒绝未在该实现中出现，而 JsonconsAdapter 的 schemaType 默认返回 nullptr。须优先以回归核实是否会把未知类型弱化为 Any，再修复；不是已签核安全行为 |
+| [schema.hpp](../../include/lasercnc/foundation/schema.hpp)：SchemaId、SchemaKind、Schema、ISchemaValidator | SchemaId 是 StrongId 标签；SchemaKind:uint8_t 为 Any/Null/Boolean/Integer/Number/String/Array/Object；create(id,version,rootKind,constraints=空Object,unit=无)；只读 id/version/rootKind/constraints/unit；validate(Schema,Value) | C6b3 已实测原实现将未知类型弱化为 Any，并修复为先检查八种具名枚举，其余返回 Foundation.SchemaKindInvalid，再检查 constraints 为 Object、unit 非空/非全空白；只有显式 Any 允许后端省略 type。见 [准入契约](ST1C6b3-Schema根类型准入.md)，不把根类型修复等同于完整 JSON Schema/预算签核 |
 | [serialization.hpp](../../include/lasercnc/foundation/serialization.hpp)：IValueSerializer | 虚析构；const serialize(Value) → Result&lt;string&gt;，const deserialize(string_view) → Result&lt;Value&gt; | 未携带统一预算或取消参数；输入字节/节点/深度及输出预算不能只依赖某个 JSON 库默认值，C6c 必须跨端点落实 |
 
 ## Observability 声明与后续验证索引
@@ -90,6 +90,6 @@ SQLite 的失败为 Validation/Persistence.InvalidOptions；Snapshot 为 Validat
 
 ## 后续顺序（保留完整目标）
 
-1. C6b2 的日志别名/轮转、合法大小写敏感与真实中间目录回归完成后，优先核实 Schema 未知 rootKind 的 fail-closed 风险；不在本轮日志验证期间修改 Foundation 生产实现。
+1. C6b2 日志检查点保留；C6b3 已复现并修复 Schema 未知 rootKind 弱化为 Any，覆盖完整 uint8_t 未定义范围与合法类型矩阵，统一证据见 [交付](../阶段交付/2026-09-05-ST1C6b3-Schema根类型准入.md)。随后优先核实消息未知枚举、跨版本合并和订阅复用归属，不把静态登记当作行为已完成。
 2. 继续 Foundation、Observability、Messaging 已登记的行为缺口及 Host/执行/状态/持久族逐类型、枚举和 DTO 字段；将源码兼容、权限阶段、线程/寿命、Error cause 和 wire 版本分别关联到测试。优先级包含 Schema/消息的未知枚举准入、Notification 跨版本合并、订阅复用归属；观察记录的数值/终态/寿命问题不因“非业务真值”而免审。
 3. C6c/d 执行统一预算、同步与 Task、终态保留；C7 测容量，C8 完整日志/脚本/私有头门禁，ST1D 最终三配置签核。上述均未被本轮 8 个 Adapter 声明登记替代。
