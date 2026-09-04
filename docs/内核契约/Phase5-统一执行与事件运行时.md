@@ -19,7 +19,7 @@ Phase 5 建立所有 Headless、CLI、未来 GUI/Script/AI 必须共用的 Comma
 - Domain Event 只能由成功提交产生的 CommittedDomainEvent 转换；Notification 和 System Event 使用受限工厂创建，不能伪装成 Domain Event。
 - 支持按事件类别/名称过滤、Immediate/Queued delivery、RAII Subscription lifetime、Trace/Correlation 传播。
 - Notification 合并在 C6b4 收紧为同一订阅实例、事件名、完整 Version 和 coalescing key；Domain/System Event 不合并。取消后公开订阅 ID 的复用不能继承旧排队项，见 [C6b4 契约](ST1C6b4-消息准入与订阅身份.md)。
-- 发布先在锁内准备投递快照，回调始终在锁外执行；回调可以重入发布，单个订阅者异常被转换为 delivery failure，不阻断其他订阅者，也不改变已提交业务状态。
+- 发布在锁内准备投递所有者快照；C6b5 将用户定义复制、调用和捕获资源释放移到锁外，复制/调用异常按订阅隔离。调用方必须检查 delivery failures，取消不等于排空，见 [资源契约](ST1C6b5-消息回调资源与异常边界.md)。这些观察失败不改变已提交业务状态。
 - queued 事件由调用方显式 drain；EventBus 不私建线程，也不把 Phase 6 的长任务 Scheduler 冒充 Host 事件循环。
 
 ## 已建立的 CommandRuntime

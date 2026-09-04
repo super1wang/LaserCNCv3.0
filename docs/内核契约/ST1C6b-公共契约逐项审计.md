@@ -86,10 +86,19 @@ SQLite 的失败为 Validation/Persistence.InvalidOptions；Snapshot 为 Validat
 | [domain_event.hpp](../../include/lasercnc/messaging/domain_event.hpp)：PendingDomainEvent、CommittedDomainEvent | Pending：name/version/aggregateId:optional/payload；Committed：只读 name/version/aggregateId/payload/transactionId/projectId/documentId/revisions/sequence。构造仅友元 TransactionManager/PersistenceService | 事务提交和恢复认证负责事实生成；EventBus 消息观察不是新的事务或业务写入。事件版本/序列/aggregate 与 payload 的预算、持久 wire 对应及重发语义仍须跨事务/持久族核验 |
 | [event_bus.hpp](../../include/lasercnc/messaging/event_bus.hpp)：EventKind、DeliveryMode、TransientEvent、EventEnvelope | Kind:uint8_t Domain/Notification/System；Mode:uint8_t Immediate/Queued；Transient 仅 notification(name,version,payload,optional coalescingKey) 与 system(name,version,payload)。Envelope 只读 kind/name/version/payload，以及 optional aggregateId/transactionId/projectId/documentId/revisions/sequence/correlationId/traceId/coalescingKey，构造仅 EventBus | Domain envelope 携带提交身份；Transient 没有事务/修订身份。C6b4 已复现并修复 Notification 跨版本合并，现按订阅实例/name/完整 version/coalescingKey 隔离；同版本仍更新原位置。见 [消息契约](ST1C6b4-消息准入与订阅身份.md)，不将观察通知合并推导为事务重放或任意版本兼容 |
 | 同上：EventFilter、EventDeliveryFailure/Report、EventCallback | Filter：optional kind/name；Failure：subscriptionId/error；Report：matched/delivered/queued/coalesced 四个 size_t 默认 0、failures 数组；Callback=function&lt;void(const EventEnvelope&)&gt; | Report 的 Result 成功不等于全部 subscriber 成功；失败在 failures 内，Queued 更不等于已送达。计数、错误总量和回调 payload 寿命需声明；不能在回调返回后保留指向临时 envelope 的引用 |
-| 同上：EventSubscription、EventBus | Subscription 不可复制、可移动，id/cancel noexcept，析构取消；Bus 不可复制，subscribe(id,filter,mode,callback) → Result&lt;Subscription&gt;；两种 publish → Result&lt;Report&gt;；drainQueued(maximumDeliveries=size_t(-1)) → Report；subscriptionCount/queuedCount | C6b4 提前拒绝未知 mode/filter.kind，分别为 InvalidDeliveryMode/InvalidFilterKind，保留空 callback/重复 ID/closed 拒绝。共享私有实例标识防止公开 ID 复用错投，覆盖局部批次和真实双线程。取消不排空已取得的回调副本；callback 捕获资源析构重入及复制异常仍须优先核验。默认 drain 数量不是容量，队列/订阅/合并 key 总量归 C6c/d |
+| 同上：EventSubscription、EventBus | Subscription 不可复制、可移动，id/cancel noexcept，析构取消；Bus 不可复制，subscribe(id,filter,mode,callback) → Result&lt;Subscription&gt;；两种 publish → Result&lt;Report&gt;；drainQueued(maximumDeliveries=size_t(-1)) → Report；subscriptionCount/queuedCount | C6b4 拒绝未知 mode/filter.kind，并以私有实例身份防同名复用错投。C6b5 锁外释放捕获资源、锁外逐次复制并将复制异常按订阅隔离，见 [回调资源契约](ST1C6b5-消息回调资源与异常边界.md)。取消不排空已有快照，原件可延迟销毁；按值参数和全局 OOM 不承诺 noexcept。队列/订阅/合并 key 总量归 C6c/d |
 
 ## 后续顺序（保留完整目标）
 
-1. C6b2/b3 检查点保留；C6b4 已复现并修复消息未知枚举、跨版本合并和订阅复用错投，见 [交付](../阶段交付/2026-09-05-ST1C6b4-消息准入与订阅身份.md)。随后优先核实 callback 捕获资源析构重入、用户定义复制/异常边界；不把“调用在锁外”误写成“资源销毁必在锁外”。
+C6b5 扩大门禁期间重新核对观察实现，以下是下一节点的具体负例入口，不是已验证缺陷或已实现规则：
+
+- [LocalTraceService](../../src/runtime/observability/local_trace_service.cpp) 的 end 直接将传入 status 写入完成记录，Running/未定义枚举未在该处准入；需验证活动数量、完成记录、重复 end、析构兜底及 exporter 看到的终态一致性，明确 void noexcept 接口的非法输入行为。
+- [LocalMetricsService](../../src/runtime/observability/local_metrics_service.cpp) 拒绝非有限输入，但累加 value/sum 和递增 count 未在提交前检查溢出。需覆盖 Counter/Gauge/Histogram 的正负有限极值、拒绝前后快照与出口副作用；不能用数值输入合法证明聚合结果合法。
+- [DiagnosticsService](../../src/runtime/observability/diagnostics_service.cpp) 校验返回 id，但未显式校验 status；重复 registerCheck 的临时 Entry 会在注册锁内销毁传入 shared_ptr。需用未知状态及最后一个 check 所有者析构重入分别取证，不能仅复用既有 run/check/exporter 锁外调用正例。
+- [日志观察出口](../../src/runtime/observability/log_observability_exporter.cpp) 是独立公开入口，可绕开 Local 服务直接接收 DTO；需核验未知 kind/status、非有限值、极端时间差和 ILogService 抛异常。日志 Adapter 的未知 LogLevel 映射为 off/unknown，实际拒绝与文件副作用还须真实回归。
+
+以上与观察身份淘汰复用、活动总量、时间顺序和资源预算账本并存；不能以修好某一个枚举后删掉其他必须项。
+
+1. C6b2/b3/b4 检查点保留；C6b5 的 callback 捕获资源析构重入和复制异常取得真实红灯后修复，见 [交付](../阶段交付/2026-09-05-ST1C6b5-消息回调资源与异常边界.md)。随后核实 Observability 的未知枚举、合法终态、有限数值累加溢出、直接出口 DTO 和注册资源销毁路径，不从 EventBus 的局部修复推出全部服务均已安全。
 2. 继续 Foundation、Observability、Messaging 已登记的行为缺口及 Host/执行/状态/持久族逐类型、枚举和 DTO 字段；将源码兼容、权限阶段、线程/寿命、Error cause 和 wire 版本分别关联到测试。已修复的 Schema/消息枚举与合并/错投仅覆盖各子节点列出的范围；观察记录的未知枚举、数值/终态/寿命问题不因“非业务真值”而免审。
 3. C6c/d 执行统一预算、同步与 Task、终态保留；C7 测容量，C8 完整日志/脚本/私有头门禁，ST1D 最终三配置签核。上述均未被本轮 8 个 Adapter 声明登记替代。

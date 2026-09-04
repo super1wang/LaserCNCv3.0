@@ -19,7 +19,7 @@ struct EventBusCore final {
     struct SubscriptionEntry final {
         EventFilter filter;
         DeliveryMode mode;
-        EventCallback callback;
+        std::shared_ptr<const EventCallback> callback;
         std::shared_ptr<const SubscriptionIdentity> identity;
     };
 
@@ -226,21 +226,29 @@ const kernel::SubscriptionId& EventSubscription::id() const noexcept
 void EventSubscription::cancel() noexcept
 {
     const auto core = core_.lock();
-    if(core != nullptr) {
-        std::lock_guard lock(core->mutex);
-        core->subscriptions.erase(subscriptionId_);
-    }
+    // Disarm before retiring user resources; their destructors may cancel this token again.
+    // 中文翻译：销毁用户资源前先解除令牌，避免析构重入取消同一令牌时误删新订阅。
     core_.reset();
+    if(core != nullptr) {
+        decltype(core->subscriptions)::node_type retired;
+        {
+            std::lock_guard lock(core->mutex);
+            retired = core->subscriptions.extract(subscriptionId_);
+        }
+    }
 }
 
 EventBus::EventBus() : core_(std::make_shared<detail::EventBusCore>()) {}
 
 EventBus::~EventBus()
 {
-    std::lock_guard lock(core_->mutex);
-    core_->closed = true;
-    core_->subscriptions.clear();
-    core_->queued.clear();
+    decltype(core_->subscriptions) retired;
+    {
+        std::lock_guard lock(core_->mutex);
+        core_->closed = true;
+        retired.swap(core_->subscriptions);
+        core_->queued.clear();
+    }
 }
 
 foundation::Result<EventSubscription> EventBus::subscribe(
@@ -273,6 +281,9 @@ foundation::Result<EventSubscription> EventBus::subscribe(
                 "Event filter kind must be a declared EventKind", subscriptionId));
         }
     }
+    // Retain an outside-lock owner even when insertion rejects or throws.
+    // 中文翻译：锁外保留回调所有者，插入拒绝或抛异常时也不在锁内销毁用户捕获资源。
+    const auto ownedCallback = std::make_shared<const EventCallback>(std::move(callback));
     std::lock_guard lock(core_->mutex);
     if(core_->closed) {
         return foundation::Result<EventSubscription>::failure(eventError(
@@ -285,7 +296,7 @@ foundation::Result<EventSubscription> EventBus::subscribe(
     const auto [unused, inserted] = core_->subscriptions.emplace(
         id,
         detail::EventBusCore::SubscriptionEntry {
-            std::move(filter), mode, std::move(callback),
+            std::move(filter), mode, ownedCallback,
             std::make_shared<const detail::EventBusCore::SubscriptionIdentity>()});
     static_cast<void>(unused);
     if(!inserted) {
@@ -344,7 +355,7 @@ foundation::Result<EventDeliveryReport> EventBus::publish(
 foundation::Result<EventDeliveryReport> EventBus::publishEnvelope(EventEnvelope envelope)
 {
     try {
-        using ImmediateDelivery = std::pair<kernel::SubscriptionId, EventCallback>;
+        using ImmediateDelivery = std::pair<kernel::SubscriptionId, std::shared_ptr<const EventCallback>>;
         std::vector<ImmediateDelivery> immediate;
         EventDeliveryReport report;
         {
@@ -392,12 +403,15 @@ foundation::Result<EventDeliveryReport> EventBus::publishEnvelope(EventEnvelope 
                     ++report.queued;
                 }
             }
+            report.failures.reserve(immediate.size());
             core_->queued.swap(nextQueue);
         }
 
-        report.failures.reserve(immediate.size());
-        for(const auto& [subscriptionId, callback] : immediate) {
+        for(const auto& [subscriptionId, captured] : immediate) {
             try {
+                // Copy per delivery, but never run user copy constructors under the registry lock.
+                // 中文翻译：保留每次投递独立副本，但用户定义复制构造不得在注册表锁内执行。
+                const EventCallback callback = *captured;
                 callback(envelope);
                 ++report.delivered;
             } catch(const std::exception& exception) {
@@ -431,6 +445,7 @@ EventDeliveryReport EventBus::drainQueued(std::size_t maximumDeliveries)
         std::lock_guard lock(core_->mutex);
         const auto count = std::min(maximumDeliveries, core_->queued.size());
         deliveries.reserve(count);
+        report.failures.reserve(count);
         for(std::size_t index = 0; index < count; ++index) {
             deliveries.push_back(std::move(core_->queued.front()));
             core_->queued.pop_front();
@@ -439,7 +454,7 @@ EventDeliveryReport EventBus::drainQueued(std::size_t maximumDeliveries)
 
     report.matched = deliveries.size();
     for(const auto& delivery : deliveries) {
-        EventCallback callback;
+        std::shared_ptr<const EventCallback> captured;
         {
             std::lock_guard lock(core_->mutex);
             const auto subscription = core_->subscriptions.find(delivery.subscriptionId);
@@ -448,9 +463,10 @@ EventDeliveryReport EventBus::drainQueued(std::size_t maximumDeliveries)
             if(subscription == core_->subscriptions.end() || subscription->second.identity != delivery.identity) {
                 continue;
             }
-            callback = subscription->second.callback;
+            captured = subscription->second.callback;
         }
         try {
+            const EventCallback callback = *captured;
             callback(delivery.envelope);
             ++report.delivered;
         } catch(const std::exception& exception) {

@@ -6,7 +6,10 @@
 
 #include <memory>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <future>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -53,7 +56,340 @@ CommittedDomainEvent committedEvent()
     return committed.value().events.front();
 }
 
+// Bound a real deadlock regression in its CTest process without detaching unsafe workers.
+// 中文翻译：在独立 CTest 进程内为真实死锁回归设上限，不分离持有悬空引用的工作线程。
+class EventReentryDeadline final {
+public:
+    EventReentryDeadline() : worker_([ready = finished_.get_future()] {
+        if(ready.wait_for(std::chrono::seconds{10}) != std::future_status::ready) {
+            std::fputs("event-reentry-deadline-exceeded\n", stderr);
+            std::fflush(stderr);
+            std::_Exit(86);
+        }
+    }) {}
+    ~EventReentryDeadline() { finished_.set_value(); }
+private:
+    std::promise<void> finished_;
+    std::jthread worker_;
+};
+
+struct EventCapture final {
+    std::function<void()> onDestroy;
+    ~EventCapture() { if(onDestroy) { onDestroy(); } }
+};
+
+struct EventCopyState final {
+    std::function<void()> onCopy;
+    unsigned int calls{0U};
+};
+
+struct EventCopyObserver final {
+    std::shared_ptr<EventCopyState> state;
+    std::shared_ptr<EventCapture> capture;
+    explicit EventCopyObserver(std::shared_ptr<EventCopyState> value, std::shared_ptr<EventCapture> owned = {})
+        : state(std::move(value)), capture(std::move(owned)) {}
+    EventCopyObserver(const EventCopyObserver& other) : state(other.state), capture(other.capture)
+    {
+        if(state->onCopy) { state->onCopy(); }
+    }
+    EventCopyObserver(EventCopyObserver&&) noexcept = default;
+    void operator()(const EventEnvelope&) const { ++state->calls; }
+};
+
+void checkEventCopyReentry(DeliveryMode mode)
+{
+    EventReentryDeadline deadline;
+    EventBus bus;
+    auto state = std::make_shared<EventCopyState>();
+    auto token = bus.subscribe(validId<SubscriptionId>("subscription.copy-reentry"), {}, mode,
+        EventCopyObserver{state});
+    REQUIRE(token);
+    unsigned int copies = 0U;
+    state->onCopy = [&] {
+        ++copies;
+        if(bus.subscriptionCount() != 1U) { throw std::runtime_error("lost subscription"); }
+    };
+    const auto published = bus.publish(TransientEvent::system(validId<EventName>("copy.event"), Version{1U, 0U, 0U}, {}));
+    REQUIRE(published);
+    const auto report = mode == DeliveryMode::Immediate ? published.value() : bus.drainQueued();
+    CHECK(report.delivered == 1U);
+    CHECK(report.failures.empty());
+    CHECK(copies == 1U);
+    CHECK(state->calls == 1U);
+}
+
+void checkEventCopyFailures(DeliveryMode mode)
+{
+    for(unsigned int failure = 0U; failure < 3U; ++failure) {
+        DYNAMIC_SECTION("copy failure=" << failure) {
+            EventBus bus;
+            auto state = std::make_shared<EventCopyState>();
+            auto failing = bus.subscribe(validId<SubscriptionId>("subscription.a-copy-failure"), {}, mode,
+                EventCopyObserver{state});
+            REQUIRE(failing);
+            unsigned int healthyCalls = 0U;
+            auto healthy = bus.subscribe(validId<SubscriptionId>("subscription.z-healthy"), {}, mode,
+                [&](const EventEnvelope&) { ++healthyCalls; });
+            REQUIRE(healthy);
+            state->onCopy = [failure] {
+                if(failure == 0U) { throw std::runtime_error("copy failed"); }
+                if(failure == 1U) { throw 42; }
+                throw std::bad_alloc{};
+            };
+            const auto event = TransientEvent::system(validId<EventName>("copy.event"), Version{1U, 0U, 0U}, {});
+            auto published = bus.publish(event);
+            REQUIRE(published);
+            const auto report = mode == DeliveryMode::Immediate ? published.value() : bus.drainQueued();
+            CHECK(report.matched == 2U);
+            CHECK(report.delivered == 1U);
+            REQUIRE(report.failures.size() == 1U);
+            CHECK(report.failures.front().subscriptionId == failing.value().id());
+            CHECK(std::string(report.failures.front().error.code.value()) == "Event.SubscriberFailed");
+            CHECK(state->calls == 0U);
+            CHECK(healthyCalls == 1U);
+            CHECK(bus.queuedCount() == 0U);
+            state->onCopy = {};
+            published = bus.publish(event);
+            REQUIRE(published);
+            const auto retry = mode == DeliveryMode::Immediate ? published.value() : bus.drainQueued();
+            CHECK(retry.delivered == 2U);
+            CHECK(retry.failures.empty());
+            CHECK(state->calls == 1U);
+            CHECK(healthyCalls == 2U);
+        }
+    }
+}
+
 } // namespace
+
+TEST_CASE("EventBus cancellation releases captures outside its lock", "[messaging][event][c6b5]")
+{
+    EventReentryDeadline deadline;
+    EventBus bus;
+    unsigned int destroyed = 0U;
+    std::size_t observed = 99U;
+    std::optional<EventSubscription> token;
+    std::optional<EventSubscription> replacement;
+    const auto id = validId<SubscriptionId>("subscription.cancel-reentry");
+    auto capture = std::make_shared<EventCapture>();
+    capture->onDestroy = [&] {
+        ++destroyed;
+        observed = bus.subscriptionCount();
+        auto next = bus.subscribe(id, {}, DeliveryMode::Immediate, [](const EventEnvelope&) {});
+        if(next) { replacement.emplace(std::move(next).value()); }
+        token->cancel();
+    };
+    auto subscribed = bus.subscribe(id, {}, DeliveryMode::Immediate,
+        [owned = std::move(capture)](const EventEnvelope&) { static_cast<void>(owned); });
+    REQUIRE(subscribed);
+    token.emplace(std::move(subscribed).value());
+    token->cancel();
+    CHECK(destroyed == 1U);
+    CHECK(observed == 0U);
+    REQUIRE(replacement);
+    CHECK(bus.subscriptionCount() == 1U);
+    token->cancel();
+    CHECK(bus.subscriptionCount() == 1U);
+}
+
+TEST_CASE("EventBus duplicate rejection releases captures outside its lock", "[messaging][event][c6b5]")
+{
+    EventReentryDeadline deadline;
+    EventBus bus;
+    auto kept = bus.subscribe(validId<SubscriptionId>("subscription.duplicate"), {}, DeliveryMode::Immediate,
+        [](const EventEnvelope&) {});
+    REQUIRE(kept);
+    unsigned int destroyed = 0U;
+    std::size_t observed = 99U;
+    auto capture = std::make_shared<EventCapture>();
+    capture->onDestroy = [&] { ++destroyed; observed = bus.subscriptionCount(); };
+    const auto rejected = bus.subscribe(kept.value().id(), {}, DeliveryMode::Immediate,
+        [owned = std::move(capture)](const EventEnvelope&) { static_cast<void>(owned); });
+    REQUIRE_FALSE(rejected);
+    CHECK(std::string(rejected.error().code.value()) == "Event.SubscriptionAlreadyExists");
+    CHECK(destroyed == 1U);
+    CHECK(observed == 1U);
+}
+
+TEST_CASE("EventBus destruction releases captures after closing the registry", "[messaging][event][c6b5]")
+{
+    EventReentryDeadline deadline;
+    unsigned int destroyed = 0U;
+    std::optional<EventSubscription> token;
+    auto bus = std::make_unique<EventBus>();
+    auto capture = std::make_shared<EventCapture>();
+    capture->onDestroy = [&] { ++destroyed; token->cancel(); };
+    auto subscribed = bus->subscribe(validId<SubscriptionId>("subscription.destruct-reentry"), {}, DeliveryMode::Queued,
+        [owned = std::move(capture)](const EventEnvelope&) { static_cast<void>(owned); });
+    REQUIRE(subscribed);
+    token.emplace(std::move(subscribed).value());
+    REQUIRE(bus->publish(TransientEvent::system(validId<EventName>("destroy.event"), Version{1U, 0U, 0U}, {})));
+    bus.reset();
+    CHECK(destroyed == 1U);
+    token->cancel();
+}
+
+TEST_CASE("EventBus immediate callback copies may reenter", "[messaging][event][c6b5]")
+{
+    checkEventCopyReentry(DeliveryMode::Immediate);
+}
+
+TEST_CASE("EventBus queued callback copies may reenter", "[messaging][event][c6b5]")
+{
+    checkEventCopyReentry(DeliveryMode::Queued);
+}
+
+TEST_CASE("EventBus isolates immediate callback copy failures", "[messaging][event][c6b5]")
+{
+    checkEventCopyFailures(DeliveryMode::Immediate);
+}
+
+TEST_CASE("EventBus isolates queued callback copy failures", "[messaging][event][c6b5]")
+{
+    checkEventCopyFailures(DeliveryMode::Queued);
+}
+
+TEST_CASE("EventBus preserves independent mutable callback copies per delivery", "[messaging][event][c6b5]")
+{
+    for(const auto mode : {DeliveryMode::Immediate, DeliveryMode::Queued}) {
+        DYNAMIC_SECTION("mode=" << static_cast<unsigned int>(mode)) {
+            EventBus bus;
+            std::vector<unsigned int> observed;
+            auto token = bus.subscribe(validId<SubscriptionId>("subscription.mutable-copy"), {}, mode,
+                [local = 0U, &observed](const EventEnvelope&) mutable { observed.push_back(++local); });
+            REQUIRE(token);
+            const auto event = TransientEvent::system(validId<EventName>("mutable.event"), Version{1U, 0U, 0U}, {});
+            REQUIRE(bus.publish(event));
+            REQUIRE(bus.publish(event));
+            static_cast<void>(bus.drainQueued());
+            CHECK(observed == std::vector<unsigned int>{1U, 1U});
+        }
+    }
+}
+
+TEST_CASE("EventBus callback copy cancellation retains its captured incarnation", "[messaging][event][c6b5]")
+{
+    for(const auto mode : {DeliveryMode::Immediate, DeliveryMode::Queued}) {
+        DYNAMIC_SECTION("mode=" << static_cast<unsigned int>(mode)) {
+            EventReentryDeadline deadline;
+            EventBus bus;
+            auto state = std::make_shared<EventCopyState>();
+            const auto id = validId<SubscriptionId>("subscription.copy-cancel");
+            auto token = bus.subscribe(id, {}, mode, EventCopyObserver{state});
+            REQUIRE(token);
+            std::optional<EventSubscription> replacement;
+            unsigned int newCalls = 0U;
+            state->onCopy = [&] {
+                token.value().cancel();
+                auto next = bus.subscribe(id, {}, mode, [&](const EventEnvelope&) { ++newCalls; });
+                if(!next) { throw std::runtime_error("replacement failed"); }
+                replacement.emplace(std::move(next).value());
+            };
+            const auto event = TransientEvent::system(validId<EventName>("copy-cancel.event"), Version{1U, 0U, 0U}, {});
+            auto published = bus.publish(event);
+            REQUIRE(published);
+            const auto report = mode == DeliveryMode::Immediate ? published.value() : bus.drainQueued();
+            CHECK(report.delivered == 1U);
+            CHECK(report.failures.empty());
+            CHECK(state->calls == 1U);
+            CHECK(newCalls == 0U);
+            REQUIRE(replacement);
+            published = bus.publish(event);
+            REQUIRE(published);
+            static_cast<void>(bus.drainQueued());
+            CHECK(newCalls == 1U);
+            CHECK(state->calls == 1U);
+        }
+    }
+}
+
+TEST_CASE("EventBus copy failure preserves mixed delivery and later queued candidates", "[messaging][event][c6b5]")
+{
+    EventBus bus;
+    auto state = std::make_shared<EventCopyState>();
+    auto faulty = bus.subscribe(validId<SubscriptionId>("subscription.a-faulty"), {}, DeliveryMode::Immediate,
+        EventCopyObserver{state});
+    REQUIRE(faulty);
+    unsigned int immediateCalls = 0U;
+    auto immediate = bus.subscribe(validId<SubscriptionId>("subscription.b-immediate"), {}, DeliveryMode::Immediate,
+        [&](const EventEnvelope&) { ++immediateCalls; });
+    REQUIRE(immediate);
+    std::vector<Value> received;
+    auto queued = bus.subscribe(validId<SubscriptionId>("subscription.z-queued"), {}, DeliveryMode::Queued,
+        [&](const EventEnvelope& event) { received.push_back(event.payload()); });
+    REQUIRE(queued);
+    state->onCopy = [] { throw std::runtime_error("mixed copy failure"); };
+    for(const char* payload : {"first", "second"}) {
+        const auto report = bus.publish(TransientEvent::system(validId<EventName>("mixed.event"), Version{1U, 0U, 0U}, Value{payload}));
+        REQUIRE(report);
+        CHECK(report.value().matched == 3U);
+        CHECK(report.value().delivered == 1U);
+        CHECK(report.value().queued == 1U);
+        REQUIRE(report.value().failures.size() == 1U);
+        CHECK(report.value().failures.front().subscriptionId == faulty.value().id());
+    }
+    CHECK(immediateCalls == 2U);
+    CHECK(bus.queuedCount() == 2U);
+    const auto drained = bus.drainQueued();
+    CHECK(drained.matched == 2U);
+    CHECK(drained.delivered == 2U);
+    CHECK(drained.failures.empty());
+    CHECK(received == std::vector<Value>{Value{"first"}, Value{"second"}});
+}
+
+TEST_CASE("EventBus retains callback resources while another thread cancels during copying", "[messaging][event][c6b5]")
+{
+    for(const auto mode : {DeliveryMode::Immediate, DeliveryMode::Queued}) {
+        DYNAMIC_SECTION("mode=" << static_cast<unsigned int>(mode)) {
+            EventReentryDeadline deadline;
+            EventBus bus;
+            auto state = std::make_shared<EventCopyState>();
+            auto capture = std::make_shared<EventCapture>();
+            std::weak_ptr<EventCapture> lifetime = capture;
+            unsigned int destroyed = 0U;
+            capture->onDestroy = [&] { ++destroyed; };
+            auto token = bus.subscribe(validId<SubscriptionId>("subscription.copy-barrier"), {}, mode,
+                EventCopyObserver{state, std::move(capture)});
+            REQUIRE(token);
+            std::promise<void> entered;
+            auto enteredFuture = entered.get_future();
+            std::promise<void> release;
+            auto releaseFuture = release.get_future();
+            state->onCopy = [&] {
+                entered.set_value();
+                if(releaseFuture.wait_for(std::chrono::seconds{5}) != std::future_status::ready) {
+                    throw std::runtime_error("copy barrier timed out");
+                }
+            };
+            const auto event = TransientEvent::system(validId<EventName>("copy-barrier.event"), Version{1U, 0U, 0U}, {});
+            if(mode == DeliveryMode::Queued) { REQUIRE(bus.publish(event)); }
+            EventDeliveryReport report;
+            bool published = true;
+            std::jthread worker([&] {
+                if(mode == DeliveryMode::Queued) { report = bus.drainQueued(); }
+                else {
+                    auto result = bus.publish(event);
+                    published = result.hasValue();
+                    if(result) { report = std::move(result).value(); }
+                }
+            });
+            const bool ready = enteredFuture.wait_for(std::chrono::seconds{5}) == std::future_status::ready;
+            if(ready) { token.value().cancel(); }
+            const bool retained = !lifetime.expired();
+            release.set_value();
+            worker.join();
+            REQUIRE(ready);
+            REQUIRE(published);
+            CHECK(retained);
+            CHECK(report.delivered == 1U);
+            CHECK(report.failures.empty());
+            CHECK(state->calls == 1U);
+            CHECK(lifetime.expired());
+            CHECK(destroyed == 1U);
+            CHECK(bus.subscriptionCount() == 0U);
+        }
+    }
+}
 
 TEST_CASE("EventBus delivers committed domain facts with trace context", "[messaging][event]")
 {
