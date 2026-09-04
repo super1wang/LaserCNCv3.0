@@ -18,9 +18,9 @@ Phase 8 已验收。Snapshot、状态 Journal、SQLite Control Plane 和原子�
 
 - Snapshot 保存某一 Document 在明确 RevisionSet 下的完整内核状态，不保存运行时指针、第三方对象或上层大型资产本体。
 - Snapshot payload 进入原子文件 Data Plane；SQLite `snapshot_index` 只保存 SnapshotId、ProjectId、DocumentId、全局 Journal 水位、Revision、存储键、ContentDigest、payload 大小和创建时间。
-- 写入顺序必须先产生临时文件并 flush，再原子替换最终文件，最后提交 SQLite 索引；失败不得留下“索引已成功但文件不存在”的可用记录。
+- 写入顺序必须先产生临时文件并 flush，再不覆盖地原子发布最终文件，最后提交 SQLite 索引；失败不得留下“索引已成功但文件不存在”的可用记录。
 - 恢复只选择状态完整且摘要验证通过的最新 Snapshot；损坏、缺失、格式不兼容或 Revision 元数据不一致时 fail-closed，不能静默降级到不可信状态。
-- `FilesystemSnapshotStore` 只接受由字母、数字、点、下划线和连字符组成且不超过 128 字节的 SnapshotId 文件名；拒绝路径穿越和超限 payload。
+- `FilesystemSnapshotStore` 的 ST1C3b 实现将最多 4096 字节的精确逻辑 SnapshotId 映射为固定摘要文件名，并用外层身份信封校验；不把路径形状的 ID 解释成路径。旧 ASCII 安全文件名保留精确大小写兼容，超限 payload、身份冲突或新旧双格式拒绝。详细兼容及验收状态见 [C3 契约](ST1C3-快照身份与存储键.md)。
 - SnapshotId 是不可变内容身份：相同 ID/相同内容重试返回 AlreadyPresent，相同 ID/不同内容返回 `Snapshot.IdentityConflict`。
 - Windows 文件 Adapter 使用 `CreateFileW -> WriteFile -> FlushFileBuffers -> MoveFileExW(MOVEFILE_WRITE_THROUGH)` 发布；临时文件失败时清理，最终文件不会被覆盖。
 - `captureSnapshot()` 在 SQLite `BEGIN IMMEDIATE` 内确认 Document 局部修订与最新本 Document Journal 一致、ProjectRevision 与最新本项目 Journal 一致，并使用数据库当前全局最大 sequence 作为水位。这样同一项目多文档交错提交时，未刚好写入本 Document 的 ProjectRevision 也不会被误判。

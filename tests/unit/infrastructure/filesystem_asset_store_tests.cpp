@@ -1,4 +1,5 @@
 #include <lasercnc/infrastructure/filesystem_asset_store.hpp>
+#include "snapshot_storage_fixture.hpp"
 #include <lasercnc/infrastructure/sha256_hash_service.hpp>
 #include <lasercnc/foundation/error.hpp>
 
@@ -59,7 +60,7 @@ std::unique_ptr<FilesystemAssetStore> store(const std::filesystem::path& directo
 
 std::filesystem::path filePath(const std::filesystem::path& directory, const AssetRef& reference)
 {
-    return directory / (std::string(reference.id.value()) + ".snapshot");
+    return lasercnc::test::snapshotStoragePath(directory, reference.id.value());
 }
 
 class InjectedHash final : public lasercnc::platform::IHashService {

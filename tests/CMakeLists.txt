@@ -173,6 +173,8 @@ add_executable(
     unit/infrastructure/jsoncons_adapter_tests.cpp
     unit/infrastructure/sha256_hash_service_tests.cpp
     unit/infrastructure/filesystem_snapshot_store_tests.cpp
+    unit/infrastructure/snapshot_storage_key_tests.cpp
+    unit/infrastructure/snapshot_create_probe.cpp
     unit/infrastructure/filesystem_asset_store_tests.cpp
     unit/infrastructure/spdlog_log_service_tests.cpp
     unit/infrastructure/sqlite_persistence_backend_tests.cpp

@@ -3,6 +3,7 @@
 #include <lasercnc/infrastructure/sha256_hash_service.hpp>
 #include <lasercnc/infrastructure/sqlite_persistence_backend.hpp>
 #include <lasercnc/kernel/app_kernel.hpp>
+#include "snapshot_storage_fixture.hpp"
 #include <lasercnc/observability/log_service.hpp>
 
 #include <catch2/catch_test_macros.hpp>
@@ -1349,7 +1350,7 @@ TEST_CASE("Snapshot publication failures preserve the indexed state and permit o
                     CHECK(kernel.documents().snapshot(document).value().revisions() == revisions);
                     CHECK(kernel.history().snapshot(document).value().cursor == HistoryCursor{1U, 1U});
                     CHECK(fixture.journalAfter(document, 0U).value().size() == 1U);
-                    CHECK(std::filesystem::exists(directory / "snapshot.candidate.snapshot") ==
+                    CHECK(std::filesystem::exists(lasercnc::test::snapshotStoragePath(directory, "snapshot.candidate")) ==
                         (stage == "write-after" || stage == "index" || stage == "commit"));
                     REQUIRE(kernel.shutdown().hasValue());
                 }

@@ -1,4 +1,5 @@
 #include <lasercnc/infrastructure/filesystem_asset_store.hpp>
+#include "snapshot_storage_fixture.hpp"
 #include <lasercnc/infrastructure/filesystem_snapshot_store.hpp>
 #include <lasercnc/infrastructure/jsoncons_adapter.hpp>
 #include <lasercnc/infrastructure/sha256_hash_service.hpp>
@@ -143,7 +144,7 @@ std::vector<AssetRef> objectAssets(const AppKernel& kernel)
 
 void damageAsset(const TemporaryRoot& root, const AssetRef& reference)
 {
-    std::ofstream file(root.path / "assets" / (std::string(reference.id.value()) + ".snapshot"),
+    std::ofstream file(lasercnc::test::snapshotStoragePath(root.path / "assets", reference.id.value()),
         std::ios::binary | std::ios::trunc);
     file << "corrupt";
     REQUIRE(file.good());

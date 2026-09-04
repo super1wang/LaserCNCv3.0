@@ -79,7 +79,7 @@ TEST_CASE("FilesystemSnapshotStore publishes immutable payloads atomically", "[i
     removeDirectory(directory);
 }
 
-TEST_CASE("FilesystemSnapshotStore rejects traversal and oversized payloads", "[infrastructure][snapshot]")
+TEST_CASE("FilesystemSnapshotStore isolates path shaped identities and rejects oversized payloads", "[infrastructure][snapshot]")
 {
     CHECK_FALSE(FilesystemSnapshotStore::create({{}, 1U}).hasValue());
     const auto directory = uniqueDirectory();
@@ -91,9 +91,9 @@ TEST_CASE("FilesystemSnapshotStore rejects traversal and oversized payloads", "[
         auto store = std::move(created).value();
         auto traversal = store->writeAtomically(
             validId<SnapshotId>("../escape"), "safe");
-        REQUIRE_FALSE(traversal.hasValue());
-        CHECK(std::string(traversal.error().code.value())
-              == "Snapshot.InvalidIdForStore");
+        REQUIRE(traversal.hasValue());
+        CHECK(store->read(validId<SnapshotId>("../escape")).value() == "safe");
+        REQUIRE(store->remove(validId<SnapshotId>("../escape")));
         auto oversized = store->writeAtomically(
             validId<SnapshotId>("snapshot.large"), "12345");
         REQUIRE_FALSE(oversized.hasValue());

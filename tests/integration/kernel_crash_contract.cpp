@@ -2,6 +2,7 @@
 #include "kernel_test_module.hpp"
 #include "persistence_fixture.hpp"
 #include "kernel_file_crash_probe.hpp"
+#include "snapshot_storage_fixture.hpp"
 
 #include <lasercnc/infrastructure/filesystem_snapshot_store.hpp>
 #include <lasercnc/infrastructure/filesystem_asset_store.hpp>
@@ -260,13 +261,13 @@ std::shared_ptr<CreateHandler> configure(AppKernel& kernel, const std::filesyste
         control.assets = take(FilesystemAssetStore::create({root / "assets", 4096U}, std::make_shared<Sha256HashService>()));
         take(kernel.configureAssetStore(control.assets));
         setKernelFilePublishProbe([&control](const auto& temporary, const auto& target, bool after) {
-            if(!control.armed || target.parent_path() != control.root / "assets") { return; }
+            if(!control.armed || !std::filesystem::equivalent(target.parent_path(), control.root / "assets")) { return; }
             if((!after && control.scenario == "asset-before-rename")
                 || (after && control.scenario == "asset-after-rename")) {
                 check(std::filesystem::exists(temporary) == !after && std::filesystem::exists(target) == after,
                     "Atomic publication file-state drift");
                 check(std::filesystem::file_size(after ? target : temporary)
-                    == 12U + expectedAsset().kind.value().size() + assetContent.size(), "Asset envelope incomplete at rename");
+                    == 24U + expectedAsset().id.value().size() + expectedAsset().kind.value().size() + assetContent.size(), "Asset envelope incomplete at rename");
                 control.terminate(after ? "asset-after-rename" : "asset-before-rename");
             }
         });
@@ -484,7 +485,7 @@ bool damagedAssetScenario(std::string_view scenario)
 
 std::filesystem::path assetPath(const CrashControl& control)
 {
-    return control.root / "assets" / (std::string(expectedAsset().id.value()) + ".snapshot");
+    return test::snapshotStoragePath(control.root / "assets", expectedAsset().id.value());
 }
 
 void damagePublishedAsset(const CrashControl& control)
@@ -519,9 +520,10 @@ void verifyAssetFiles(const CrashControl& control, bool published)
             std::ifstream stream(file.path(), std::ios::binary);
             check(stream.is_open(), "Temporary orphan is unreadable after process exit");
             const std::string payload{std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
-            check(!stream.bad() && payload.starts_with("LCNCAS01")
-                && payload.size() == 12U + expectedAsset().kind.value().size() + assetContent.size()
-                && payload.substr(12U + expectedAsset().kind.value().size()) == assetContent,
+            const auto prefix = test::snapshotStorageEnvelope(expectedAsset().id.value(), "");
+            check(!stream.bad() && payload.starts_with(prefix + "LCNCAS01")
+                && payload.size() == prefix.size() + 12U + expectedAsset().kind.value().size() + assetContent.size()
+                && payload.substr(prefix.size() + 12U + expectedAsset().kind.value().size()) == assetContent,
                 "Flushed temporary orphan content drift");
         }
     }

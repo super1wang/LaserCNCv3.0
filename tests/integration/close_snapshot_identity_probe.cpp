@@ -22,11 +22,7 @@ int main(int argc, char** argv)
         auto backend = infrastructure::SqlitePersistenceBackend::open({root / "state.db"});
         auto snapshots = infrastructure::FilesystemSnapshotStore::create({root / "snapshots", 1024U * 1024U});
         if(!backend || !snapshots) { return 4; }
-        std::set<std::string> previous;
-        for(const auto& entry : std::filesystem::directory_iterator(root / "snapshots")) {
-            previous.insert(entry.path().stem().string());
-        }
-        if(previous.size() != phase * 8U) { return 5; }
+        auto* observer = backend.value().get();
         if(!host.configurePersistence(std::move(backend).value(), std::make_shared<infrastructure::JsonconsAdapter>(),
             std::make_shared<infrastructure::Sha256HashService>(), std::move(snapshots).value())) { return 6; }
         const auto project = kernel::ProjectId::create("project.close-process").value();
@@ -38,6 +34,15 @@ int main(int argc, char** argv)
             }
         }
         if(!host.bootstrap()) { return 8; }
+        std::set<std::string> previous;
+        auto before = observer->query("SELECT snapshot_id FROM snapshot_index");
+        if(!before) { return 5; }
+        for(const auto& row : before.value()) {
+            const auto* value = row.at("snapshot_id").getIf<std::string>();
+            if(value == nullptr) { return 5; }
+            previous.insert(*value);
+        }
+        if(previous.size() != phase * 8U) { return 5; }
         for(const auto& identity : identities) {
             const auto document = kernel::DocumentId::create(identity).value();
             if(phase != 0U) {
@@ -55,14 +60,25 @@ int main(int argc, char** argv)
         }
         if(!host.shutdown()) { return 14; }
         std::size_t added = 0U;
-        for(const auto& entry : std::filesystem::directory_iterator(root / "snapshots")) {
-            if(entry.path().extension() != ".snapshot") { return 15; }
-            const auto key = entry.path().stem().string();
+        auto after = observer->query("SELECT snapshot_id FROM snapshot_index");
+        if(!after || after.value().size() != (phase + 1U) * 8U) { return 16; }
+        for(const auto& row : after.value()) {
+            const auto* value = row.at("snapshot_id").getIf<std::string>();
+            if(value == nullptr) { return 16; }
+            const auto& key = *value;
             if(key.size() != 82U || !key.starts_with("snapshot.close.v2.")
                 || key.substr(18U).find_first_not_of("0123456789abcdef") != std::string::npos) { return 16; }
             if(!previous.contains(key)) { ++added; std::cout << "new=" << key << '\n'; }
         }
-        if(added != 8U) { return 17; }
+        std::size_t fileCount = 0U;
+        for(const auto& entry : std::filesystem::directory_iterator(root / "snapshots")) {
+            if(entry.path().extension() != ".snapshot") { return 15; }
+            const auto key = entry.path().stem().string();
+            if(key.size() != 65U || !key.starts_with("@")
+                || key.substr(1U).find_first_not_of("0123456789abcdef") != std::string::npos) { return 16; }
+            ++fileCount;
+        }
+        if(added != 8U || fileCount != after.value().size()) { return 17; }
         std::cout << "close-snapshot-process-verified\n";
         return 0;
     } catch(const std::exception& error) {

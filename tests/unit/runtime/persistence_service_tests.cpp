@@ -1,6 +1,7 @@
 #include <lasercnc/infrastructure/jsoncons_adapter.hpp>
 #include <lasercnc/infrastructure/sha256_hash_service.hpp>
 #include <lasercnc/infrastructure/filesystem_snapshot_store.hpp>
+#include "snapshot_storage_fixture.hpp"
 #include <lasercnc/infrastructure/bs_thread_pool_executor.hpp>
 #include <lasercnc/infrastructure/sqlite_persistence_backend.hpp>
 #include <lasercnc/kernel/app_kernel.hpp>
@@ -1480,7 +1481,7 @@ TEST_CASE("PersistenceService captures immutable snapshots aligned with the jour
         CHECK(first.value().revisions == document.value().revisions());
         CHECK(std::string(first.value().digest.value()).starts_with("sha256:"));
         CHECK(std::filesystem::is_regular_file(
-            snapshotDirectory / "snapshot.capture-1.snapshot"));
+            lasercnc::test::snapshotStoragePath(snapshotDirectory, "snapshot.capture-1")));
 
         auto repeated = persistence.captureSnapshot(firstSnapshotId, document.value());
         REQUIRE(repeated.hasValue());
@@ -1519,10 +1520,10 @@ TEST_CASE("PersistenceService captures immutable snapshots aligned with the jour
         CHECK(latest.value()->journalSequence == 2U);
 
         std::ofstream tampered(
-            snapshotDirectory / "snapshot.capture-2.snapshot",
+            lasercnc::test::snapshotStoragePath(snapshotDirectory, "snapshot.capture-2"),
             std::ios::binary | std::ios::trunc);
         REQUIRE(tampered.good());
-        tampered << "tampered";
+        tampered << lasercnc::test::snapshotStorageEnvelope(secondSnapshotId.value(), "tampered");
         tampered.close();
         auto rejected = reopened.latestSnapshot(documentId);
         REQUIRE_FALSE(rejected.hasValue());
@@ -1584,7 +1585,7 @@ TEST_CASE("PersistenceService rejects snapshots ahead of the journal", "[persist
         CHECK(std::string(rejected.error().code.value())
               == "Persistence.SnapshotRevisionNotJournaled");
         CHECK_FALSE(std::filesystem::exists(
-            snapshotDirectory / "snapshot.ahead.snapshot"));
+            lasercnc::test::snapshotStoragePath(snapshotDirectory, "snapshot.ahead")));
     }
     removeDatabase(path);
     removeSnapshotDirectory(snapshotDirectory);
