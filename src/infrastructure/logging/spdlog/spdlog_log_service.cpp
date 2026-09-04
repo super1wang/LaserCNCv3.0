@@ -201,14 +201,16 @@ foundation::Result<std::unique_ptr<SpdlogLogService>> SpdlogLogService::create(
             std::move(result).error());
     }
     if(options.rotatingFilePath.has_value()
-       && (options.rotatingFilePath->empty() || detail::containsEmbeddedNull(*options.rotatingFilePath))) {
-        auto result = invalidOptions("Human-readable file path must be non-empty and contain no null characters");
+       && (options.rotatingFilePath->empty() || detail::containsEmbeddedNull(*options.rotatingFilePath)
+           || detail::containsMalformedUtf16(*options.rotatingFilePath))) {
+        auto result = invalidOptions("Human-readable file path must be non-empty, well-formed UTF-16 and contain no null characters");
         return foundation::Result<std::unique_ptr<SpdlogLogService>>::failure(
             std::move(result).error());
     }
     if(options.jsonlFilePath.has_value()
-       && (options.jsonlFilePath->empty() || detail::containsEmbeddedNull(*options.jsonlFilePath))) {
-        auto result = invalidOptions("JSONL file path must be non-empty and contain no null characters");
+       && (options.jsonlFilePath->empty() || detail::containsEmbeddedNull(*options.jsonlFilePath)
+           || detail::containsMalformedUtf16(*options.jsonlFilePath))) {
+        auto result = invalidOptions("JSONL file path must be non-empty, well-formed UTF-16 and contain no null characters");
         return foundation::Result<std::unique_ptr<SpdlogLogService>>::failure(
             std::move(result).error());
     }

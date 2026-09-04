@@ -1,5 +1,6 @@
 #include <lasercnc/infrastructure/filesystem_asset_store.hpp>
 #include <lasercnc/infrastructure/filesystem_snapshot_store.hpp>
+#include <lasercnc/infrastructure/jsoncons_adapter.hpp>
 #include <lasercnc/infrastructure/sha256_hash_service.hpp>
 #include <lasercnc/infrastructure/spdlog_log_service.hpp>
 #include <lasercnc/infrastructure/sqlite_persistence_backend.hpp>
@@ -11,6 +12,7 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -196,4 +198,89 @@ TEST_CASE("File adapters preserve valid Unicode paths and perform real round tri
         .find("unicode path round trip") != std::string::npos);
     CHECK(read(jsonl.parent_path() / (jsonl.stem().native() + L".1" + jsonl.extension().native()))
         .find("unicode path round trip") != std::string::npos);
+}
+
+TEST_CASE("File adapters reject malformed UTF16 with structured errors and no output", "[infrastructure][path][unicode][c6]")
+{
+    const std::array<std::wstring, 6> malformed{
+        std::wstring{wchar_t{0xd800}}, std::wstring{wchar_t{0xdc00}},
+        std::wstring{wchar_t{0xd800}, wchar_t{0xd800}},
+        std::wstring{wchar_t{0xdc00}, wchar_t{0xd800}},
+        std::wstring{wchar_t{0xd800}, L'x'},
+        std::wstring{wchar_t{0xd83d}, wchar_t{0xdd27}, wchar_t{0xdc00}}};
+    for(unsigned int adapter = 0U; adapter < 5U; ++adapter) {
+        for(std::size_t shape = 0U; shape < malformed.size(); ++shape) {
+            DYNAMIC_SECTION("adapter=" << adapter << " shape=" << shape) {
+                const auto directory = root();
+                INFO("evidence=" << directory.string());
+                const auto path = directory / std::filesystem::path{L"invalid-" + malformed[shape]};
+                std::optional<Result<void>> admitted;
+                CHECK_NOTHROW(admitted.emplace(admit(adapter, path)));
+                if(admitted.has_value()) {
+                    CHECK_FALSE(*admitted);
+                    if(!*admitted) {
+                        const std::array expected{"Persistence.InvalidOptions", "Snapshot.InvalidStoreOptions",
+                            "Asset.StoreInitializationFailed", "Logging.InvalidOptions", "Logging.InvalidOptions"};
+                        CHECK(std::string(admitted->error().code.value()) == expected[adapter]);
+                        REQUIRE(JsonconsAdapter{}.serialize(admitted->error().details));
+                        const auto* snapshotError = adapter == 1U ? &admitted->error() : nullptr;
+                        if(adapter == 2U) {
+                            REQUIRE(admitted->error().cause);
+                            CHECK(std::string(admitted->error().cause->code.value()) == "Snapshot.InvalidStoreOptions");
+                            REQUIRE(JsonconsAdapter{}.serialize(admitted->error().cause->details));
+                            snapshotError = admitted->error().cause.get();
+                        }
+                        if(snapshotError != nullptr) {
+                            const auto* details = snapshotError->details.getIf<Value::Object>();
+                            REQUIRE(details != nullptr);
+                            CHECK_FALSE(details->contains("path"));
+                            CHECK(details->at("pathOmitted") == Value{true});
+                            CHECK(details->at("pathEncoding") == Value{"invalid-utf16"});
+                        }
+                    }
+                }
+                CHECK(std::filesystem::is_empty(directory));
+            }
+        }
+    }
+}
+
+TEST_CASE("File adapters accept UTF16 scalar boundaries without rewriting filenames", "[infrastructure][path][unicode][c6]")
+{
+    const std::array<std::wstring, 4> boundaries{
+        std::wstring{wchar_t{0xd7ff}}, std::wstring{wchar_t{0xe000}},
+        std::wstring{wchar_t{0xd800}, wchar_t{0xdc00}},
+        std::wstring{wchar_t{0xdbff}, wchar_t{0xdfff}}};
+    for(unsigned int adapter = 0U; adapter < 5U; ++adapter) {
+        for(std::size_t shape = 0U; shape < boundaries.size(); ++shape) {
+            DYNAMIC_SECTION("adapter=" << adapter << " shape=" << shape) {
+                const auto directory = root();
+                INFO("evidence=" << directory.string());
+                const auto path = directory / std::filesystem::path{L"valid-" + boundaries[shape]};
+                REQUIRE(admit(adapter, path));
+                CHECK(std::filesystem::exists(path));
+                REQUIRE(std::distance(std::filesystem::directory_iterator(directory), std::filesystem::directory_iterator{}) == 1);
+                CHECK(std::filesystem::directory_iterator(directory)->path().filename().native() == path.filename().native());
+            }
+        }
+    }
+}
+
+TEST_CASE("Logging malformed UTF16 preflight cannot create the other valid sink", "[logging][path][unicode][c6]")
+{
+    for(const bool humanInvalid : {false, true}) {
+        DYNAMIC_SECTION("humanInvalid=" << humanInvalid) {
+            const auto directory = root();
+            INFO("evidence=" << directory.string());
+            const auto invalid = directory / std::filesystem::path{std::wstring{L'b', wchar_t{0xd800}}};
+            SpdlogLogOptions options;
+            options.enableConsole = false;
+            options.rotatingFilePath = humanInvalid ? invalid : directory / "human.log";
+            options.jsonlFilePath = humanInvalid ? directory / "events.jsonl" : invalid;
+            const auto created = SpdlogLogService::create(options);
+            CHECK_FALSE(created);
+            if(!created) { CHECK(std::string(created.error().code.value()) == "Logging.InvalidOptions"); }
+            CHECK(std::filesystem::is_empty(directory));
+        }
+    }
 }

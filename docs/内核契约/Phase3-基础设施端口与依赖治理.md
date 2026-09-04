@@ -22,6 +22,8 @@ Phase 3 把成熟通用能力放在可替换 Adapter 后面。Kernel 只拥有�
 
 ST1C6a 补充：两个文件路径均先检查非空及原生码元内的 NUL，再创建任何 sink；NUL 不得截断成另一个实际文件名。Windows 使用统一重建的宽字符 spdlog 配置，实际验证中文/emoji 路径及轮转文件。该预检不承诺任意 I/O 失败时的跨文件回滚；Windows 路径别名与不可转换输入继续按 [C6 契约](ST1C6-公共契约与输入预算.md) 实测审计，不能将旧配置用例当作所有别名已认证。
 
+ST1C6b1 补充：五类文件路径统一拒绝未配对 UTF-16 代理码元，错误沿用既有 InvalidOptions/cause。无法转换的 Snapshot 路径诊断明确省略 path 并提供 pathEncoding="invalid-utf16"、pathOmitted=true，不能为生成错误再次转换坏路径。合法码点边界和两类日志混合预检已有回归；底层 Windows 能保存某些异常原生名称不等于内核承诺接纳这些名称。字段/操作与剩余别名、预算边界见 [逐项账本](ST1C6b-公共契约逐项审计.md)。
+
 每条 JSONL 日志是一行完整 UTF-8 JSON，包含：
 
 - `timestamp`：使用调用方 `LogRecord` 的时间戳，规范化为 UTC 毫秒格式；

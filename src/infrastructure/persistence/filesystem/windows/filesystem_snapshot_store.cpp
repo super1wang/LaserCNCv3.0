@@ -45,9 +45,15 @@ foundation::Error snapshotError(
     const std::filesystem::path& path,
     std::optional<std::uint32_t> systemCode = std::nullopt)
 {
-    foundation::Value::Object details {
-        {"path", foundation::Value {pathToUtf8(path)}},
-    };
+    foundation::Value::Object details;
+    if(detail::containsMalformedUtf16(path)) {
+        // Keep diagnostics serializable without converting or replacing the rejected path.
+        // 中文翻译：不转换或替换被拒绝的路径，仍保持诊断材料可序列化。
+        details.emplace("pathEncoding", foundation::Value {"invalid-utf16"});
+        details.emplace("pathOmitted", foundation::Value {true});
+    } else {
+        details.emplace("path", foundation::Value {pathToUtf8(path)});
+    }
     if(systemCode.has_value()) {
         details.emplace(
             "systemCode",
@@ -337,13 +343,14 @@ FilesystemSnapshotStore::~FilesystemSnapshotStore() = default;
 foundation::Result<std::unique_ptr<FilesystemSnapshotStore>>
 FilesystemSnapshotStore::create(FilesystemSnapshotStoreOptions options)
 {
-    if(options.directory.empty() || detail::containsEmbeddedNull(options.directory) || options.maximumPayloadBytes == 0U
+    if(options.directory.empty() || detail::containsEmbeddedNull(options.directory)
+        || detail::containsMalformedUtf16(options.directory) || options.maximumPayloadBytes == 0U
         || options.maximumPayloadBytes > std::numeric_limits<std::size_t>::max() - maximumEnvelopeOverhead) {
         return foundation::Result<std::unique_ptr<FilesystemSnapshotStore>>::failure(
             snapshotError(
                 "Snapshot.InvalidStoreOptions",
                 foundation::ErrorCategory::Validation,
-                "The snapshot store requires a non-empty directory without null characters and a positive size limit",
+                "The snapshot store requires a non-empty, well-formed UTF-16 directory without null characters and a positive size limit",
                 options.directory));
     }
     for(const auto& component : options.directory.relative_path()) {
