@@ -33,6 +33,17 @@ add_test(NAME integration.lifecycle_catalog_epoch_restart
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_lifecycle_catalog_epoch.cmake")
 set_tests_properties(integration.lifecycle_catalog_epoch_restart PROPERTIES TIMEOUT 70)
 
+add_executable(lasercnc_close_snapshot_probe integration/close_snapshot_identity_probe.cpp)
+target_link_libraries(lasercnc_close_snapshot_probe PRIVATE LaserCNC::Infrastructure)
+target_compile_features(lasercnc_close_snapshot_probe PRIVATE cxx_std_20)
+set_target_properties(lasercnc_close_snapshot_probe PROPERTIES CXX_EXTENSIONS OFF)
+lcnc_enable_warnings(lasercnc_close_snapshot_probe)
+add_test(NAME integration.close_snapshot_identity_restart
+    COMMAND "${CMAKE_COMMAND}" "-DPROBE=$<TARGET_FILE:lasercnc_close_snapshot_probe>"
+        "-DEVIDENCE_ROOT=${CMAKE_CURRENT_BINARY_DIR}/close-snapshot-process-runs"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_close_snapshot_identity.cmake")
+set_tests_properties(integration.close_snapshot_identity_restart PROPERTIES TIMEOUT 190 RUN_SERIAL TRUE)
+
 add_test(NAME architecture.asan_configuration_guards
     COMMAND "${CMAKE_COMMAND}" "-DSOURCE_ROOT=${PROJECT_SOURCE_DIR}"
         "-DEVIDENCE_ROOT=${CMAKE_CURRENT_BINARY_DIR}/asan-config-probes"
@@ -172,6 +183,7 @@ add_executable(
     unit/runtime/project_task_admission_tests.cpp
     unit/runtime/project_runtime_tests.cpp
     unit/runtime/lifecycle_catalog_tests.cpp
+    unit/runtime/close_snapshot_identity_tests.cpp
     unit/runtime/kernel_shutdown_tests.cpp
     unit/runtime/history_runtime_tests.cpp
     unit/runtime/asset_state_tests.cpp

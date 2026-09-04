@@ -1,4 +1,5 @@
 #include <lasercnc/runtime/document_runtime.hpp>
+#include "close_snapshot_identity.hpp"
 #include "../catalog/catalog_clock.hpp"
 #include "../../kernel/execution_admission.hpp"
 
@@ -10,9 +11,8 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
-#include <chrono>
 #include <exception>
+#include <random>
 #include <span>
 #include <string>
 #include <utility>
@@ -53,17 +53,13 @@ std::size_t activityCount(const std::array<std::size_t, 6U>& activities) noexcep
     return result;
 }
 
-foundation::Result<kernel::SnapshotId> closeSnapshotId(
-    const kernel::DocumentId& documentId)
+foundation::Result<kernel::SnapshotId> closeSnapshotId()
 {
-    static std::atomic_ullong sequence {0U};
-    const auto epoch = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                           std::chrono::system_clock::now().time_since_epoch())
-                           .count();
-    return kernel::SnapshotId::create(
-        "snapshot.close." + std::string(documentId.value()) + "."
-        + std::to_string(epoch) + "."
-        + std::to_string(sequence.fetch_add(1U, std::memory_order_relaxed)));
+    return detail::closeSnapshotIdentity([](auto& words) {
+        std::random_device source;
+        std::uniform_int_distribution<std::uint32_t> bits;
+        for(auto& word : words) { word = bits(source); }
+    });
 }
 
 } // namespace
@@ -587,7 +583,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::detachImpl(
             return foundation::Result<DocumentLifecycleSnapshot>::failure(
                 std::move(document).error());
         }
-        auto snapshotId = closeSnapshotId(documentId);
+        auto snapshotId = closeSnapshotId();
         auto assetsAdmitted = validateObjectAssets(document.value().objects().all(), assetStore_);
         auto captured = !assetsAdmitted
             ? foundation::Result<persistence::SnapshotRecord>::failure(std::move(assetsAdmitted).error())

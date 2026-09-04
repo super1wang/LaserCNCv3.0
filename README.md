@@ -28,6 +28,8 @@ C2c1 本地检查点通过：停止确认/失败重试已修复，Debug 368/368�
 
 C2c2 后续检查点通过：最终排空与依赖保留、工作线程停止/销毁约束及所有权释放已验证，Debug 373/373、专项 15/15、15 项各 10 次、纯生产/架构和定向 ASan 进程矩阵 3 轮通过，见 [C2c2 交付](docs/阶段交付/2026-09-04-ST1C2c2-最终排空与析构依赖.md)。当前形成 C2 生命周期正确性大节点，下一步 C3 存储键；C4/C6–C8/ST1D 仍待完成，未宣称整体冻结或设备准入。
 
+C3a 本地检查点通过：自动关闭快照身份已与 DocumentId、墙钟及进程计数解耦，中文/路径字符/长 ID 和真实重启恢复回归通过；Debug 378/378、专项 8/8、新增 5 项各 3 次、纯生产及 ASan 三轮进程验证见 [C3a 交付](docs/阶段交付/2026-09-04-ST1C3a-自动关闭快照身份.md)。下一步 C3b/c 的显式文件键、旧格式兼容及时间排序，整体仍未冻结。
+
 - Phase 1：Foundation（`StrongId`、`Value`、`Result`、`Error`、`Schema`）
 - Phase 2：Application Composition（`AppKernel`、`ServiceRegistry`、`ModuleRuntime`）
 - Phase 3：Infrastructure Adapters（日志、JSON、TOML、SQLite、线程池）
