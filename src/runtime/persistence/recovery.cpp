@@ -16,6 +16,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -807,6 +808,80 @@ struct WorkingDocument final {
     std::uint64_t snapshotSequence{0U};
 };
 
+struct ValidatedJournalHistory final {
+    std::vector<DecodedJournal> journals;
+    std::map<kernel::DocumentId, std::pair<kernel::ProjectId, state::RevisionSet>> documentRevisions;
+};
+
+foundation::Result<ValidatedJournalHistory> validateJournalHistory(
+    std::span<const platform::PersistenceRow> rows,
+    const foundation::IValueSerializer& serializer,
+    const platform::IHashService& hashes)
+{
+    std::vector<DecodedJournal> journals;
+    journals.reserve(rows.size());
+    std::map<kernel::ProjectId, state::Revision> projectRevisions;
+    std::map<kernel::DocumentId, std::pair<kernel::ProjectId, state::RevisionSet>>
+        documentRevisions;
+    std::uint64_t expectedSequence = 1U;
+    for(const auto& row : rows) {
+        auto journal = decodeJournal(row, serializer, hashes);
+        if(!journal) {
+            return foundation::Result<ValidatedJournalHistory>::failure(
+                std::move(journal).error());
+        }
+        if(journal.value().record.sequence != expectedSequence) {
+            return foundation::Result<ValidatedJournalHistory>::failure(recoveryError(
+                "Persistence.JournalSequenceGap",
+                foundation::ErrorCategory::Infrastructure,
+                "The durable journal contains a missing or reordered sequence",
+                {{"expected", foundation::Value {std::to_string(expectedSequence)}},
+                 {"actual", foundation::Value {
+                    std::to_string(journal.value().record.sequence)}}}));
+        }
+        ++expectedSequence;
+        auto transition = validateRevisionTransition(journal.value());
+        if(!transition) {
+            return foundation::Result<ValidatedJournalHistory>::failure(
+                std::move(transition).error());
+        }
+        const auto [project, unusedProject] = projectRevisions.try_emplace(
+            journal.value().record.projectId, state::Revision {});
+        static_cast<void>(unusedProject);
+        if(project->second
+           != journal.value().record.revisionsBefore.at(
+               state::RevisionScope::Project)) {
+            return foundation::Result<ValidatedJournalHistory>::failure(recoveryError(
+                "Persistence.ProjectRevisionChainBroken",
+                foundation::ErrorCategory::Infrastructure,
+                "The project revision chain is discontinuous during recovery"));
+        }
+        project->second = journal.value().record.revisionsAfter.at(
+            state::RevisionScope::Project);
+
+        const auto [document, inserted] = documentRevisions.emplace(
+            journal.value().record.documentId,
+            std::pair {journal.value().record.projectId, state::RevisionSet {}});
+        if(!inserted && document->second.first != journal.value().record.projectId) {
+            return foundation::Result<ValidatedJournalHistory>::failure(recoveryError(
+                "Persistence.DocumentOwnershipChanged",
+                foundation::ErrorCategory::Infrastructure,
+                "A document changes project ownership in its journal history"));
+        }
+        if(!localRevisionsEqual(
+               document->second.second,
+               journal.value().record.revisionsBefore)) {
+            return foundation::Result<ValidatedJournalHistory>::failure(recoveryError(
+                "Persistence.DocumentRevisionChainBroken",
+                foundation::ErrorCategory::Infrastructure,
+                "The document revision chain is discontinuous during recovery"));
+        }
+        document->second.second = journal.value().record.revisionsAfter;
+        journals.push_back(std::move(journal).value());
+    }
+    return foundation::Result<ValidatedJournalHistory>::success({std::move(journals), std::move(documentRevisions)});
+}
+
 foundation::Result<void> validateSnapshotAnchor(
     const SnapshotState& snapshot,
     std::span<const DecodedJournal> journals,
@@ -821,8 +896,16 @@ foundation::Result<void> validateSnapshotAnchor(
     state::RevisionSet expected;
     std::optional<kernel::ProjectId> documentProject;
     for(const auto& journal : journals) {
+        // Identity ownership spans all history, even if this snapshot predates the first commit.
+        // 中文翻译：身份归属覆盖完整历史，即使此快照早于第一笔提交也不能变更归属。
+        if(journal.record.documentId == snapshot.record.documentId
+            && journal.record.projectId != snapshot.record.projectId) {
+            return foundation::Result<void>::failure(recoveryError(
+                "Persistence.DocumentOwnershipChanged", foundation::ErrorCategory::Infrastructure,
+                "Snapshot and journal disagree on document ownership"));
+        }
         if(journal.record.sequence > snapshot.record.journalSequence) {
-            break;
+            continue;
         }
         if(journal.record.projectId == snapshot.record.projectId) {
             const auto projectRevision = journal.record.revisionsAfter.at(
@@ -862,10 +945,115 @@ foundation::Result<void> validateSnapshotAnchor(
             foundation::ErrorCategory::Infrastructure,
             "A snapshot revision does not match its journal sequence anchor"));
     }
+    // Authenticate each object's last journaled state at the anchor, including deletions.
+    // 中文翻译：校验锚点前每个已入 Journal 对象的最终状态，包含删除；不推断未触及的历史基线。
+    std::map<kernel::ObjectId, state::ObjectRecord> journalObjects;
+    std::set<kernel::ObjectId> touchedObjects;
+    for(const auto& journal : journals) {
+        if(journal.record.sequence > snapshot.record.journalSequence) { break; }
+        if(journal.record.documentId != snapshot.record.documentId) { continue; }
+        for(const auto& change : journal.changes) {
+            if(touchedObjects.insert(change.objectId).second && change.before) {
+                journalObjects.emplace(change.objectId, *change.before);
+            }
+        }
+        auto applied = applyChanges(journal, journalObjects);
+        if(!applied) { return applied; }
+    }
+    for(const auto& objectId : touchedObjects) {
+        const auto expectedObject = journalObjects.find(objectId);
+        const auto actualObject = snapshot.objects.find(objectId);
+        if((expectedObject == journalObjects.end()) != (actualObject == snapshot.objects.end())
+            || (expectedObject != journalObjects.end() && actualObject != snapshot.objects.end()
+                && expectedObject->second != actualObject->second)) {
+            return foundation::Result<void>::failure(recoveryError(
+                "Persistence.SnapshotContentMismatch", foundation::ErrorCategory::Infrastructure,
+                "Snapshot objects contradict their authenticated journal anchor"));
+        }
+    }
     return foundation::Result<void>::success();
 }
 
 } // namespace
+
+foundation::Result<std::optional<SnapshotRecord>> PersistenceService::latestSnapshotUnlocked(
+    const kernel::DocumentId& documentId) const
+{
+    if(!initialized_) {
+        return foundation::Result<std::optional<SnapshotRecord>>::failure(
+            recoveryError(
+                "Persistence.NotReady",
+                foundation::ErrorCategory::Conflict,
+                "Persistence must be initialized before reading snapshots"));
+    }
+    try {
+        const std::array parameters {
+            foundation::Value {std::string(documentId.value())}};
+        auto rows = backend_->query(
+            std::string("SELECT ") + std::string(snapshotColumns)
+                + " FROM snapshot_index WHERE document_id=? "
+                  "ORDER BY journal_sequence DESC,created_at_ms DESC,snapshot_id DESC LIMIT 1",
+            parameters);
+        if(!rows) {
+            return foundation::Result<std::optional<SnapshotRecord>>::failure(
+                std::move(rows).error());
+        }
+        if(rows.value().empty()) {
+            return foundation::Result<std::optional<SnapshotRecord>>::success(std::nullopt);
+        }
+        if(snapshotStore_ == nullptr) {
+            return foundation::Result<std::optional<SnapshotRecord>>::failure(recoveryError(
+                "Persistence.SnapshotStoreNotConfigured", foundation::ErrorCategory::Conflict,
+                "An indexed snapshot requires its data store for ownership verification"));
+        }
+        if(rows.value().size() != 1U) {
+            return foundation::Result<std::optional<SnapshotRecord>>::failure(
+                recoveryError(
+                    "Persistence.InvalidSnapshotRow",
+                    foundation::ErrorCategory::Infrastructure,
+                    "The latest snapshot lookup returned an invalid result"));
+        }
+        auto record = decodeSnapshot(
+            rows.value().front(), *snapshotStore_, *serializer_, *hashes_);
+        if(!record) {
+            return foundation::Result<std::optional<SnapshotRecord>>::failure(
+                std::move(record).error());
+        }
+        if(record.value().record.documentId != documentId) {
+            return foundation::Result<std::optional<SnapshotRecord>>::failure(
+                recoveryError(
+                    "Persistence.SnapshotMetadataMismatch",
+                    foundation::ErrorCategory::Infrastructure,
+                    "The latest snapshot belongs to a different document"));
+        }
+        auto journalRows = backend_->query(std::string("SELECT ") + std::string(journalColumns)
+            + " FROM state_journal ORDER BY sequence");
+        if(!journalRows) { return foundation::Result<std::optional<SnapshotRecord>>::failure(std::move(journalRows).error()); }
+        auto history = validateJournalHistory(journalRows.value(), *serializer_, *hashes_);
+        if(!history) { return foundation::Result<std::optional<SnapshotRecord>>::failure(std::move(history).error()); }
+        const auto& journals = history.value().journals;
+        auto anchor = validateSnapshotAnchor(record.value(), journals,
+            journals.empty() ? 0U : journals.back().record.sequence);
+        if(!anchor) {
+            return foundation::Result<std::optional<SnapshotRecord>>::failure(std::move(anchor).error());
+        }
+        return foundation::Result<std::optional<SnapshotRecord>>::success(
+            std::move(record).value().record);
+    } catch(const std::exception& exception) {
+        return foundation::Result<std::optional<SnapshotRecord>>::failure(
+            recoveryError(
+                "Persistence.SnapshotReadFailed",
+                foundation::ErrorCategory::Internal,
+                "Snapshot metadata read failed unexpectedly",
+                {{"reason", foundation::Value {exception.what()}}}));
+    } catch(...) {
+        return foundation::Result<std::optional<SnapshotRecord>>::failure(
+            recoveryError(
+                "Persistence.SnapshotReadFailed",
+                foundation::ErrorCategory::Internal,
+                "Snapshot metadata read failed unexpectedly"));
+    }
+}
 
 foundation::Result<RecoveryReport> PersistenceService::recover() const
 {
@@ -908,67 +1096,10 @@ foundation::Result<RecoveryReport> PersistenceService::recover() const
         }
         transactionOpen = false;
 
-        std::vector<DecodedJournal> journals;
-        journals.reserve(journalRows.value().size());
-        std::map<kernel::ProjectId, state::Revision> projectRevisions;
-        std::map<kernel::DocumentId, std::pair<kernel::ProjectId, state::RevisionSet>>
-            documentRevisions;
-        std::uint64_t expectedSequence = 1U;
-        for(const auto& row : journalRows.value()) {
-            auto journal = decodeJournal(row, *serializer_, *hashes_);
-            if(!journal) {
-                return foundation::Result<RecoveryReport>::failure(
-                    std::move(journal).error());
-            }
-            if(journal.value().record.sequence != expectedSequence) {
-                return foundation::Result<RecoveryReport>::failure(recoveryError(
-                    "Persistence.JournalSequenceGap",
-                    foundation::ErrorCategory::Infrastructure,
-                    "The durable journal contains a missing or reordered sequence",
-                    {{"expected", foundation::Value {std::to_string(expectedSequence)}},
-                     {"actual", foundation::Value {
-                        std::to_string(journal.value().record.sequence)}}}));
-            }
-            ++expectedSequence;
-            auto transition = validateRevisionTransition(journal.value());
-            if(!transition) {
-                return foundation::Result<RecoveryReport>::failure(
-                    std::move(transition).error());
-            }
-            const auto [project, unusedProject] = projectRevisions.try_emplace(
-                journal.value().record.projectId, state::Revision {});
-            static_cast<void>(unusedProject);
-            if(project->second
-               != journal.value().record.revisionsBefore.at(
-                   state::RevisionScope::Project)) {
-                return foundation::Result<RecoveryReport>::failure(recoveryError(
-                    "Persistence.ProjectRevisionChainBroken",
-                    foundation::ErrorCategory::Infrastructure,
-                    "The project revision chain is discontinuous during recovery"));
-            }
-            project->second = journal.value().record.revisionsAfter.at(
-                state::RevisionScope::Project);
-
-            const auto [document, inserted] = documentRevisions.emplace(
-                journal.value().record.documentId,
-                std::pair {journal.value().record.projectId, state::RevisionSet {}});
-            if(!inserted && document->second.first != journal.value().record.projectId) {
-                return foundation::Result<RecoveryReport>::failure(recoveryError(
-                    "Persistence.DocumentOwnershipChanged",
-                    foundation::ErrorCategory::Infrastructure,
-                    "A document changes project ownership in its journal history"));
-            }
-            if(!localRevisionsEqual(
-                   document->second.second,
-                   journal.value().record.revisionsBefore)) {
-                return foundation::Result<RecoveryReport>::failure(recoveryError(
-                    "Persistence.DocumentRevisionChainBroken",
-                    foundation::ErrorCategory::Infrastructure,
-                    "The document revision chain is discontinuous during recovery"));
-            }
-            document->second.second = journal.value().record.revisionsAfter;
-            journals.push_back(std::move(journal).value());
-        }
+        auto history = validateJournalHistory(journalRows.value(), *serializer_, *hashes_);
+        if(!history) { return foundation::Result<RecoveryReport>::failure(std::move(history).error()); }
+        const auto& journals = history.value().journals;
+        const auto& documentRevisions = history.value().documentRevisions;
         const auto latestSequence = journals.empty()
             ? 0U
             : journals.back().record.sequence;

@@ -626,75 +626,10 @@ foundation::Result<std::optional<SnapshotRecord>> PersistenceService::latestSnap
             "Persistence.SnapshotStoreNotConfigured", foundation::ErrorCategory::Conflict,
             "A snapshot data store has not been configured"));
     }
+    // The shared recovery reader authenticates journal lineage and the selected snapshot anchor.
+    // 中文翻译：共用恢复读取逻辑验证 Journal 修订链及选中快照锚点，不将文件摘要视为完整认证。
     return latestSnapshotUnlocked(documentId);
 }
 
-foundation::Result<std::optional<SnapshotRecord>> PersistenceService::latestSnapshotUnlocked(
-    const kernel::DocumentId& documentId) const
-{
-    if(!initialized_) {
-        return foundation::Result<std::optional<SnapshotRecord>>::failure(
-            snapshotPersistenceError(
-                "Persistence.NotReady",
-                foundation::ErrorCategory::Conflict,
-                "Persistence must be initialized before reading snapshots"));
-    }
-    try {
-        const std::array parameters {
-            foundation::Value {std::string(documentId.value())}};
-        auto rows = backend_->query(
-            std::string("SELECT ") + std::string(snapshotColumns)
-                + " FROM snapshot_index WHERE document_id=? "
-                  "ORDER BY journal_sequence DESC,created_at_ms DESC,snapshot_id DESC LIMIT 1",
-            parameters);
-        if(!rows) {
-            return foundation::Result<std::optional<SnapshotRecord>>::failure(
-                std::move(rows).error());
-        }
-        if(rows.value().empty()) {
-            return foundation::Result<std::optional<SnapshotRecord>>::success(std::nullopt);
-        }
-        if(snapshotStore_ == nullptr) {
-            return foundation::Result<std::optional<SnapshotRecord>>::failure(snapshotPersistenceError(
-                "Persistence.SnapshotStoreNotConfigured", foundation::ErrorCategory::Conflict,
-                "An indexed snapshot requires its data store for ownership verification"));
-        }
-        if(rows.value().size() != 1U) {
-            return foundation::Result<std::optional<SnapshotRecord>>::failure(
-                snapshotPersistenceError(
-                    "Persistence.InvalidSnapshotRow",
-                    foundation::ErrorCategory::Infrastructure,
-                    "The latest snapshot lookup returned an invalid result"));
-        }
-        auto record = snapshotFromRow(
-            rows.value().front(), *snapshotStore_, *serializer_, *hashes_);
-        if(!record) {
-            return foundation::Result<std::optional<SnapshotRecord>>::failure(
-                std::move(record).error());
-        }
-        if(record.value().documentId != documentId) {
-            return foundation::Result<std::optional<SnapshotRecord>>::failure(
-                snapshotPersistenceError(
-                    "Persistence.SnapshotMetadataMismatch",
-                    foundation::ErrorCategory::Infrastructure,
-                    "The latest snapshot belongs to a different document"));
-        }
-        return foundation::Result<std::optional<SnapshotRecord>>::success(
-            std::move(record).value());
-    } catch(const std::exception& exception) {
-        return foundation::Result<std::optional<SnapshotRecord>>::failure(
-            snapshotPersistenceError(
-                "Persistence.SnapshotReadFailed",
-                foundation::ErrorCategory::Internal,
-                "Snapshot metadata read failed unexpectedly",
-                {{"reason", foundation::Value {exception.what()}}}));
-    } catch(...) {
-        return foundation::Result<std::optional<SnapshotRecord>>::failure(
-            snapshotPersistenceError(
-                "Persistence.SnapshotReadFailed",
-                foundation::ErrorCategory::Internal,
-                "Snapshot metadata read failed unexpectedly"));
-    }
-}
 
 } // namespace lasercnc::persistence

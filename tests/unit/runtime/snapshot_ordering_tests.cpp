@@ -52,6 +52,36 @@ void configure(kernel::AppKernel& host, const std::filesystem::path& directory)
         std::make_shared<infrastructure::JsonconsAdapter>(),
         std::make_shared<infrastructure::Sha256HashService>(), std::move(files).value()));
 }
+void replaceSnapshotFixture(const std::filesystem::path& directory, const kernel::SnapshotId& key,
+    const foundation::Value& value)
+{
+    const auto payload = infrastructure::JsonconsAdapter{}.serialize(value).value();
+    const auto digest = infrastructure::Sha256HashService{}.digest(std::as_bytes(std::span{payload.data(), payload.size()})).value();
+    {
+        std::ofstream output(test::snapshotStoragePath(directory / "files", key.value()), std::ios::binary | std::ios::trunc);
+        output << test::snapshotStorageEnvelope(key.value(), payload);
+        REQUIRE(output.good());
+    }
+    auto sql = infrastructure::SqlitePersistenceBackend::open({directory / "state.db"});
+    REQUIRE(sql);
+    REQUIRE(sql.value()->execute("UPDATE snapshot_index SET digest=?,payload_size=? WHERE snapshot_id=?",
+        std::array{foundation::Value{std::string(digest.value())}, foundation::Value{static_cast<std::int64_t>(payload.size())},
+            foundation::Value{std::string(key.value())}}));
+}
+void rejectRestart(const std::filesystem::path& directory, const kernel::DocumentId& document,
+    std::string_view expected)
+{
+    kernel::AppKernel restarted;
+    configure(restarted, directory);
+    auto booted = restarted.bootstrap();
+    REQUIRE_FALSE(booted);
+    const auto* cause = &booted.error();
+    while(cause->cause) { cause = cause->cause.get(); }
+    CHECK(std::string(cause->code.value()) == std::string(expected));
+    CHECK(restarted.state() == kernel::AppKernelState::Failed);
+    CHECK_FALSE(restarted.documentRuntime().accepting());
+    CHECK_FALSE(restarted.documents().contains(document));
+}
 }
 
 TEST_CASE("Snapshot ordering prioritizes journal watermarks across clock rollback and projects", "[snapshot-ordering]")
@@ -139,6 +169,43 @@ TEST_CASE("Snapshot ordering defines deterministic ties without promising last c
     CHECK_FALSE(service->recover());
 }
 
+TEST_CASE("Snapshot anchor reads reject forged watermarks and untrusted journal history", "[snapshot-anchor]")
+{
+    for(const int fault : {0, 1, 2, 3}) {
+        DYNAMIC_SECTION("anchor fault " << fault) {
+            const auto directory = root();
+            const auto project = id<kernel::ProjectId>("project.anchor");
+            const auto a = id<kernel::DocumentId>("document.anchor.a");
+            const auto b = id<kernel::DocumentId>("document.anchor.b");
+            state::DocumentStore documents;
+            REQUIRE(documents.addDocument(project, a)); REQUIRE(documents.addDocument(project, b));
+            auto service = test::openPersistenceFixture(directory / "state.db", directory / "files");
+            runtime::TransactionManager transactions(documents, service.get());
+            touch(transactions, a, "transaction.anchor.a");
+            REQUIRE(service->captureSnapshot(id<kernel::SnapshotId>("snapshot.anchor"), documents.snapshot(a).value()));
+            touch(transactions, b, "transaction.anchor.b");
+            auto sql = infrastructure::SqlitePersistenceBackend::open({directory / "state.db"});
+            REQUIRE(sql);
+            const std::array statements{
+                "UPDATE snapshot_index SET journal_sequence=99",
+                "UPDATE snapshot_index SET journal_sequence=0",
+                "UPDATE snapshot_index SET journal_sequence=2",
+                "UPDATE state_journal SET payload='damaged' WHERE sequence=1"};
+            REQUIRE(sql.value()->execute(statements[static_cast<std::size_t>(fault)]));
+            auto latest = service->latestSnapshot(a);
+            auto recovered = service->recover();
+            CHECK_FALSE(latest);
+            REQUIRE_FALSE(recovered);
+            const auto expected = fault == 0 ? "Persistence.SnapshotSequenceAhead"
+                : fault == 3 ? "Persistence.JournalDigestMismatch" : "Persistence.SnapshotRevisionMismatch";
+            CHECK(std::string(recovered.error().code.value()) == expected);
+            if(!latest) { CHECK(std::string(latest.error().code.value()) == expected); }
+            service.reset();
+            rejectRestart(directory, a, expected);
+        }
+    }
+}
+
 TEST_CASE("Snapshot ordering refuses damaged newest state and immutable retry before reopening", "[snapshot-ordering]")
 {
     for(const bool missing : {false, true}) {
@@ -194,6 +261,48 @@ TEST_CASE("Snapshot ordering refuses damaged newest state and immutable retry be
     }
 }
 
+TEST_CASE("Snapshot anchor rejects content contradicting authenticated journal objects", "[snapshot-anchor]")
+{
+    for(const bool missingObject : {false, true}) {
+        DYNAMIC_SECTION("missing object " << missingObject) {
+            const auto directory = root();
+            const auto document = id<kernel::DocumentId>("document.content-anchor");
+            const auto key = id<kernel::SnapshotId>("snapshot.content-anchor");
+            state::DocumentStore documents;
+            REQUIRE(documents.addDocument(id<kernel::ProjectId>("project.content-anchor"), document));
+            auto service = test::openPersistenceFixture(directory / "state.db", directory / "files");
+            runtime::TransactionManager transactions(documents, service.get());
+            touch(transactions, document, "transaction.content-anchor");
+            auto captured = service->captureSnapshot(key, documents.snapshot(document).value());
+            REQUIRE(captured);
+            infrastructure::JsonconsAdapter codec;
+            auto value = codec.deserialize(captured.value().payload).value();
+            auto& objects = *value.getIf<foundation::Value::Object>()->at("objects").getIf<foundation::Value::Array>();
+            REQUIRE(objects.size() == 1U);
+            if(missingObject) { objects.clear(); }
+            else { objects.front().getIf<foundation::Value::Object>()->at("data") = foundation::Value{"contradictory"}; }
+            const auto payload = codec.serialize(value).value();
+            const auto digest = infrastructure::Sha256HashService{}.digest(std::as_bytes(std::span{payload.data(), payload.size()})).value();
+            {
+                std::ofstream output(test::snapshotStoragePath(directory / "files", key.value()), std::ios::binary | std::ios::trunc);
+                output << test::snapshotStorageEnvelope(key.value(), payload);
+                REQUIRE(output.good());
+            }
+            auto sql = infrastructure::SqlitePersistenceBackend::open({directory / "state.db"});
+            REQUIRE(sql);
+            REQUIRE(sql.value()->execute("UPDATE snapshot_index SET digest=?,payload_size=?",
+                std::array{foundation::Value{std::string(digest.value())}, foundation::Value{static_cast<std::int64_t>(payload.size())}}));
+            auto latest = service->latestSnapshot(document);
+            auto recovered = service->recover();
+            CHECK_FALSE(latest); CHECK_FALSE(recovered);
+            if(!latest) { CHECK(std::string(latest.error().code.value()) == "Persistence.SnapshotContentMismatch"); }
+            if(!recovered) { CHECK(std::string(recovered.error().code.value()) == "Persistence.SnapshotContentMismatch"); }
+            service.reset();
+            rejectRestart(directory, document, "Persistence.SnapshotContentMismatch");
+        }
+    }
+}
+
 TEST_CASE("Snapshot history identity restores journal only snapshot only and mixed owners", "[snapshot-history-identity]")
 {
     for(const int source : {0, 1, 2}) {
@@ -233,6 +342,65 @@ TEST_CASE("Snapshot history identity restores journal only snapshot only and mix
             }
         }
     }
+}
+
+TEST_CASE("Snapshot anchor preserves journal deletion against snapshot resurrection", "[snapshot-anchor]")
+{
+    const auto directory = root();
+    const auto document = id<kernel::DocumentId>("document.deleted-anchor");
+    const auto key = id<kernel::SnapshotId>("snapshot.deleted-anchor");
+    state::DocumentStore documents;
+    REQUIRE(documents.addDocument(id<kernel::ProjectId>("project.deleted-anchor"), document));
+    auto service = test::openPersistenceFixture(directory / "state.db", directory / "files");
+    runtime::TransactionManager transactions(documents, service.get());
+    touch(transactions, document, "transaction.deleted-anchor");
+    auto before = service->captureSnapshot(id<kernel::SnapshotId>("snapshot.before-delete"), documents.snapshot(document).value());
+    REQUIRE(before);
+    auto removal = transactions.begin(id<kernel::TransactionId>("transaction.remove-anchor"), document);
+    REQUIRE(removal);
+    REQUIRE(removal.value()->removeObject(id<kernel::ObjectId>("object.transaction.deleted-anchor")));
+    REQUIRE(removal.value()->commit());
+    auto after = service->captureSnapshot(key, documents.snapshot(document).value());
+    REQUIRE(after);
+    CHECK(service->latestSnapshot(document)); CHECK(service->recover());
+    auto value = infrastructure::JsonconsAdapter{}.deserialize(after.value().payload).value();
+    const auto oldValue = infrastructure::JsonconsAdapter{}.deserialize(before.value().payload).value();
+    value.getIf<foundation::Value::Object>()->at("objects") = oldValue.getIf<foundation::Value::Object>()->at("objects");
+    replaceSnapshotFixture(directory, key, value);
+    auto latest = service->latestSnapshot(document);
+    auto recovered = service->recover();
+    REQUIRE_FALSE(latest); REQUIRE_FALSE(recovered);
+    CHECK(std::string(latest.error().code.value()) == "Persistence.SnapshotContentMismatch");
+    CHECK(std::string(recovered.error().code.value()) == "Persistence.SnapshotContentMismatch");
+    service.reset();
+    rejectRestart(directory, document, "Persistence.SnapshotContentMismatch");
+}
+
+TEST_CASE("Snapshot anchor validates document ownership beyond captured watermark", "[snapshot-anchor]")
+{
+    const auto directory = root();
+    const auto document = id<kernel::DocumentId>("document.owner-anchor");
+    const auto key = id<kernel::SnapshotId>("snapshot.owner-anchor");
+    state::DocumentStore documents;
+    REQUIRE(documents.addDocument(id<kernel::ProjectId>("project.owner-anchor"), document));
+    auto service = test::openPersistenceFixture(directory / "state.db", directory / "files");
+    auto before = service->captureSnapshot(key, documents.snapshot(document).value());
+    REQUIRE(before); CHECK(before.value().journalSequence == 0U);
+    runtime::TransactionManager transactions(documents, service.get());
+    touch(transactions, document, "transaction.owner-anchor");
+    auto value = infrastructure::JsonconsAdapter{}.deserialize(before.value().payload).value();
+    value.getIf<foundation::Value::Object>()->at("projectId") = foundation::Value{"project.foreign-anchor"};
+    replaceSnapshotFixture(directory, key, value);
+    auto sql = infrastructure::SqlitePersistenceBackend::open({directory / "state.db"});
+    REQUIRE(sql);
+    REQUIRE(sql.value()->execute("UPDATE snapshot_index SET project_id='project.foreign-anchor'"));
+    auto latest = service->latestSnapshot(document);
+    auto recovered = service->recover();
+    CHECK_FALSE(latest); REQUIRE_FALSE(recovered);
+    if(!latest) { CHECK(std::string(latest.error().code.value()) == "Persistence.DocumentOwnershipChanged"); }
+    CHECK(std::string(recovered.error().code.value()) == "Persistence.DocumentOwnershipChanged");
+    service.reset();
+    rejectRestart(directory, document, "Persistence.DocumentOwnershipChanged");
 }
 
 TEST_CASE("Snapshot history identity preserves detached and removed source ownership", "[snapshot-history-identity]")
