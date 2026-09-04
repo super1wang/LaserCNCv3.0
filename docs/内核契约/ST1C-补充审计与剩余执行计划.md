@@ -10,14 +10,14 @@
 
 | 节点 | 内容及验收 | 状态 |
 | --- | --- | --- |
-| C1a | ProjectRevision 恢复独立于 Open 文档集合；非零修订、全部 Detached/Removed、重启新文档提交、再次恢复；多项目与 Open/Detached 混合 | 进行中，先建立缺陷回归 |
+| C1a | ProjectRevision 恢复独立于 Open 文档集合；非零修订、全部 Detached/Removed、重启新文档提交、再次恢复；多项目与 Open/Detached 混合 | 本地检查点通过：Debug 286/286、专项 16/16、新增 2 项各 3 次、纯生产与架构通过 |
 | C1b | Journal 写入端拒绝过期修订，事务内一致性检查与 C5 独占权协同；失败不发布内存/History/Event，拒绝后仍可恢复 | 未开始，不能由 C1a 替代 |
 | C2a | Kernel 统一准入与 shutdown 线性化；所有 scope、Project/Document 生命周期、Task 提交、Workflow/Script start/advance 的检查后计数前窗口 | 未开始 |
 | C2b | Project-only 直接租约、长期活动桥接、legacy 恢复；关闭控制操作不被自身普通执行租约阻塞，open 不要求目标已经 Open；目录版本失效语义 | 未开始 |
 | C2c | Host 生命周期线程模型、析构/drain/超时依赖保留；明确执行器销毁保证，非协作任务不能因停止超时被当成已结束 | 未开始 |
 | C3 | DocumentId 与 Snapshot 存储键解耦；Unicode、路径/保留字符、长度边界、大小写、时钟回拨、进程重启唯一性 | 未开始 |
 | C4 | 公开 attach(DocumentImage) 收口；内部恢复私有化，导入复用唯一事务/认证持久链；Host 负向编译探针，失败无可执行半状态 | 未开始 |
-| C5 | 恢复前强制单活动 Host 独占，第二 Host 拒绝；SQLite 耐久配置校验与诊断；不扩展多写者数据库或宣称物理断电认证 | 未开始，设计须在 C1b 前确认 |
+| C5 | 恢复前强制单活动 Host 独占，第二 Host 拒绝；SQLite 耐久配置校验与诊断；不扩展多写者数据库或宣称物理断电认证 | 下一节点，前置代码核对完成，设计/实现及验证待执行；先于 C1b |
 | C6 | 冻结 API/DTO/持久格式清单和兼容性，不承诺跨工具链 C++ ABI；长同步调用与 Task 契约、统一输入预算、有界终态保留 | 未开始，必须形成可检查契约 |
 | C7 | 定向文档恢复、Schema 缓存、容量/性能回退指标分级；先测量再确定支持配置及必要优化，不盲目重构全量复制模型 | 未开始，可经证据延后优化但须明确支持上限 |
 | C8 | 可重复本地门禁与证据清单、CI 分层策略；远端 Required Status/Runner/签名需实际可用配置，不把未配置写成已启用 | 未开始，外部权限问题单列，不阻塞无关本地实现 |
@@ -27,11 +27,24 @@ C3/C4 可在 C2 后独立交付。C6/C7 可延后的实现优化必须列明理�
 
 ## C1a 修复边界与回归
 
-Journal/Snapshot 已保存并验证 ProjectRevision；当前缺陷是安装阶段丢弃非 Open 文档及其携带的项目修订。先将全部已校验项目修订作为独立恢复输入，与 Open 文档镜像一起原子安装到现有 DocumentStore。装载状态不决定项目修订是否存在，不新增第二套 Transaction/History，不在生命周期目录复制未经事务同步的修订。
+Journal/Snapshot 已保存并验证 ProjectRevision；本节点修正安装阶段丢弃非 Open 文档及其携带项目修订的问题。全部已校验项目修订作为独立恢复输入，与 Open 文档镜像一起原子安装到现有 DocumentStore。装载状态不决定项目修订是否存在，不新增第二套 Transaction/History，不在生命周期目录复制未经事务同步的修订。
 
 该修复只解决已提交修订重启回零，C1b/C5 继续处理写入端与独占权。目录变化的失效语义在 C2b/C6 明确 Project 内容修订和 CatalogRevision/epoch 的分工，不把 open/close 冒充业务提交。
 
 回归必须通过真实 ExecutionGateway 写入非零状态，覆盖项目仍 Open、项目 Closed、文档 Removed；销毁并新建 Kernel，未打开旧文档即创建新文档，检查继承的 ProjectRevision 和局部零修订，再提交并再次启动，检查修订链、对象和 History。多项目、混合 Open/Detached、配置期新文档也需覆盖。先在旧代码运行失败并保留日志，不能只检查空文档 Revision=0。
+
+C1a 实施与证据见 [项目修订独立恢复交付](../阶段交付/2026-09-04-ST1C1a-项目修订独立恢复.md)。下一步先完成 C5 的单 Host 所有权与耐久配置设计/实现，再接 C1b 写入端事务检查；C1a 不等于恢复了对已损坏修订链的写入权限，也不自动修补既有损坏数据库。
+
+## C5 / C1b 实施前置核对
+
+当前 `IPersistenceBackend` 只有 SQL 与事务方法，SQLite Adapter 只显式设置外键、错误码和 busy timeout，`beginTransaction` 使用 `BEGIN IMMEDIATE`。这些不等于已经实现 Host 生命周期独占或已校验耐久配置；Benchmark 读取 PRAGMA 的环境记录也不等于运行期准入门禁。
+
+- 所有权在 schema 初始化及任何 abandoned claim 恢复之前取得，跨恢复与正常运行保留；第二个 Host 失败不能改写第一个 Host 的状态。故障代理必须转发所有权契约，不能有默认成功的伪实现。
+- 验证同进程/跨进程第二实例、路径别名、正常释放和进程中断后的接管；明确连接、Host 停止、后台任务 drain 和所有权释放顺序。C2c 的未结束任务不得因 shutdown 超时提前让出所有权。
+- 耐久策略必须设置并读回验证，失败拒绝启动，诊断记录实际生效值；不把默认值、配置意图或性能报告当作保证。文件系统及非本地路径的支持边界要明确，不承诺硬件断电结果。
+- C1b 在同一写事务内校验项目与文档前置修订、合法后置变化和所有权；区分新提交与已验证的相同 TransactionId 重放。失败不能发布业务状态、History 或成功提交事件；失败诊断/幂等失败状态仍按既有契约处理。不能只检查全局序号或 SQL INSERT 成功。
+
+上述是实施要求，所有权接口、平台机制及耐久策略仍待 C5 实现与验证，不把前置代码核对标记为 C5 已完成。
 
 ## Project / Document 与公共入口边界
 

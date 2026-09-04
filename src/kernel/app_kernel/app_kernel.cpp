@@ -4,6 +4,7 @@
 #include <lasercnc/runtime/asset_validation.hpp>
 
 #include <algorithm>
+#include <map>
 #include <set>
 #include <string>
 #include <utility>
@@ -275,6 +276,18 @@ foundation::Result<void> AppKernel::restoreState()
                 }
             }
         }
+        // Collect project revisions before filtering detached or removed documents.
+        // 中文翻译：在过滤 Detached/Removed 文档之前提取项目修订，装载集合不能决定项目修订是否存在。
+        std::map<ProjectId, state::Revision> recoveredProjectRevisions;
+        for(const auto& image : recovered.value().documents) {
+            const auto revision = image.revisions.at(state::RevisionScope::Project);
+            const auto [found, inserted] = recoveredProjectRevisions.try_emplace(image.projectId, revision);
+            if(!inserted && found->second != revision) {
+                return foundation::Result<void>::failure(foundation::makeError(
+                    "Document.RecoveryProjectRevisionConflict", foundation::ErrorCategory::Infrastructure,
+                    "Verified recovery images disagree on their project revision"));
+            }
+        }
         // Only verified durable roots can seed the once-only legacy migration.
         // 中文翻译：只有已验证的持久文档根身份可以参与一次性旧目录迁移。
         std::set<ProjectId> durableRoots;
@@ -325,12 +338,9 @@ foundation::Result<void> AppKernel::restoreState()
                 continue;
             }
             state::Revision projectRevision;
-            for(const auto& image : recovered.value().documents) {
-                if(image.projectId == record.projectId) {
-                    projectRevision = image.revisions.at(
-                        state::RevisionScope::Project);
-                    break;
-                }
+            const auto revision = recoveredProjectRevisions.find(record.projectId);
+            if(revision != recoveredProjectRevisions.end()) {
+                projectRevision = revision->second;
             }
             restoredImages.push_back(state::DocumentImage {
                 record.projectId,
@@ -364,7 +374,7 @@ foundation::Result<void> AppKernel::restoreState()
                 if(!saved) { return saved; }
             }
         }
-        auto restored = documents_.restoreDocuments(restoredImages);
+        auto restored = documents_.restoreDocuments(restoredImages, recoveredProjectRevisions);
         if(!restored) {
             state_ = AppKernelState::Failed;
             return foundation::Result<void>::failure(foundation::makeError(

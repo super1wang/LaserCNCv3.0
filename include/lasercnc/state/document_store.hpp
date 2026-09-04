@@ -41,7 +41,8 @@ private:
     friend class runtime::TransactionManager;
 
     [[nodiscard]] foundation::Result<void> restoreDocuments(
-        std::span<const DocumentImage> images);
+        std::span<const DocumentImage> images,
+        const std::map<kernel::ProjectId, Revision>& recoveredProjectRevisions = {});
     [[nodiscard]] foundation::Result<void> detachDocument(
         const kernel::DocumentId& documentId);
 

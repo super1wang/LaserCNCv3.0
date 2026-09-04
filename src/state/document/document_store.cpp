@@ -80,11 +80,25 @@ foundation::Result<Document> DocumentStore::snapshot(
 }
 
 foundation::Result<void> DocumentStore::restoreDocuments(
-    std::span<const DocumentImage> images)
+    std::span<const DocumentImage> images,
+    const std::map<kernel::ProjectId, Revision>& recoveredProjectRevisions)
 {
     std::unique_lock lock(mutex_);
     auto nextProjectRevisions = projectRevisions_;
     auto nextDocuments = documents_;
+    // Project revisions survive even when none of their documents are loaded.
+    // 中文翻译：即使项目没有任何已装载文档，也必须保留其已验证的项目修订。
+    for(const auto& [projectId, revision] : recoveredProjectRevisions) {
+        const auto existing = nextProjectRevisions.find(projectId);
+        if(existing != nextProjectRevisions.end()
+           && existing->second.value() != 0U && existing->second != revision) {
+            return foundation::Result<void>::failure(foundation::makeError(
+                "Document.RecoveryProjectRevisionConflict",
+                foundation::ErrorCategory::Infrastructure,
+                "A recovered project revision conflicts with installed state"));
+        }
+        nextProjectRevisions.insert_or_assign(projectId, revision);
+    }
     for(const auto& image : images) {
         ObjectRegistry objects;
         for(const auto& object : image.objects) {
@@ -111,7 +125,7 @@ foundation::Result<void> DocumentStore::restoreDocuments(
 
         const auto project = nextProjectRevisions.find(image.projectId);
         if(project != nextProjectRevisions.end()
-           && project->second.value() != 0U
+           && (project->second.value() != 0U || recoveredProjectRevisions.contains(image.projectId))
            && project->second != image.revisions.at(RevisionScope::Project)) {
             return foundation::Result<void>::failure(documentError(
                 "Document.RecoveryProjectRevisionConflict",

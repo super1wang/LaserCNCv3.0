@@ -418,6 +418,179 @@ void rewriteJournal(
 
 } // namespace
 
+namespace {
+std::filesystem::path projectRevisionRoot()
+{
+    static std::atomic_uint sequence{0U};
+    const auto tick = std::chrono::system_clock::now().time_since_epoch().count();
+    auto root = std::filesystem::path{LCNC_STRESS_TEST_ROOT} / "project-revision"
+        / (std::to_string(tick) + "-" + std::to_string(sequence.fetch_add(1U)));
+    std::filesystem::create_directories(root);
+    return root;
+}
+
+void configureProjectRevisionPersistence(AppKernel& kernel, const std::filesystem::path& root)
+{
+    auto backend = SqlitePersistenceBackend::open({root / "state.db"});
+    REQUIRE(backend.hasValue());
+    auto snapshots = FilesystemSnapshotStore::create({root / "snapshots", 1024U * 1024U});
+    REQUIRE(snapshots.hasValue());
+    REQUIRE(kernel.configurePersistence(std::move(backend).value(), std::make_shared<JsonconsAdapter>(),
+        std::make_shared<Sha256HashService>(), std::move(snapshots).value()).hasValue());
+}
+
+void checkProjectDocumentRevision(const AppKernel& kernel, const DocumentId& document,
+    std::uint64_t projectRevision, std::uint64_t documentRevision)
+{
+    auto snapshot = kernel.documents().snapshot(document);
+    REQUIRE(snapshot.hasValue());
+    CHECK(snapshot.value().revisions().at(RevisionScope::Project).value() == projectRevision);
+    CHECK(snapshot.value().revisions().at(RevisionScope::Document).value() == documentRevision);
+}
+}
+
+TEST_CASE("Project revision survives restart with no loaded children and a subsequent commit", "[project-revision][recovery]")
+{
+    bool closeProject = false;
+    bool removeDocuments = false;
+    bool configuredNewDocument = false;
+    SECTION("all children Detached") {}
+    SECTION("closed project reopened without its old children") { closeProject = true; }
+    SECTION("all children Removed") { removeDocuments = true; }
+    SECTION("new child configured before recovery") { configuredNewDocument = true; }
+    const auto root = projectRevisionRoot();
+    INFO("Retained recovery fixture: " << root.string());
+    const auto project = validId<ProjectId>("project.revision");
+    const auto a = validId<DocumentId>("document.revision.a");
+    const auto b = validId<DocumentId>("document.revision.b");
+    const auto c = validId<DocumentId>("document.revision.c");
+    const auto session = validId<SessionId>("session.revision");
+    {
+        AppKernel kernel;
+        configureProjectRevisionPersistence(kernel, root);
+        configureRuntime(kernel, project, a, session, true);
+        REQUIRE(kernel.addDocument(project, b));
+        REQUIRE(kernel.bootstrap());
+        REQUIRE(kernel.execution().executeCommand(request("request.revision.a", "kernel.history.create",
+            project, a, session, "object.a")));
+        REQUIRE(kernel.execution().executeCommand(request("request.revision.b", "kernel.history.create",
+            project, b, session, "object.b")));
+        checkProjectDocumentRevision(kernel, a, 2U, 1U);
+        if(closeProject) {
+            REQUIRE(kernel.projectRuntime().close(project));
+        } else {
+            REQUIRE(kernel.documentRuntime().close(a));
+            REQUIRE(kernel.documentRuntime().close(b));
+        }
+        if(removeDocuments) {
+            REQUIRE(kernel.documentRuntime().remove(a));
+            REQUIRE(kernel.documentRuntime().remove(b));
+        }
+        REQUIRE(kernel.shutdown());
+    }
+    {
+        AppKernel kernel;
+        configureProjectRevisionPersistence(kernel, root);
+        configureRuntime(kernel, project, c, session, configuredNewDocument);
+        REQUIRE(kernel.bootstrap());
+        CHECK_FALSE(kernel.documents().contains(a));
+        CHECK_FALSE(kernel.documents().contains(b));
+        if(closeProject) {
+            CHECK(kernel.projectRuntime().lifecycle(project).value().state == ProjectLifecycleState::Closed);
+            REQUIRE(kernel.projectRuntime().open(project));
+        }
+        if(!configuredNewDocument) { REQUIRE(kernel.documentRuntime().create(project, c)); }
+        checkProjectDocumentRevision(kernel, c, 2U, 0U);
+        REQUIRE(kernel.execution().executeCommand(request("request.revision.c", "kernel.history.create",
+            project, c, session, "object.c")));
+        checkProjectDocumentRevision(kernel, c, 3U, 1U);
+        REQUIRE(kernel.shutdown());
+    }
+    {
+        AppKernel kernel;
+        configureProjectRevisionPersistence(kernel, root);
+        configureRuntime(kernel, project, c, session, false);
+        auto booted = kernel.bootstrap();
+        INFO("Recovery result: " << (booted ? std::string_view{"success"} : booted.error().code.value()));
+        REQUIRE(booted);
+        checkProjectDocumentRevision(kernel, c, 3U, 1U);
+        CHECK(hasObject(kernel, c, "object.c"));
+        CHECK(kernel.history().snapshot(c).value().cursor == HistoryCursor{1U, 1U});
+        CHECK_FALSE(kernel.documents().contains(a));
+        CHECK_FALSE(kernel.documents().contains(b));
+        if(removeDocuments) {
+            CHECK_FALSE(kernel.documentRuntime().open(a));
+        } else {
+            REQUIRE(kernel.documentRuntime().open(a));
+            checkProjectDocumentRevision(kernel, a, 3U, 1U);
+            CHECK(hasObject(kernel, a, "object.a"));
+            CHECK(kernel.history().snapshot(a).value().cursor == HistoryCursor{1U, 1U});
+        }
+        REQUIRE(kernel.shutdown());
+    }
+}
+
+TEST_CASE("Project revision recovery isolates projects with mixed open and detached children", "[project-revision][recovery]")
+{
+    const auto root = projectRevisionRoot();
+    INFO("Retained recovery fixture: " << root.string());
+    const auto p = validId<ProjectId>("project.p");
+    const auto q = validId<ProjectId>("project.q");
+    const auto a = validId<DocumentId>("document.p.a");
+    const auto b = validId<DocumentId>("document.p.b");
+    const auto c = validId<DocumentId>("document.p.c");
+    const auto d = validId<DocumentId>("document.q.d");
+    const auto e = validId<DocumentId>("document.q.e");
+    const auto session = validId<SessionId>("session.revision");
+    {
+        AppKernel kernel;
+        configureProjectRevisionPersistence(kernel, root);
+        configureRuntime(kernel, p, a, session, true);
+        REQUIRE(kernel.addDocument(p, b));
+        REQUIRE(kernel.addDocument(q, d));
+        REQUIRE(kernel.bootstrap());
+        REQUIRE(kernel.execution().executeCommand(request("request.a", "kernel.history.create", p, a, session, "object.a")));
+        REQUIRE(kernel.execution().executeCommand(request("request.b", "kernel.history.create", p, b, session, "object.b")));
+        REQUIRE(kernel.execution().executeCommand(request("request.d", "kernel.history.create", q, d, session, "object.d")));
+        REQUIRE(kernel.documentRuntime().close(b));
+        REQUIRE(kernel.documentRuntime().close(d));
+        REQUIRE(kernel.shutdown());
+    }
+    {
+        AppKernel kernel;
+        configureProjectRevisionPersistence(kernel, root);
+        configureRuntime(kernel, p, a, session, false);
+        REQUIRE(kernel.bootstrap());
+        checkProjectDocumentRevision(kernel, a, 2U, 1U);
+        CHECK_FALSE(kernel.documents().contains(b));
+        CHECK_FALSE(kernel.documents().contains(d));
+        REQUIRE(kernel.documentRuntime().create(p, c));
+        REQUIRE(kernel.documentRuntime().create(q, e));
+        checkProjectDocumentRevision(kernel, c, 2U, 0U);
+        checkProjectDocumentRevision(kernel, e, 1U, 0U);
+        REQUIRE(kernel.execution().executeCommand(request("request.c", "kernel.history.create", p, c, session, "object.c")));
+        REQUIRE(kernel.execution().executeCommand(request("request.e", "kernel.history.create", q, e, session, "object.e")));
+        REQUIRE(kernel.documentRuntime().open(b));
+        REQUIRE(kernel.documentRuntime().open(d));
+        checkProjectDocumentRevision(kernel, b, 3U, 1U);
+        checkProjectDocumentRevision(kernel, d, 2U, 1U);
+        REQUIRE(kernel.shutdown());
+    }
+    {
+        AppKernel kernel;
+        configureProjectRevisionPersistence(kernel, root);
+        configureRuntime(kernel, p, a, session, false);
+        REQUIRE(kernel.bootstrap());
+        for(const auto& document : {a, b, c}) { checkProjectDocumentRevision(kernel, document, 3U, 1U); }
+        for(const auto& document : {d, e}) { checkProjectDocumentRevision(kernel, document, 2U, 1U); }
+        CHECK(hasObject(kernel, b, "object.b"));
+        CHECK(hasObject(kernel, d, "object.d"));
+        CHECK(kernel.history().snapshot(c).value().cursor == HistoryCursor{1U, 1U});
+        CHECK(kernel.history().snapshot(e).value().cursor == HistoryCursor{1U, 1U});
+        REQUIRE(kernel.shutdown());
+    }
+}
+
 TEST_CASE("Recovery object admission runs before module initialization and rolls back contributions", "[persistence][object-type][admission]")
 {
     class ObserverModule final : public IModule {

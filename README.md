@@ -4,7 +4,7 @@ LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9 及 K10A–K10E 的�
 
 ## 已完成阶段
 
-当前收口按 [ST1C 补充执行计划](docs/内核契约/ST1C-补充审计与剩余执行计划.md) 继续：先修复非零 ProjectRevision 独立恢复，再闭合整体准入、存储键、可信装载、单 Host 及冻结契约。历史门禁成绩不表示这些新发现已解决。
+当前收口按 [ST1C 补充执行计划](docs/内核契约/ST1C-补充审计与剩余执行计划.md) 继续：C1a 非零 ProjectRevision 独立恢复已通过本地检查点（Debug 286/286、专项 16/16、新增 2 项各 3 次、纯生产通过），见 [C1a 交付](docs/阶段交付/2026-09-04-ST1C1a-项目修订独立恢复.md)。下一步 C5 单 Host/耐久配置、C1b 写入端修订检查，再按计划闭合整体准入、存储键、可信装载及冻结契约；历史门禁成绩不表示剩余新发现已解决。
 
 - Phase 1：Foundation（`StrongId`、`Value`、`Result`、`Error`、`Schema`）
 - Phase 2：Application Composition（`AppKernel`、`ServiceRegistry`、`ModuleRuntime`）
