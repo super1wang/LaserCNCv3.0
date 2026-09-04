@@ -3212,6 +3212,68 @@ TEST_CASE("AppKernel restores a running workflow at the same idempotent attempt"
     removeSnapshotDirectory(snapshotDirectory);
 }
 
+TEST_CASE("Instance ownership retains cancellation until terminal checkpoint retry succeeds", "[persistence][workflow][instance-ownership]")
+{
+    using namespace lasercnc::test;
+    for(const bool throws : {false, true}) {
+        AppKernel kernel;
+        const auto request = persistentWorkflowRequest("workflow.owner-cancel");
+        REQUIRE(kernel.executionServices().configure(std::make_shared<JsonconsAdapter>(),
+            std::make_shared<NullLogService>()));
+        REQUIRE(registerWorkflow(kernel, persistentWorkflowDefinition(false)));
+        REQUIRE(kernel.addDocument(request.projectId, request.documentId));
+        auto sqlite = SqlitePersistenceBackend::open({":memory:"});
+        REQUIRE(sqlite);
+        auto backend = std::make_unique<FaultInjectingBackend>(std::move(sqlite).value());
+        auto* faults = backend.get();
+        const auto directory = uniqueSnapshotDirectory();
+        INFO(directory.string());
+        auto snapshots = FilesystemSnapshotStore::create({directory, 1024U * 1024U});
+        REQUIRE(snapshots);
+        REQUIRE(kernel.configurePersistence(std::move(backend), std::make_shared<JsonconsAdapter>(),
+            std::make_shared<Sha256HashService>(), std::move(snapshots).value()));
+        REQUIRE(kernel.bootstrap());
+        REQUIRE(kernel.execution().startWorkflow(request));
+        unsigned probes = 0U;
+        faults->beforeOperation = [&](BackendPoint point, std::string_view sql) {
+            if(point != BackendPoint::Execute || sql.find("INSERT INTO workflow_instances") == std::string_view::npos) { return; }
+            ++probes;
+            const auto callsBeforeClose = faults->sqlCalls;
+            CHECK_FALSE(kernel.documentRuntime().close(request.documentId));
+            auto closed = kernel.projectRuntime().close(request.projectId);
+            CHECK_FALSE(closed);
+            if(!closed) { CHECK(std::string(closed.error().code.value()) == "Project.CloseBlocked"); }
+            CHECK(faults->sqlCalls == callsBeforeClose);
+        };
+        faults->arm(BackendPoint::Execute, "INSERT INTO workflow_instances", 2U, throws);
+        CHECK_FALSE(kernel.execution().cancelWorkflow(request.workflowId));
+        CHECK(faults->hits == 1U);
+        CHECK(probes == 2U);
+        CHECK(kernel.execution().workflow(request.workflowId).value().state == WorkflowState::Cancelled);
+        auto durable = kernel.persistence().workflowCheckpoint(request.workflowId);
+        REQUIRE(durable);
+        REQUIRE(durable.value().has_value());
+        CHECK(durable.value()->snapshot.state == WorkflowState::CancelRequested);
+        const auto callsBeforeClose = faults->sqlCalls;
+        CHECK_FALSE(kernel.documentRuntime().close(request.documentId));
+        CHECK_FALSE(kernel.projectRuntime().close(request.projectId));
+        CHECK(faults->sqlCalls == callsBeforeClose);
+        CHECK(kernel.documentRuntime().lifecycle(request.documentId).value().state == DocumentLifecycleState::Open);
+        CHECK(kernel.projectRuntime().lifecycle(request.projectId).value().state == ProjectLifecycleState::Open);
+        auto retried = kernel.execution().cancelWorkflow(request.workflowId);
+        REQUIRE(retried);
+        CHECK(retried.value().state == WorkflowState::Cancelled);
+        CHECK(probes == 3U);
+        auto persisted = kernel.persistence().workflowCheckpoint(request.workflowId);
+        REQUIRE(persisted);
+        REQUIRE(persisted.value().has_value());
+        CHECK(persisted.value()->snapshot.state == WorkflowState::Cancelled);
+        faults->beforeOperation = {};
+        REQUIRE(kernel.projectRuntime().close(request.projectId));
+        REQUIRE(kernel.shutdown());
+    }
+}
+
 TEST_CASE("Workflow checkpoint failure prevents handler execution", "[persistence][workflow][failure]")
 {
     const auto path = uniqueDatabasePath();

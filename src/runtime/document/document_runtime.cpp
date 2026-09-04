@@ -467,25 +467,8 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::detachImpl(
         blockers = blockers_;
     }
 
-    if(persist && persistence_.configured()) {
-        kernel::ProjectId projectId = [&]() {
-            std::lock_guard lock(mutex_);
-            return entries_.at(documentId).projectId;
-        }();
-        auto persisted = persistence_.saveDocumentLifecycle(
-            projectId,
-            documentId,
-            persistence::DocumentPersistenceState::Closing);
-        if(!persisted) {
-            std::lock_guard lock(mutex_);
-            auto& entry = entries_.at(documentId);
-            entry.state = DocumentLifecycleState::Failed;
-            entry.error = persisted.error();
-            return foundation::Result<DocumentLifecycleSnapshot>::failure(
-                std::move(persisted).error());
-        }
-    }
-
+    // Seal admission, then inspect ownership before entering persistence or external callbacks.
+    // 中文翻译：先封闭准入并检查所有权，再进入持久化或外部回调，拒绝关闭不得写伪中间态。
     std::array<std::size_t, 4U> blockerCounts{};
     try {
         blockerCounts[0] = blockers.transactions ? blockers.transactions(documentId) : 0U;
@@ -519,24 +502,6 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::detachImpl(
     const auto blockerCount = blockerCounts[0] + blockerCounts[1]
         + blockerCounts[2] + blockerCounts[3];
     if(blockerCount != 0U) {
-        if(persist && persistence_.configured()) {
-            kernel::ProjectId projectId = [&]() {
-                std::lock_guard lock(mutex_);
-                return entries_.at(documentId).projectId;
-            }();
-            auto restored = persistence_.saveDocumentLifecycle(
-                projectId,
-                documentId,
-                persistence::DocumentPersistenceState::Open);
-            if(!restored) {
-                std::lock_guard lock(mutex_);
-                auto& entry = entries_.at(documentId);
-                entry.state = DocumentLifecycleState::Failed;
-                entry.error = restored.error();
-                return foundation::Result<DocumentLifecycleSnapshot>::failure(
-                    std::move(restored).error());
-            }
-        }
         std::lock_guard lock(mutex_);
         auto& entry = entries_.at(documentId);
         entry.state = DocumentLifecycleState::Open;
@@ -553,6 +518,19 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::detachImpl(
     }
 
     if(persist && persistence_.configured()) {
+        const auto closingProjectId = [&]() {
+            std::lock_guard lock(mutex_);
+            return entries_.at(documentId).projectId;
+        }();
+        auto persisted = persistence_.saveDocumentLifecycle(
+            closingProjectId, documentId, persistence::DocumentPersistenceState::Closing);
+        if(!persisted) {
+            std::lock_guard lock(mutex_);
+            auto& entry = entries_.at(documentId);
+            entry.state = DocumentLifecycleState::Failed;
+            entry.error = persisted.error();
+            return foundation::Result<DocumentLifecycleSnapshot>::failure(std::move(persisted).error());
+        }
         auto document = documents_.snapshot(documentId);
         if(!document) {
             std::lock_guard lock(mutex_);

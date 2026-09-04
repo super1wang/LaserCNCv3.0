@@ -447,6 +447,7 @@ public:
         std::map<std::string, std::size_t, std::less<>> loopIndices;
         mutable std::mutex mutex;
         bool advancing{false};
+        std::atomic_size_t publicCalls{0U};
         bool cancellationRequested{false};
         std::optional<kernel::SpanId> activeAdvanceSpanId;
         std::optional<kernel::SpanId> activeNodeSpanId;
@@ -454,6 +455,29 @@ public:
     };
 
     enum class NodeOutcome : std::uint8_t { Completed, Waiting, Failed };
+
+
+    // Keep lifecycle probes non-blocking during callbacks made under the instance mutex.
+    // 中文翻译：实例锁内调用外部回调时，生命周期探测不能反向等待本实例锁。
+    struct CallGuard final {
+        explicit CallGuard(std::shared_ptr<Instance> retained) : instance(std::move(retained))
+        {
+            if(instance) { instance->publicCalls.fetch_add(1U, std::memory_order_acq_rel); }
+        }
+        ~CallGuard()
+        {
+            if(instance) { instance->publicCalls.fetch_sub(1U, std::memory_order_acq_rel); }
+        }
+        CallGuard(const CallGuard&) = delete;
+        CallGuard& operator=(const CallGuard&) = delete;
+        std::shared_ptr<Instance> instance;
+    };
+
+    CallGuard retainCall(const kernel::ScriptExecutionId& executionId) const
+    {
+        auto retained = find(executionId);
+        return CallGuard{retained ? std::move(retained).value() : nullptr};
+    }
 
     foundation::Result<ScriptSnapshot> startScript(ScriptRequest request)
     {
@@ -473,6 +497,13 @@ public:
                     std::move(admitted).error());
             }
             documentActivity.emplace(std::move(admitted).value());
+            auto owner = documentRuntime_->lifecycle(request.documentId);
+            if(!owner) { return foundation::Result<ScriptSnapshot>::failure(std::move(owner).error()); }
+            if(owner.value().projectId != request.projectId) {
+                return foundation::Result<ScriptSnapshot>::failure(scriptRuntimeError(
+                    "Script.ProjectMismatch", foundation::ErrorCategory::Conflict,
+                    "The requested project does not own the instance document", &request.executionId));
+            }
         }
         auto definition = registry_.resolve(request.script);
         if(!definition) {
@@ -719,9 +750,14 @@ public:
         std::size_t count = 0U;
         for(const auto& [unusedExecutionId, instance] : instances_) {
             static_cast<void>(unusedExecutionId);
+            if(instance->request.documentId != documentId) { continue; }
+            if(instance->publicCalls.load(std::memory_order_acquire) != 0U) {
+                ++count;
+                continue;
+            }
             std::lock_guard instanceLock(instance->mutex);
-            if(instance->request.documentId == documentId
-               && !isTerminal(instance->snapshot.state)) {
+            if(!isTerminal(instance->snapshot.state)
+               || instance->publicCalls.load(std::memory_order_acquire) != 0U) {
                 ++count;
             }
         }
@@ -1421,6 +1457,7 @@ foundation::Result<ScriptSnapshot> ScriptRuntime::startScript(ScriptRequest requ
 foundation::Result<ScriptSnapshot> ScriptRuntime::advance(
     const kernel::ScriptExecutionId& executionId)
 {
+    auto activity = impl_->retainCall(executionId);
     const auto startedAt = std::chrono::steady_clock::now();
     const auto context = impl_->observationContext(executionId);
     std::optional<kernel::SpanId> activeSpanId;
@@ -1463,6 +1500,7 @@ foundation::Result<ScriptSnapshot> ScriptRuntime::advance(
 foundation::Result<ScriptSnapshot> ScriptRuntime::cancel(
     const kernel::ScriptExecutionId& executionId)
 {
+    auto activity = impl_->retainCall(executionId);
     return impl_->cancel(executionId);
 }
 

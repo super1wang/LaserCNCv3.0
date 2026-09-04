@@ -476,12 +476,36 @@ public:
         std::vector<kernel::WorkflowStepId> completionOrder;
         mutable std::mutex mutex;
         bool advancing{false};
+        std::atomic_size_t publicCalls{0U};
         bool cancellationRequested{false};
         bool checkpointDirty{false};
         std::optional<kernel::SpanId> activeAdvanceSpanId;
         std::optional<kernel::SpanId> activeStepSpanId;
         std::size_t observedStepCount{0U};
     };
+
+
+    // Keep lifecycle probes non-blocking during callbacks made under the instance mutex.
+    // 中文翻译：实例锁内调用外部回调时，生命周期探测不能反向等待本实例锁。
+    struct CallGuard final {
+        explicit CallGuard(std::shared_ptr<Instance> retained) : instance(std::move(retained))
+        {
+            if(instance) { instance->publicCalls.fetch_add(1U, std::memory_order_acq_rel); }
+        }
+        ~CallGuard()
+        {
+            if(instance) { instance->publicCalls.fetch_sub(1U, std::memory_order_acq_rel); }
+        }
+        CallGuard(const CallGuard&) = delete;
+        CallGuard& operator=(const CallGuard&) = delete;
+        std::shared_ptr<Instance> instance;
+    };
+
+    CallGuard retainCall(const kernel::WorkflowId& workflowId) const
+    {
+        auto retained = find(workflowId);
+        return CallGuard{retained ? std::move(retained).value() : nullptr};
+    }
 
     foundation::Result<WorkflowSnapshot> startWorkflow(WorkflowRequest request)
     {
@@ -501,6 +525,13 @@ public:
                     std::move(admitted).error());
             }
             documentActivity.emplace(std::move(admitted).value());
+            auto owner = documentRuntime_->lifecycle(request.documentId);
+            if(!owner) { return foundation::Result<WorkflowSnapshot>::failure(std::move(owner).error()); }
+            if(owner.value().projectId != request.projectId) {
+                return foundation::Result<WorkflowSnapshot>::failure(runtimeError(
+                    "Workflow.ProjectMismatch", foundation::ErrorCategory::Conflict,
+                    "The requested project does not own the instance document", &request.workflowId));
+            }
         }
         auto definition = registry_.resolve(request.workflow);
         if(!definition) {
@@ -1280,9 +1311,14 @@ public:
         std::size_t count = 0U;
         for(const auto& [unusedWorkflowId, instance] : instances_) {
             static_cast<void>(unusedWorkflowId);
+            if(instance->request.documentId != documentId) { continue; }
+            if(instance->publicCalls.load(std::memory_order_acquire) != 0U) {
+                ++count;
+                continue;
+            }
             std::lock_guard instanceLock(instance->mutex);
-            if(instance->request.documentId == documentId
-               && !isTerminal(instance->snapshot.state)) {
+            if(!isTerminal(instance->snapshot.state) || instance->checkpointDirty
+               || instance->publicCalls.load(std::memory_order_acquire) != 0U) {
                 ++count;
             }
         }
@@ -1818,6 +1854,7 @@ foundation::Result<WorkflowSnapshot> WorkflowRuntime::startWorkflow(WorkflowRequ
 foundation::Result<WorkflowSnapshot> WorkflowRuntime::advance(
     const kernel::WorkflowId& workflowId)
 {
+    auto activity = impl_->retainCall(workflowId);
     const auto startedAt = std::chrono::steady_clock::now();
     const auto context = impl_->observationContext(workflowId);
     std::optional<kernel::SpanId> activeSpanId;
@@ -1860,6 +1897,7 @@ foundation::Result<WorkflowSnapshot> WorkflowRuntime::advance(
 foundation::Result<WorkflowSnapshot> WorkflowRuntime::cancel(
     const kernel::WorkflowId& workflowId)
 {
+    auto activity = impl_->retainCall(workflowId);
     return impl_->cancel(workflowId);
 }
 

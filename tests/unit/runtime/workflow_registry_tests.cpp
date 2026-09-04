@@ -599,6 +599,130 @@ TEST_CASE("Kernel admission covers workflow and script instance acceptance and p
     }
 }
 
+TEST_CASE("Instance ownership rejects a project that does not own the requested document", "[workflow][script][instance-ownership]")
+{
+    for(const bool script : {false, true}) {
+        WorkflowRuntimeFixture fixture;
+        const auto other = validId<ProjectId>("project.wrong-owner");
+        REQUIRE(fixture.kernel.addProject(other));
+        REQUIRE(lasercnc::test::registerScript(fixture.kernel,
+            scriptDefinition("script.owner", {scriptAssign("node.assign", "value", Value{true})})));
+        fixture.bootstrap(workflowDefinition({barrierStep("step.barrier", {})}));
+        if(script) {
+            auto request = scriptRequest("script.owner", "script.owner");
+            request.projectId = other;
+            auto rejected = fixture.kernel.execution().executeScript(request);
+            CHECK_FALSE(rejected);
+            if(!rejected) { CHECK(std::string(rejected.error().code.value()) == "Script.ProjectMismatch"); }
+            CHECK_FALSE(fixture.kernel.execution().script(request.executionId));
+            if(rejected) { REQUIRE(fixture.kernel.execution().cancelScript(request.executionId)); }
+        } else {
+            auto request = workflowRequest("workflow.owner");
+            request.projectId = other;
+            auto rejected = fixture.kernel.execution().startWorkflow(request);
+            CHECK_FALSE(rejected);
+            if(!rejected) { CHECK(std::string(rejected.error().code.value()) == "Workflow.ProjectMismatch"); }
+            CHECK_FALSE(fixture.kernel.execution().workflow(request.workflowId));
+            if(rejected) { REQUIRE(fixture.kernel.execution().cancelWorkflow(request.workflowId)); }
+        }
+        REQUIRE(fixture.kernel.projectRuntime().close(other));
+        REQUIRE(fixture.kernel.shutdown());
+    }
+}
+
+TEST_CASE("Instance ownership retains document and project through terminal observation", "[workflow][script][instance-ownership]")
+{
+    for(const bool script : {false, true}) {
+        for(const bool projectClose : {false, true}) {
+            WorkflowRuntimeFixture fixture;
+            auto exporter = std::make_shared<AdmissionTraceExporter>();
+            exporter->name = script ? "script.advance" : "workflow.advance";
+            REQUIRE(fixture.kernel.traces().addExporter(exporter));
+            REQUIRE(lasercnc::test::registerScript(fixture.kernel,
+                scriptDefinition("script.owner", {scriptAssign("node.assign", "value", Value{true})})));
+            fixture.bootstrap(workflowDefinition({barrierStep("step.barrier", {})}));
+            const auto request = workflowRequest("workflow.owner");
+            const auto scripted = scriptRequest("script.owner", "script.owner");
+            bool probed = false;
+            exporter->beforeExport = [&]() {
+                probed = true;
+                if(projectClose) {
+                    auto closed = fixture.kernel.projectRuntime().close(request.projectId);
+                    CHECK_FALSE(closed);
+                    if(!closed) { CHECK(std::string(closed.error().code.value()) == "Project.CloseBlocked"); }
+                } else {
+                    CHECK_FALSE(fixture.kernel.documentRuntime().close(request.documentId));
+                }
+            };
+            if(script) {
+                REQUIRE(fixture.kernel.execution().executeScript(scripted));
+                auto done = fixture.kernel.execution().advanceScript(scripted.executionId);
+                REQUIRE(done);
+                CHECK(done.value().state == ScriptState::Succeeded);
+            } else {
+                REQUIRE(fixture.kernel.execution().startWorkflow(request));
+                auto done = fixture.kernel.execution().advanceWorkflow(request.workflowId);
+                REQUIRE(done);
+                CHECK(done.value().state == WorkflowState::Succeeded);
+            }
+            CHECK(probed);
+            if(fixture.kernel.projectRuntime().lifecycle(request.projectId).value().state == ProjectLifecycleState::Open) {
+                REQUIRE(fixture.kernel.projectRuntime().close(request.projectId));
+            }
+            REQUIRE(fixture.kernel.shutdown());
+        }
+    }
+}
+
+TEST_CASE("Instance ownership survives reentrant observer failures and allows terminal controls after close", "[workflow][script][instance-ownership]")
+{
+    for(const bool script : {false, true}) {
+        for(const bool terminal : {false, true}) {
+            WorkflowRuntimeFixture fixture;
+            auto exporter = std::make_shared<AdmissionTraceExporter>();
+            exporter->name = script ? (terminal ? "script.advance" : "script.node")
+                : (terminal ? "workflow.advance" : "workflow.step");
+            REQUIRE(fixture.kernel.traces().addExporter(exporter));
+            REQUIRE(lasercnc::test::registerScript(fixture.kernel,
+                scriptDefinition("script.owner", {scriptAssign("node.assign", "value", Value{true})})));
+            fixture.bootstrap(workflowDefinition({assignStep("step.assign", "value", Value{true})}));
+            const auto request = workflowRequest("workflow.owner");
+            const auto scripted = scriptRequest("script.owner", "script.owner");
+            bool probed = false;
+            exporter->beforeExport = [&]() {
+                probed = true;
+                CHECK_FALSE(fixture.kernel.documentRuntime().close(request.documentId));
+                CHECK_FALSE(fixture.kernel.projectRuntime().close(request.projectId));
+                throw std::runtime_error("Injected instance observer failure");
+            };
+            if(script) {
+                REQUIRE(fixture.kernel.execution().executeScript(scripted));
+                auto done = fixture.kernel.execution().advanceScript(scripted.executionId);
+                REQUIRE(done);
+                CHECK(done.value().state == ScriptState::Succeeded);
+            } else {
+                REQUIRE(fixture.kernel.execution().startWorkflow(request));
+                auto done = fixture.kernel.execution().advanceWorkflow(request.workflowId);
+                REQUIRE(done);
+                CHECK(done.value().state == WorkflowState::Succeeded);
+            }
+            CHECK(probed);
+            REQUIRE(fixture.kernel.projectRuntime().close(request.projectId));
+            if(script) {
+                REQUIRE(fixture.kernel.execution().script(scripted.executionId));
+                CHECK(fixture.kernel.execution().cancelScript(scripted.executionId).value().state == ScriptState::Succeeded);
+                CHECK(fixture.kernel.execution().advanceScript(scripted.executionId).value().state == ScriptState::Succeeded);
+            } else {
+                REQUIRE(fixture.kernel.execution().workflow(request.workflowId));
+                CHECK(fixture.kernel.execution().cancelWorkflow(request.workflowId).value().state == WorkflowState::Succeeded);
+                CHECK(fixture.kernel.execution().advanceWorkflow(request.workflowId).value().state == WorkflowState::Succeeded);
+            }
+            CHECK(fixture.kernel.projectRuntime().lifecycle(request.projectId).value().state == ProjectLifecycleState::Closed);
+            REQUIRE(fixture.kernel.shutdown());
+        }
+    }
+}
+
 TEST_CASE("Kernel admission hands asynchronous submission to the scheduler before release", "[workflow][task][kernel-admission]")
 {
     WorkflowRuntimeFixture fixture;

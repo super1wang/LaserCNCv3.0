@@ -9,7 +9,7 @@
 | 子节点 | 必须完成的内容 | 当前状态 |
 | --- | --- | --- |
 | C2b1 | Project-only Command/Query 直接活动租约；异步提交持有项目直到 Scheduler 接管；空项目关闭检查长期 Task，终态发布期间继续阻止关闭 | 本地检查点通过：Debug 320/320、专项 13/13、13 项各 10 次、纯生产/架构/文档通过；见 [C2b1 交付](../阶段交付/2026-09-04-ST1C2b1-项目活动与任务关闭桥接.md) |
-| C2b2 | 生命周期控制与普通执行的明确分类，不能以改成 Global scope 绕过；Workflow/Script 长期归属与关闭/取消边界；legacy 持久身份恢复 | 待实施；已有 Document 子树阻塞不是这些新要求的充分证据 |
+| C2b2 | 生命周期控制与普通执行的明确分类，不能以改成 Global scope 绕过；Workflow/Script 长期归属与关闭/取消边界；legacy 持久身份恢复 | 进行中：[C2b2a 交付](../阶段交付/2026-09-04-ST1C2b2a-编排活动与关闭预检.md) 本地检查点通过，Debug 324/324、专项 20 项各 10 次及纯生产通过；下一步命令分类与恢复，C2b2 全项未签核 |
 | C2b3 | CatalogRevision/epoch 的定义、失效触发与重启语义；不得把 open/close 当作 Project 业务内容提交，不得用墙钟时间冒充单调版本 | 待实施 |
 
 这些子节点只是 C2b 的实施顺序，不改变完整验收范围。C2b1 通过不能将 C2b 标记为已完成；C2c drain/析构和 ST1D 最终认证仍独立保留。
@@ -31,6 +31,14 @@
 ## 尚不能宣称完成的边界
 
 - 现有公开 ProjectRuntime/DocumentRuntime 生命周期控制只取得 C2a 整体短期准入；普通 Project/Document Command 的活动保护不能随意跳过。命令化生命周期控制须明确契约和能力，不允许调用方提供 unchecked/skip 开关。
-- Workflow/Script 目前以必需 DocumentId 关联项目，子树关闭预检覆盖已有场景；其终态发布与取消控制的完整归属仍要独立核验。
+- Workflow/Script 以必需 DocumentId 关联项目。本轮补真实所有者校验及完整 advance/cancel 调用保护，终态 Workflow 的未落库检查点继续阻塞关闭。文档关闭先封闭内存准入并探测长期活动，确认无阻塞后才写 Closing，拒绝不产生 SQL；该局部检查点通过不替代命令化控制及重启归属验收。
 - 旧迁移只从认证的 Journal/Snapshot/DocumentCatalog 提取项目根；历史 Project-only Task/Effect 等材料的关系尚须核验，不能读取未认证字符串直接造项目，也不能在迁移完成后自动修补缺根。
 - Task 的真实执行器 drain 和 AppKernel 析构顺序属于 C2c。活动计数改进不证明物理安全、任意线程析构安全或设备准入。
+
+## C2b2 实施与剩余验收顺序
+
+1. C2b2a 编排活动与关闭预检：请求 ProjectId 必须拥有 DocumentId，拒绝不创建实例；在途 advance/cancel 覆盖节点回调、终态 trace/metrics 和取消检查点；终态未保存不能提前关闭，失败重试恢复；不要求已完成实例的只读/幂等清理控制重新打开容器。本地检查点通过，完整证据见 C2b2a 交付。
+2. 生命周期命令分类：明确治理的控制操作、能力、目标身份及允许状态，close 不被自身普通执行租约阻塞，open 不要求目标已 Open；禁止调用方 skip/unchecked 或改成 Global 绕过。不得把直接 Runtime API 已有支持当作命令化控制已交付。
+3. 持久归属与恢复：核验 legacy Project-only Task/Effect 的认证根；终态 Workflow 在文档 Detached、项目 Closed 和文档 Removed 后的恢复/历史查询必须单独验证。当前 `WorkflowRuntime::restore` 对所有检查点要求文档 Open，已定位与终态历史恢复的潜在冲突，尚未修改，不计通过。活动实例仍必须有有效可执行归属，不得放宽为从未认证 payload 自动造项目。
+
+生产修改前两项实例回归为 0/2、0.17 秒，证实错误 ProjectId 被接受及终态发布中提前关闭。扩展取消故障矩阵又暴露先写 Document Closing、后检查长期活动造成持久化回调重入锁和错误中间态，专项为 19/20；修复预检顺序后 20/20、7.54 秒。失败日志均保留，最终证据随本地交付登记。完成 C2b2a 不关闭后两项，也不关闭 C2b3/C2c/ST1D。

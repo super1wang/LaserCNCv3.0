@@ -14,6 +14,8 @@ C2a 已实现完整执行与生命周期写入口的共享准入，以及 shutdo
 
 C2b1 已实现 Project-only Command/Query 活动保护、无文档 Task 项目关闭桥接及终态发布保护：Debug 320/320、专项 13/13、13 项各 10 次及纯生产门禁通过，见 [C2b1 交付](docs/阶段交付/2026-09-04-ST1C2b1-项目活动与任务关闭桥接.md)。下一步 C2b2 生命周期控制/长期归属/legacy 恢复与 C2b3 目录失效；C2b 全项、C2c 和 ST1D 仍未签核。
 
+C2b2a 已补编排实例真实归属、完整 advance/cancel 保护、未保存终态与文档关闭预检，Debug 324/324、20 项各 10 次及纯生产通过，见 [C2b2a 交付](docs/阶段交付/2026-09-04-ST1C2b2a-编排活动与关闭预检.md)。生命周期命令分类、终态/legacy 恢复、C2b3 和后续冻结节点仍未完成。
+
 - Phase 1：Foundation（`StrongId`、`Value`、`Result`、`Error`、`Schema`）
 - Phase 2：Application Composition（`AppKernel`、`ServiceRegistry`、`ModuleRuntime`）
 - Phase 3：Infrastructure Adapters（日志、JSON、TOML、SQLite、线程池）
