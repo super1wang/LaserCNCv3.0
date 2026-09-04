@@ -27,6 +27,8 @@ constexpr std::array revisionScopes {
     state::RevisionScope::Environment,
 };
 
+constexpr std::size_t maximumTaskErrorChainDepth = 32U;
+
 foundation::Error taskPersistenceError(
     const char* code,
     foundation::ErrorCategory category,
@@ -148,6 +150,43 @@ bool knownSeverity(foundation::Severity severity) noexcept
     return false;
 }
 
+foundation::Result<void> validateTaskError(
+    const std::optional<foundation::Error>& error)
+{
+    if(!error.has_value()) {
+        return foundation::Result<void>::success();
+    }
+    std::array<const foundation::Error*, maximumTaskErrorChainDepth> seen {};
+    const foundation::Error* current = &*error;
+    std::size_t depth = 0U;
+    while(current != nullptr) {
+        for(std::size_t index = 0U; index < depth; ++index) {
+            if(seen[index] == current) {
+                return foundation::Result<void>::failure(taskPersistenceError(
+                    "Persistence.TaskErrorCauseCycle",
+                    foundation::ErrorCategory::Validation,
+                    "A durable task error cause chain contains a cycle"));
+            }
+        }
+        if(depth == maximumTaskErrorChainDepth) {
+            return foundation::Result<void>::failure(taskPersistenceError(
+                "Persistence.TaskErrorCauseTooDeep",
+                foundation::ErrorCategory::Validation,
+                "A durable task error cause chain exceeds the supported depth"));
+        }
+        if(!knownErrorCategory(current->category)
+           || !knownSeverity(current->severity)) {
+            return foundation::Result<void>::failure(taskPersistenceError(
+                "Persistence.InvalidTaskError",
+                foundation::ErrorCategory::Validation,
+                "A durable task error uses an unknown category or severity"));
+        }
+        seen[depth++] = current;
+        current = current->cause.get();
+    }
+    return foundation::Result<void>::success();
+}
+
 foundation::Result<runtime::TaskState> parseTerminalState(std::string_view state)
 {
     if(state == "succeeded") {
@@ -242,24 +281,43 @@ foundation::Value requestValue(
     }};
 }
 
-foundation::Value errorValue(const std::optional<foundation::Error>& error)
+foundation::Value errorValue(
+    const foundation::Error& error,
+    std::int64_t terminalVersion)
+{
+    foundation::Value::Object value {
+        {"category", foundation::Value {static_cast<std::int64_t>(error.category)}},
+        {"code", foundation::Value {std::string(error.code.value())}},
+        {"details", error.details},
+        {"message", foundation::Value {error.message}},
+        {"severity", foundation::Value {static_cast<std::int64_t>(error.severity)}},
+    };
+    if(terminalVersion == 2) {
+        value.emplace(
+            "cause",
+            error.cause == nullptr
+                ? foundation::Value {}
+                : errorValue(*error.cause, terminalVersion));
+    }
+    return foundation::Value {std::move(value)};
+}
+
+foundation::Value errorValue(
+    const std::optional<foundation::Error>& error,
+    std::int64_t terminalVersion)
 {
     if(!error.has_value()) {
         return foundation::Value {};
     }
-    return foundation::Value {foundation::Value::Object {
-        {"category", foundation::Value {static_cast<std::int64_t>(error->category)}},
-        {"code", foundation::Value {std::string(error->code.value())}},
-        {"details", error->details},
-        {"message", foundation::Value {error->message}},
-        {"severity", foundation::Value {static_cast<std::int64_t>(error->severity)}},
-    }};
+    return errorValue(*error, terminalVersion);
 }
 
-foundation::Value terminalValue(const runtime::TaskSnapshot& snapshot)
+foundation::Value terminalValue(
+    const runtime::TaskSnapshot& snapshot,
+    std::int64_t terminalVersion)
 {
     return foundation::Value {foundation::Value::Object {
-        {"error", errorValue(snapshot.error)},
+        {"error", errorValue(snapshot.error, terminalVersion)},
         {"format", foundation::Value {"lasercnc.task-terminal"}},
         {"progress", foundation::Value {snapshot.progress}},
         {"progressMessage", foundation::Value {snapshot.progressMessage}},
@@ -269,7 +327,7 @@ foundation::Value terminalValue(const runtime::TaskSnapshot& snapshot)
         {"task", foundation::Value {std::string(snapshot.task.value())}},
         {"taskId", foundation::Value {std::string(snapshot.taskId.value())}},
         {"traceId", foundation::Value {std::string(snapshot.traceId.value())}},
-        {"version", foundation::Value {std::int64_t {1}}},
+        {"version", foundation::Value {terminalVersion}},
     }};
 }
 
@@ -394,6 +452,87 @@ foundation::Result<void> validateDigest(
     return foundation::Result<void>::success();
 }
 
+foundation::Result<std::shared_ptr<const foundation::Error>> decodeTaskError(
+    const foundation::Value& value,
+    std::int64_t terminalVersion,
+    std::size_t depth = 0U)
+{
+    if(value.kind() == foundation::Value::Kind::Null) {
+        return foundation::Result<std::shared_ptr<const foundation::Error>>::success(
+            nullptr);
+    }
+    if(depth == maximumTaskErrorChainDepth) {
+        return foundation::Result<std::shared_ptr<const foundation::Error>>::failure(
+            taskPersistenceError(
+                "Persistence.InvalidTaskPayload",
+                foundation::ErrorCategory::Infrastructure,
+                "A terminal task error cause chain exceeds the supported depth"));
+    }
+    const auto* persistedError = value.getIf<foundation::Value::Object>();
+    const auto* codeValue = persistedError == nullptr
+        ? nullptr
+        : field(*persistedError, "code");
+    const auto* code = codeValue == nullptr
+        ? nullptr
+        : codeValue->getIf<std::string>();
+    const auto* categoryValue = persistedError == nullptr
+        ? nullptr
+        : field(*persistedError, "category");
+    const auto* category = categoryValue == nullptr
+        ? nullptr
+        : categoryValue->getIf<std::int64_t>();
+    const auto* severityValue = persistedError == nullptr
+        ? nullptr
+        : field(*persistedError, "severity");
+    const auto* severity = severityValue == nullptr
+        ? nullptr
+        : severityValue->getIf<std::int64_t>();
+    const auto* messageValue = persistedError == nullptr
+        ? nullptr
+        : field(*persistedError, "message");
+    const auto* message = messageValue == nullptr
+        ? nullptr
+        : messageValue->getIf<std::string>();
+    const auto* details = persistedError == nullptr
+        ? nullptr
+        : field(*persistedError, "details");
+    const auto* cause = persistedError == nullptr
+        ? nullptr
+        : field(*persistedError, "cause");
+    if(code == nullptr || category == nullptr || severity == nullptr
+       || message == nullptr || details == nullptr || *category < 0
+       || *category > static_cast<std::int64_t>(foundation::ErrorCategory::Internal)
+       || *severity < 0
+       || *severity > static_cast<std::int64_t>(foundation::Severity::Fatal)
+       || (terminalVersion == 2 && cause == nullptr)) {
+        return foundation::Result<std::shared_ptr<const foundation::Error>>::failure(
+            taskPersistenceError(
+                "Persistence.InvalidTaskPayload",
+                foundation::ErrorCategory::Infrastructure,
+                "A terminal task error payload is invalid"));
+    }
+    const auto categoryEnum = static_cast<foundation::ErrorCategory>(*category);
+    const auto severityEnum = static_cast<foundation::Severity>(*severity);
+
+    std::shared_ptr<const foundation::Error> decodedCause;
+    if(terminalVersion == 2) {
+        auto decoded = decodeTaskError(*cause, terminalVersion, depth + 1U);
+        if(!decoded) {
+            return foundation::Result<std::shared_ptr<const foundation::Error>>::failure(
+                std::move(decoded).error());
+        }
+        decodedCause = std::move(decoded).value();
+    }
+    return foundation::Result<std::shared_ptr<const foundation::Error>>::success(
+        std::make_shared<const foundation::Error>(foundation::makeError(
+            *code,
+            categoryEnum,
+            *message,
+            *details,
+            severityEnum,
+            std::move(decodedCause))));
+}
+
 foundation::Result<runtime::TaskSnapshot> decodeTerminal(
     std::string_view payload,
     const kernel::TaskId& indexedTaskId,
@@ -444,7 +583,7 @@ foundation::Result<runtime::TaskSnapshot> decodeTerminal(
     const auto* resultValue = root == nullptr ? nullptr : field(*root, "result");
     const auto* errorValueField = root == nullptr ? nullptr : field(*root, "error");
     if(format == nullptr || *format != "lasercnc.task-terminal" || version == nullptr
-       || *version != 1 || taskIdText == nullptr
+       || (*version != 1 && *version != 2) || taskIdText == nullptr
        || *taskIdText != indexedTaskId.value() || taskNameText == nullptr
        || *taskNameText != indexedTaskName.value() || stateText == nullptr
        || progress == nullptr || message == nullptr || traceText == nullptr
@@ -468,53 +607,15 @@ foundation::Result<runtime::TaskSnapshot> decodeTerminal(
     if(resultValue->kind() != foundation::Value::Kind::Null) {
         result = *resultValue;
     }
+    auto decodedError = decodeTaskError(*errorValueField, *version);
+    if(!decodedError) {
+        return foundation::Result<runtime::TaskSnapshot>::failure(
+            std::move(decodedError).error());
+    }
     std::optional<foundation::Error> error;
-    if(errorValueField->kind() != foundation::Value::Kind::Null) {
-        const auto* persistedError = errorValueField->getIf<foundation::Value::Object>();
-        const auto* codeValue = persistedError == nullptr
-            ? nullptr
-            : field(*persistedError, "code");
-        const auto* code = codeValue == nullptr
-            ? nullptr
-            : codeValue->getIf<std::string>();
-        const auto* categoryValue = persistedError == nullptr
-            ? nullptr
-            : field(*persistedError, "category");
-        const auto* category = categoryValue == nullptr
-            ? nullptr
-            : categoryValue->getIf<std::int64_t>();
-        const auto* severityValue = persistedError == nullptr
-            ? nullptr
-            : field(*persistedError, "severity");
-        const auto* severity = severityValue == nullptr
-            ? nullptr
-            : severityValue->getIf<std::int64_t>();
-        const auto* errorMessageValue = persistedError == nullptr
-            ? nullptr
-            : field(*persistedError, "message");
-        const auto* errorMessage = errorMessageValue == nullptr
-            ? nullptr
-            : errorMessageValue->getIf<std::string>();
-        const auto* details = persistedError == nullptr
-            ? nullptr
-            : field(*persistedError, "details");
-        if(code == nullptr || category == nullptr || severity == nullptr
-           || errorMessage == nullptr || details == nullptr || *category < 0
-           || *category > static_cast<std::int64_t>(foundation::ErrorCategory::Internal)
-           || *severity < 0
-           || *severity > static_cast<std::int64_t>(foundation::Severity::Fatal)) {
-            return foundation::Result<runtime::TaskSnapshot>::failure(
-                taskPersistenceError(
-                    "Persistence.InvalidTaskPayload",
-                    foundation::ErrorCategory::Infrastructure,
-                    "A terminal task error payload is invalid"));
-        }
-        error = foundation::makeError(
-            *code,
-            static_cast<foundation::ErrorCategory>(*category),
-            *errorMessage,
-            *details,
-            static_cast<foundation::Severity>(*severity));
+    auto decodedErrorValue = std::move(decodedError).value();
+    if(decodedErrorValue != nullptr) {
+        error = *std::move(decodedErrorValue);
     }
     return foundation::Result<runtime::TaskSnapshot>::success(runtime::TaskSnapshot {
         indexedTaskId,
@@ -676,13 +777,9 @@ foundation::Result<void> PersistenceService::recordTaskTerminal(
             foundation::ErrorCategory::Validation,
             "Only terminal task snapshots can be persisted as outcomes"));
     }
-    if(snapshot.error.has_value()
-       && (!knownErrorCategory(snapshot.error->category)
-           || !knownSeverity(snapshot.error->severity))) {
-        return foundation::Result<void>::failure(taskPersistenceError(
-            "Persistence.InvalidTaskError",
-            foundation::ErrorCategory::Validation,
-            "A durable task error uses an unknown category or severity"));
+    auto errorValid = validateTaskError(snapshot.error);
+    if(!errorValid) {
+        return errorValid;
     }
     std::lock_guard lock(mutex_);
     if(!initialized_) {
@@ -693,7 +790,7 @@ foundation::Result<void> PersistenceService::recordTaskTerminal(
     }
     bool transactionOpen = false;
     try {
-        auto payload = serializer_->serialize(terminalValue(snapshot));
+        auto payload = serializer_->serialize(terminalValue(snapshot, 2));
         if(!payload) {
             return foundation::Result<void>::failure(std::move(payload).error());
         }
@@ -748,10 +845,26 @@ foundation::Result<void> PersistenceService::recordTaskTerminal(
            || status.value() == "cancelled" || status.value() == "stale") {
             auto storedPayload = textColumn(row, "terminal_payload");
             auto storedDigest = idColumn<kernel::ContentDigest>(row, "terminal_digest");
-            if(!storedPayload || !storedDigest
-               || status.value() != stateName(snapshot.state)
-               || storedPayload.value() != payload.value()
-               || storedDigest.value() != digest.value()) {
+            bool outcomeMatches = storedPayload && storedDigest
+                && status.value() == stateName(snapshot.state)
+                && storedPayload.value() == payload.value()
+                && storedDigest.value() == digest.value();
+            if(!outcomeMatches
+               && (!snapshot.error.has_value() || snapshot.error->cause == nullptr)) {
+                auto legacyPayload = serializer_->serialize(terminalValue(snapshot, 1));
+                if(!legacyPayload) {
+                    return rollback(*backend_, std::move(legacyPayload).error());
+                }
+                auto legacyDigest = hashes_->digest(bytes(legacyPayload.value()));
+                if(!legacyDigest) {
+                    return rollback(*backend_, std::move(legacyDigest).error());
+                }
+                outcomeMatches = storedPayload && storedDigest
+                    && status.value() == stateName(snapshot.state)
+                    && storedPayload.value() == legacyPayload.value()
+                    && storedDigest.value() == legacyDigest.value();
+            }
+            if(!outcomeMatches) {
                 return rollback(*backend_, taskPersistenceError(
                     "Persistence.TaskOutcomeConflict",
                     foundation::ErrorCategory::Conflict,

@@ -2,7 +2,7 @@
 
 ## 当前工作状态：ST1 补齐中
 
-2026-09-04 用户已确认按交叉审计补齐计划。当前状态见 [ST1C 补充执行计划](ST1C-补充审计与剩余执行计划.md)：最新 C6b17 在序列化和事务前拒绝 Journal、Task、Workflow 的未知枚举与矛盾持久形状，见 [交付](../阶段交付/2026-09-05-ST1C6b17-持久DTO写前准入.md)；C6b16 的 Snapshot Store 写入证明继续保留。下一步继续 Host、State、Task Error cause 及其他持久族类型/格式；C6b/c/d、C7/C8、ST1D 仍未签核。历史检查点不自动覆盖新增实现，公共头/声明登记不是完整冻结，历史 31/32 不表示只剩一项。
+2026-09-04 用户已确认按交叉审计补齐计划。当前状态见 [ST1C 补充执行计划](ST1C-补充审计与剩余执行计划.md)：最新 C6b18 将 Task terminal 新写入升级为 v2，保留有界 Error cause，并兼容读取及幂等重放无 cause 的 v1 历史，见 [交付](../阶段交付/2026-09-05-ST1C6b18-Task错误cause版本化持久化.md)；C6b17 的持久 DTO 写前准入继续保留。下一步继续 Host、State 及其他持久族类型/格式；C6b/c/d、C7/C8、ST1D 仍未签核。历史检查点不自动覆盖新增实现，公共头/声明登记不是完整冻结，历史 31/32 不表示只剩一项。
 
 C1a 已修复全部文档 Detached/Removed 后重启丢失 ProjectRevision 的缺陷；旧代码先复现失败，修复后 Debug 286/286、专项 16/16、新增 2 项各 3 次、纯生产及架构检查通过，见 [C1a 交付](../阶段交付/2026-09-04-ST1C1a-项目修订独立恢复.md)。该本地检查点不关闭 C1b/C5 写入端与独占权，也不替代 ST1D 最终签核。
 
@@ -83,6 +83,8 @@ C6b15 本地检查点：真实 Release 红灯确认 Command/Query 未知 Version
 C6b16 本地检查点：真实 Release 红灯确认 Snapshot Persistence 忽略成功 disposition，未知值和不匹配 AlreadyPresent 均会建立可信索引。修复为索引前闭集验证及 AlreadyPresent 精确读回；最终 Debug/Release 选集各 222/222、ASan 三轮 666 次、纯生产 31 项及 71/141 边界通过，见 [交付](../阶段交付/2026-09-05-ST1C6b16-快照存储写入证明准入.md)。下一步继续 Host、其余状态与持久族类型/格式。
 
 C6b17 本地检查点：真实 Release 红灯确认 Journal 变更/历史、Task 资源/状态/Error 与 Workflow 定义/状态/Error 共 15 个非法分支可被持久化或错误归类。修复为序列化和事务前闭集/形状验证，拒绝不留记录；Release 全集 480/480、Debug 选集 225/225、ASan 三轮 675 次、纯生产 31 项及 71/141 边界通过，见 [交付](../阶段交付/2026-09-05-ST1C6b17-持久DTO写前准入.md)。下一步继续 Host、State、Task Error cause 与其他持久类型/格式。
+
+C6b18 本地检查点：Task terminal 新写入升级为 v2，完整保存含根最多 32 层 Error cause；任意层未知枚举、环和第 33 层均在写前拒绝，摘要有效但 cause 畸形/超深的 v2 读取失败关闭。历史 v1 继续读取，无 cause 的精确等价终态可在升级后幂等重放；最终 Release 全集 484/484、Debug/Release 扩大选集各 225+4、ASan 三轮 687 次通过，见 [交付](../阶段交付/2026-09-05-ST1C6b18-Task错误cause版本化持久化.md)。下一步继续 Host、State 与其他持久类型/格式；C6 仍未闭合。
 
 ## F5C 固定版本结论（历史检查点）
 

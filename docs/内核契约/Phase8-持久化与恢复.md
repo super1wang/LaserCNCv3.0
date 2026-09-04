@@ -22,6 +22,7 @@ Phase 8 已验收。Snapshot、状态 Journal、SQLite Control Plane 和原子�
 - 恢复只选择状态完整且摘要验证通过的最新 Snapshot；损坏、缺失、格式不兼容或 Revision 元数据不一致时 fail-closed，不能静默降级到不可信状态。
 - captureSnapshot 只接受 Snapshot Store 的 Created/AlreadyPresent；未知 disposition 在索引前回滚。AlreadyPresent 必须读回同一 SnapshotId 的精确 payload 后才能建立数据库索引，见 [C6b16 契约](ST1C6b16-快照存储写入证明准入.md)。
 - Journal、Task、Workflow 的持久 DTO 在序列化和事务前验证枚举闭集及关键结构形状；未知值不得编码为 `unknown` 或合法默认值后写入，见 [C6b17 契约](ST1C6b17-持久DTO写前准入.md)。
+- Task terminal 新写入使用 v2 保存最多 32 层完整 Error cause，读取兼容 v1；未知枚举、环、超深链和畸形 v2 均失败关闭，无 cause 的等价 v1 重放保持幂等，见 [C6b18 契约](ST1C6b18-Task错误cause版本化持久化.md)。
 - ST1C3c2 将 latestSnapshot 与 recover 的快照解码、Journal 链和锚点认证统一；除了水位/修订，还核对完整历史文档归属和锚点前已入 Journal 对象的最终状态，拒绝遗漏、内容矛盾及删除后复活。未被 Journal 触及的历史基线仍按既有格式处理，不因此获得新的导入授权；当前验收与成本边界见 [C3c2 交付](../阶段交付/2026-09-04-ST1C3c2-统一快照锚点认证.md)。
 - `FilesystemSnapshotStore` 的 ST1C3b 实现将最多 4096 字节的精确逻辑 SnapshotId 映射为固定摘要文件名，并用外层身份信封校验；不把路径形状的 ID 解释成路径。旧 ASCII 安全文件名保留精确大小写兼容，超限 payload、身份冲突或新旧双格式拒绝。详细兼容及验收状态见 [C3 契约](ST1C3-快照身份与存储键.md)。
 - SnapshotId 是不可变内容身份：相同 ID/相同内容重试返回 AlreadyPresent，相同 ID/不同内容返回 `Snapshot.IdentityConflict`。
@@ -76,6 +77,7 @@ AppKernel 拥有 PersistenceService：配置时在 bootstrap 执行 migration，
 
 - `task_history` 在 Task 可调度前保存版本化请求、输入、依赖、资源声明、稳定身份、上下文、修订条件、捕获的 source revisions 和 deadline 身份材料，并计算强摘要。
 - Task 的 Succeeded、Failed、Cancelled、Stale 终态保存完整结果或 Error 材料；终态不可变，相同内容可幂等重试，不同终态或结果返回 `Persistence.TaskOutcomeConflict`。
+- `task-terminal` v2 保存 Error 的完整有界 cause 链；历史 v1 只恢复其原有顶层 Error。升级后的 v1 幂等比较只适用于无 cause 的精确等价材料，不把旧记录中缺失的 cause 视为已经持久化。
 - Scheduler 在运行完成、执行前超时、依赖失败、资源获取失败、取消和关闭取消路径记录终态；`wait()` 只在终态持久化已成功或失败已进入有界错误缓存后返回。
 - 终态持久化失败不反转已完成的 Task 结果，失败可经 `Scheduler::persistenceFailures()` 检索；下次启动仍会把无持久终态的 accepted/running 记录标记为 `Task.InterruptedByRestart`。
 - 重启后 `TaskRuntime::snapshot()`/`wait()` 可在内存 Scheduler 不含该 TaskId 时读取持久历史，但不会自动重跑未完成任务或恢复 handler 执行栈。

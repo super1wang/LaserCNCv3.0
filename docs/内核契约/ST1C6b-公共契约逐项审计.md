@@ -4,7 +4,7 @@
 
 起点 `7377f14`，承接 [C6 总计划](ST1C6-公共契约与输入预算.md) 和 [71 个公共头差异基线](Kernel-1.0-公共头清单.md)。本表区分“声明已登记”“行为已有证据”“缺口待实现”；不以文件数量或源码阅读替代逐入口负例、预算和最终签核。
 
-本轮先登记 Infrastructure 的 8 个公开类、5 个 Options 的全部 13 个字段，以及对应 6 个 platform 端口。路径编码的真实缺陷作为 C6b1 修复；日志别名按 [C6b2 契约](ST1C6b2-日志文件身份与轮转准入.md) 补回归并实现。继续登记 Foundation 的 7 个头、Observability 的 5 个头和 Messaging 的 2 个头所含声明与待验证点；这些登记不等于行为签核。C6b17 已补 Journal/Task/Workflow 持久写入的枚举与关键形状，Kernel/Host、State、Task Error cause 及 Persistence 的其他字段/版本审计仍未完成，不宣称 C6b 已收口。
+本轮先登记 Infrastructure 的 8 个公开类、5 个 Options 的全部 13 个字段，以及对应 6 个 platform 端口。路径编码的真实缺陷作为 C6b1 修复；日志别名按 [C6b2 契约](ST1C6b2-日志文件身份与轮转准入.md) 补回归并实现。继续登记 Foundation 的 7 个头、Observability 的 5 个头和 Messaging 的 2 个头所含声明与待验证点；这些登记不等于行为签核。C6b17 已补 Journal/Task/Workflow 持久写入的枚举与关键形状，C6b18 已补 Task terminal cause v2 与 v1 兼容；Kernel/Host、State 及 Persistence 的其他字段/版本审计仍未完成，不宣称 C6b 已收口。
 
 ## Infrastructure 的配置字段
 
@@ -126,15 +126,17 @@ C6b15 不改公共头、枚举数字、DTO 或持久格式；它只收紧非法�
 
 C6b16 不改公共头、LCNCSN02、逻辑 payload 或数据库版本，见 [契约](ST1C6b16-快照存储写入证明准入.md)。错误适配器的历史错误索引不会自动修复，读取仍 fail-closed。
 
-## Journal、Task 与 Workflow 持久 DTO 写前准入
+## Journal、Task 与 Workflow 持久 DTO 写前准入及 Task cause
 
-| 公开入口 / DTO | 写入字段与版本 | C6b17 已验证边界与剩余项 |
+| 公开入口 / DTO | 写入字段与版本 | C6b17/18 已验证边界与剩余项 |
 | --- | --- | --- |
 | [PersistenceService::append](../../include/lasercnc/persistence/persistence_service.hpp) / TransactionCommit | `lasercnc.state-journal` v4；ObjectChange 的 kind/objectId/before/after；HistoryMutation 的 kind/command/version/target/cursor | 写前拒绝未知 ObjectChangeKind/HistoryMutationKind；Created/Updated/Removed 与 Record/None/Barrier/Undo/Redo 的字段形状、对象身份和 Updated 类型一致性已验证，拒绝不建 Journal。事件内容、Version/Value/集合预算和全格式兼容清单仍待补齐 |
-| acceptTask / TaskRequest；recordTaskTerminal / TaskSnapshot | `lasercnc.task-acceptance` v1；`lasercnc.task-terminal` v1；资源 kind/access 及终态 state/Error category/severity | acceptance 写前逐 ResourceClaim 闭集验证，未知 access 不再默认为 Shared；terminal 区分未知 TaskState 与合法非终态，顶层持久 Error 枚举闭集验证，拒绝后仍保留 Pending acceptance。Task terminal 既有 wire 不保存 cause，本轮不伪称已修复；请求/结果/错误内容预算和 cause 格式继续审计 |
+| acceptTask / TaskRequest；recordTaskTerminal / TaskSnapshot | `lasercnc.task-acceptance` v1；`lasercnc.task-terminal` 新写 v2、读取 v1/v2；资源 kind/access、终态 state 与完整 Error cause | acceptance 写前逐 ResourceClaim 闭集验证，未知 access 不再默认为 Shared；terminal 区分未知 TaskState 与合法非终态。C6b18 保存含根最多 32 层 cause，写前拒绝任意层未知 Error 枚举、环和第 33 层，v2 读取拒绝畸形/超深材料；无 cause 的精确等价 v1 可幂等重放，带 cause 材料不与缺失证据的 v1 等同。请求/结果/错误字节总预算继续审计 |
 | workflowDefinitionDigest；saveWorkflowCheckpoint / WorkflowDefinition、WorkflowSnapshot | definition/checkpoint/step 均为 v1；定义 StepKind/PredicateKind，实例/步骤状态，顶层/步骤/补偿 Error | 两入口共同拒绝未知定义枚举；checkpoint 写前拒绝未知 WorkflowState/WorkflowStepState，并验证全部已持久 Error 及既有 32 层 cause 范围内的 category/severity。拒绝不建实例/步骤记录；定义完整形状仍由 Registry 管理，字符串/Value/步骤总量及状态组合继续审计 |
 
 C6b17 三项 Release 红灯覆盖 15 个分支，修复后 Release 全集 480/480、Debug 选集 225/225、ASan 675 次执行通过；公共头、枚举数字、SQLite schema 和上述 wire 版本均未修改，见 [契约](ST1C6b17-持久DTO写前准入.md)。直接构造 PersistenceService 仍只是独立组件能力，不获得 AppKernel Host 的业务写权限；历史非法材料不自动修复。
+
+C6b18 四项测试覆盖 Task Error cause 字段往返、32/33 层边界、未知枚举、环、v1 读取/幂等重放和摘要有效的畸形 v2；新写格式升级为 v2，但公共头、枚举数字和 SQLite schema 不变。旧二进制不承诺读取 v2，回滚须使用升级前完整数据库备份，见 [契约](ST1C6b18-Task错误cause版本化持久化.md)。
 
 ## 后续顺序（保留完整目标）
 
@@ -147,6 +149,6 @@ C6b5 登记的观察负例中，前三类由 C6b6 取得真实红灯并修复；
 
 以上与观察身份淘汰复用、活动总量、时间顺序和资源预算账本并存；不能以修好某一个枚举后删掉其他必须项。
 
-1. C6b2–b12 检查点保留；C6b13–b17 补编排定义、资源声明、版本解析策略、快照写入证明及持久 DTO 写前准入，见 [最新交付](../阶段交付/2026-09-05-ST1C6b17-持久DTO写前准入.md)。下一步补 Host、State、Task Error cause 与其他持久族 DTO/格式；不以局部修复代签其他入口。
+1. C6b2–b12 检查点保留；C6b13–b17 补编排定义、资源声明、版本解析策略、快照写入证明及持久 DTO 写前准入，C6b18 补 Task Error cause v2 与 v1 兼容，见 [最新交付](../阶段交付/2026-09-05-ST1C6b18-Task错误cause版本化持久化.md)。下一步补 Host、State 与其他持久族 DTO/格式；不以局部修复代签其他入口。
 2. 继续 Foundation、Observability、Messaging 已登记的行为缺口及 Host/执行/状态/持久族逐类型、枚举和 DTO 字段；将源码兼容、权限阶段、线程/寿命、Error cause 和 wire 版本分别关联到测试。已修复的 Schema/消息枚举与合并/错投仅覆盖各子节点列出的范围；观察记录的未知枚举、数值/终态/寿命问题不因“非业务真值”而免审。
 3. C6c/d 执行统一预算、同步与 Task、终态保留；C7 测容量，C8 完整日志/脚本/私有头门禁，ST1D 最终三配置签核。上述均未被本轮 8 个 Adapter 声明登记替代。

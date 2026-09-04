@@ -1239,6 +1239,345 @@ TEST_CASE("Task persistence rejects invalid durable enum values before mutation"
     }
 }
 
+TEST_CASE("Task terminal persistence preserves bounded error causes", "[persistence][task][error-cause][c6b18]")
+{
+    const auto path = uniqueDatabasePath();
+    removeDatabase(path);
+    const auto request = TaskRequest {
+        validId<TaskId>("task.error-cause-roundtrip"),
+        validId<TaskName>("kernel.persistence.error-cause"),
+        Value {Value::Object {}},
+        validId<TraceId>("trace.error-cause-roundtrip")};
+    {
+        PersistenceService service;
+        configureService(service, path);
+        REQUIRE(service.acceptTask(request, std::nullopt).hasValue());
+        auto leaf = std::make_shared<const Error>(makeError(
+            "Test.ErrorCauseLeaf",
+            ErrorCategory::Infrastructure,
+            "leaf",
+            Value {Value::Object {{"level", Value {std::int64_t {2}}}}},
+            Severity::Fatal));
+        auto middle = std::make_shared<const Error>(makeError(
+            "Test.ErrorCauseMiddle",
+            ErrorCategory::Timeout,
+            "middle",
+            Value {Value::Object {{"level", Value {std::int64_t {1}}}}},
+            Severity::Warning,
+            leaf));
+        const auto terminal = TaskSnapshot {
+            request.taskId,
+            request.task,
+            TaskState::Failed,
+            1.0,
+            "failed",
+            request.traceId,
+            std::nullopt,
+            std::nullopt,
+            makeError(
+                "Test.ErrorCauseRoot",
+                ErrorCategory::Internal,
+                "root",
+                Value {Value::Object {{"level", Value {std::int64_t {0}}}}},
+                Severity::Error,
+                middle)};
+        REQUIRE(service.recordTaskTerminal(terminal).hasValue());
+
+        auto observer = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+        REQUIRE(observer.hasValue());
+        const std::array parameters {Value {std::string(request.taskId.value())}};
+        const auto rows = observer.value()->query(
+            "SELECT terminal_payload FROM task_history WHERE task_id=?", parameters);
+        REQUIRE(rows.hasValue());
+        REQUIRE(rows.value().size() == 1U);
+        const auto* payload = rows.value().front().at("terminal_payload").getIf<std::string>();
+        REQUIRE(payload != nullptr);
+        JsonconsAdapter json;
+        const auto decoded = json.deserialize(*payload);
+        REQUIRE(decoded.hasValue());
+        const auto* root = decoded.value().getIf<Value::Object>();
+        REQUIRE(root != nullptr);
+        REQUIRE(root->at("version") == Value {std::int64_t {2}});
+        const auto* persistedError = root->at("error").getIf<Value::Object>();
+        REQUIRE(persistedError != nullptr);
+        CHECK(persistedError->find("cause") != persistedError->end());
+    }
+    {
+        PersistenceService reopened;
+        configureService(reopened, path);
+        const auto restored = reopened.taskHistory(request.taskId);
+        REQUIRE(restored.hasValue());
+        REQUIRE(restored.value().has_value());
+        REQUIRE(restored.value()->error.has_value());
+        const auto& root = *restored.value()->error;
+        CHECK(std::string(root.code.value()) == "Test.ErrorCauseRoot");
+        REQUIRE(root.cause != nullptr);
+        CHECK(std::string(root.cause->code.value()) == "Test.ErrorCauseMiddle");
+        CHECK(root.cause->category == ErrorCategory::Timeout);
+        CHECK(root.cause->severity == Severity::Warning);
+        REQUIRE(root.cause->cause != nullptr);
+        CHECK(std::string(root.cause->cause->code.value()) == "Test.ErrorCauseLeaf");
+        CHECK(root.cause->cause->severity == Severity::Fatal);
+        CHECK(root.cause->cause->cause == nullptr);
+
+        auto maximumRequest = request;
+        maximumRequest.taskId = validId<TaskId>("task.maximum-error-cause-depth");
+        REQUIRE(reopened.acceptTask(maximumRequest, std::nullopt).hasValue());
+        std::shared_ptr<const Error> cause;
+        for(std::size_t depth = 1U; depth < 32U; ++depth) {
+            cause = std::make_shared<const Error>(makeError(
+                "Test.MaximumDepthCause",
+                ErrorCategory::Internal,
+                "bounded",
+                Value {},
+                Severity::Error,
+                std::move(cause)));
+        }
+        const auto maximumTerminal = TaskSnapshot {
+            maximumRequest.taskId,
+            maximumRequest.task,
+            TaskState::Failed,
+            1.0,
+            "failed",
+            maximumRequest.traceId,
+            std::nullopt,
+            std::nullopt,
+            makeError(
+                "Test.MaximumDepthRoot",
+                ErrorCategory::Internal,
+                "root",
+                Value {},
+                Severity::Error,
+                std::move(cause))};
+        REQUIRE(reopened.recordTaskTerminal(maximumTerminal).hasValue());
+        const auto maximumRestored = reopened.taskHistory(maximumRequest.taskId);
+        REQUIRE(maximumRestored.hasValue());
+        REQUIRE(maximumRestored.value().has_value());
+        REQUIRE(maximumRestored.value()->error.has_value());
+        std::size_t restoredDepth = 0U;
+        for(const Error* current = &*maximumRestored.value()->error;
+            current != nullptr;
+            current = current->cause.get()) {
+            ++restoredDepth;
+        }
+        CHECK(restoredDepth == 32U);
+    }
+    removeDatabase(path);
+}
+
+TEST_CASE("Task terminal persistence rejects invalid error cause graphs before mutation", "[persistence][task][error-cause][c6b18]")
+{
+    struct Scenario final { const char* name; const char* errorCode; };
+    const std::array scenarios {
+        Scenario {"nested-invalid-enum", "Persistence.InvalidTaskError"},
+        Scenario {"cyclic-cause", "Persistence.TaskErrorCauseCycle"},
+        Scenario {"overdeep-cause", "Persistence.TaskErrorCauseTooDeep"},
+    };
+    for(std::size_t index = 0U; index < scenarios.size(); ++index) {
+        DYNAMIC_SECTION(scenarios[index].name) {
+            PersistenceService service;
+            configureService(service, ":memory:");
+            auto request = TaskRequest {
+                validId<TaskId>("task.invalid-error-cause"),
+                validId<TaskName>("kernel.persistence.invalid-error-cause"),
+                Value {Value::Object {}},
+                validId<TraceId>("trace.invalid-error-cause")};
+            REQUIRE(service.acceptTask(request, std::nullopt).hasValue());
+            auto snapshot = TaskSnapshot {
+                request.taskId,
+                request.task,
+                TaskState::Failed,
+                1.0,
+                "failed",
+                request.traceId,
+                std::nullopt,
+                std::nullopt,
+                makeError("Test.ErrorRoot", ErrorCategory::Internal, "root")};
+            std::shared_ptr<Error> cycleFirst;
+            std::shared_ptr<Error> cycleSecond;
+            if(index == 0U) {
+                auto invalid = makeError(
+                    "Test.InvalidNestedError", ErrorCategory::Internal, "invalid");
+                invalid.severity = static_cast<Severity>(255U);
+                snapshot.error->cause = std::make_shared<const Error>(std::move(invalid));
+            } else if(index == 1U) {
+                cycleFirst = std::make_shared<Error>(makeError(
+                    "Test.CycleFirst", ErrorCategory::Internal, "first"));
+                cycleSecond = std::make_shared<Error>(makeError(
+                    "Test.CycleSecond", ErrorCategory::Internal, "second"));
+                cycleFirst->cause = cycleSecond;
+                cycleSecond->cause = cycleFirst;
+                snapshot.error->cause = cycleFirst;
+            } else {
+                std::shared_ptr<const Error> cause;
+                for(std::size_t depth = 0U; depth < 32U; ++depth) {
+                    cause = std::make_shared<const Error>(makeError(
+                        "Test.DeepCause", ErrorCategory::Internal, "deep", Value {},
+                        Severity::Error, std::move(cause)));
+                }
+                snapshot.error->cause = std::move(cause);
+            }
+
+            const auto rejected = service.recordTaskTerminal(snapshot);
+            REQUIRE_FALSE(rejected.hasValue());
+            CHECK(std::string(rejected.error().code.value()) == scenarios[index].errorCode);
+            const auto retained = service.taskHistory(request.taskId);
+            REQUIRE(retained.hasValue());
+            REQUIRE(retained.value().has_value());
+            CHECK(retained.value()->state == TaskState::Pending);
+            if(cycleFirst != nullptr) { cycleFirst->cause.reset(); }
+            if(cycleSecond != nullptr) { cycleSecond->cause.reset(); }
+        }
+    }
+}
+
+TEST_CASE("Task terminal persistence reads legacy version one errors", "[persistence][task][error-cause][c6b18]")
+{
+    const auto path = uniqueDatabasePath();
+    removeDatabase(path);
+    const auto request = TaskRequest {
+        validId<TaskId>("task.legacy-error-v1"),
+        validId<TaskName>("kernel.persistence.legacy-error"),
+        Value {Value::Object {}},
+        validId<TraceId>("trace.legacy-error-v1")};
+    {
+        PersistenceService service;
+        configureService(service, path);
+        REQUIRE(service.acceptTask(request, std::nullopt).hasValue());
+        const auto terminal = TaskSnapshot {
+            request.taskId,
+            request.task,
+            TaskState::Failed,
+            1.0,
+            "failed",
+            request.traceId,
+            std::nullopt,
+            std::nullopt,
+            makeError("Test.LegacyError", ErrorCategory::Internal, "legacy")};
+        REQUIRE(service.recordTaskTerminal(terminal).hasValue());
+
+        auto raw = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+        REQUIRE(raw.hasValue());
+        const std::array queryParameters {Value {std::string(request.taskId.value())}};
+        auto rows = raw.value()->query(
+            "SELECT terminal_payload FROM task_history WHERE task_id=?", queryParameters);
+        REQUIRE(rows.hasValue());
+        REQUIRE(rows.value().size() == 1U);
+        JsonconsAdapter json;
+        auto payload = json.deserialize(
+            *rows.value().front().at("terminal_payload").getIf<std::string>());
+        REQUIRE(payload.hasValue());
+        auto* root = payload.value().getIf<Value::Object>();
+        REQUIRE(root != nullptr);
+        root->insert_or_assign("version", Value {std::int64_t {1}});
+        auto* error = root->at("error").getIf<Value::Object>();
+        REQUIRE(error != nullptr);
+        error->erase("cause");
+        auto encoded = json.serialize(payload.value());
+        REQUIRE(encoded.hasValue());
+        Sha256HashService hashes;
+        auto digest = hashes.digest({
+            reinterpret_cast<const std::byte*>(encoded.value().data()),
+            encoded.value().size()});
+        REQUIRE(digest.hasValue());
+        const std::array updateParameters {
+            Value {encoded.value()},
+            Value {std::string(digest.value().value())},
+            Value {std::string(request.taskId.value())}};
+        REQUIRE(raw.value()
+                    ->execute(
+                        "UPDATE task_history SET terminal_payload=?,terminal_digest=? "
+                        "WHERE task_id=?",
+                        updateParameters)
+                    .hasValue());
+        REQUIRE(service.recordTaskTerminal(terminal).hasValue());
+    }
+    {
+        PersistenceService reopened;
+        configureService(reopened, path);
+        const auto restored = reopened.taskHistory(request.taskId);
+        REQUIRE(restored.hasValue());
+        REQUIRE(restored.value().has_value());
+        REQUIRE(restored.value()->error.has_value());
+        CHECK(std::string(restored.value()->error->code.value()) == "Test.LegacyError");
+        CHECK(restored.value()->error->cause == nullptr);
+    }
+    removeDatabase(path);
+}
+
+TEST_CASE("Task terminal persistence rejects malformed persisted version two causes", "[persistence][task][error-cause][c6b18]")
+{
+    const auto malformed = GENERATE(true, false);
+    const auto path = uniqueDatabasePath();
+    removeDatabase(path);
+    const auto request = TaskRequest {
+        validId<TaskId>(malformed ? "task.malformed-error-cause" : "task.overdeep-error-cause"),
+        validId<TaskName>("kernel.persistence.invalid-persisted-cause"),
+        Value {Value::Object {}},
+        validId<TraceId>("trace.invalid-persisted-cause")};
+    {
+        PersistenceService service;
+        configureService(service, path);
+        REQUIRE(service.acceptTask(request, std::nullopt).hasValue());
+        const auto terminal = TaskSnapshot {
+            request.taskId,
+            request.task,
+            TaskState::Failed,
+            1.0,
+            "failed",
+            request.traceId,
+            std::nullopt,
+            std::nullopt,
+            makeError("Test.PersistedError", ErrorCategory::Internal, "persisted")};
+        REQUIRE(service.recordTaskTerminal(terminal).hasValue());
+
+        auto raw = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+        REQUIRE(raw.hasValue());
+        const std::array queryParameters {Value {std::string(request.taskId.value())}};
+        auto rows = raw.value()->query(
+            "SELECT terminal_payload FROM task_history WHERE task_id=?", queryParameters);
+        REQUIRE(rows.hasValue());
+        REQUIRE(rows.value().size() == 1U);
+        JsonconsAdapter json;
+        auto payload = json.deserialize(
+            *rows.value().front().at("terminal_payload").getIf<std::string>());
+        REQUIRE(payload.hasValue());
+        auto& error = payload.value().getIf<Value::Object>()->at("error");
+        if(malformed) {
+            error.getIf<Value::Object>()->insert_or_assign("cause", Value {"invalid"});
+        } else {
+            const auto leaf = error;
+            for(std::size_t depth = 1U; depth < 33U; ++depth) {
+                auto outer = leaf;
+                outer.getIf<Value::Object>()->insert_or_assign("cause", std::move(error));
+                error = std::move(outer);
+            }
+        }
+        auto encoded = json.serialize(payload.value());
+        REQUIRE(encoded.hasValue());
+        Sha256HashService hashes;
+        auto digest = hashes.digest({
+            reinterpret_cast<const std::byte*>(encoded.value().data()),
+            encoded.value().size()});
+        REQUIRE(digest.hasValue());
+        const std::array updateParameters {
+            Value {encoded.value()},
+            Value {std::string(digest.value().value())},
+            Value {std::string(request.taskId.value())}};
+        REQUIRE(raw.value()
+                    ->execute(
+                        "UPDATE task_history SET terminal_payload=?,terminal_digest=? "
+                        "WHERE task_id=?",
+                        updateParameters)
+                    .hasValue());
+
+        const auto loaded = service.taskHistory(request.taskId);
+        REQUIRE_FALSE(loaded.hasValue());
+        CHECK(std::string(loaded.error().code.value()) == "Persistence.TaskTerminalMismatch");
+    }
+    removeDatabase(path);
+}
+
 TEST_CASE("Workflow persistence rejects invalid durable enum values before mutation", "[persistence][workflow][dto][c6b17]")
 {
     struct Scenario final { const char* name; const char* errorCode; };
