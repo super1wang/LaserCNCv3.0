@@ -66,7 +66,9 @@ foundation::Result<void> DiagnosticsService::registerCheck(
             id));
     }
     const auto [unused, inserted] = entries_.emplace(
-        id, Entry {std::move(check), std::nullopt});
+        // Keep the parameter owner until after the lock leaves scope, including rejection.
+        // 中文翻译：保留参数所有者直到锁离开作用域，拒绝时也不在锁内销毁最后一个检查对象。
+        id, Entry {check, std::nullopt});
     static_cast<void>(unused);
     if(!inserted) {
         return foundation::Result<void>::failure(diagnosticError(
@@ -148,6 +150,18 @@ foundation::Result<DiagnosticReport> DiagnosticsService::run(
                     foundation::Value {foundation::Value::Object {
                         {"reportedId", foundation::Value {std::string(value.id.value())}},
                     }});
+            }
+            switch(value.status) {
+            case DiagnosticStatus::Healthy:
+            case DiagnosticStatus::Degraded:
+            case DiagnosticStatus::Unhealthy:
+            case DiagnosticStatus::Unknown:
+                break;
+            default:
+                return unhealthy(id, "Diagnostic check returned an invalid status",
+                    foundation::Value{foundation::Value::Object{
+                        {"errorCode", foundation::Value{"Diagnostics.InvalidStatus"}},
+                        {"reportedStatus", foundation::Value{static_cast<std::int64_t>(value.status)}}}});
             }
             value.observedAt = std::chrono::system_clock::now();
             return value;

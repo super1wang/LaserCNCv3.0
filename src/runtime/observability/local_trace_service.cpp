@@ -215,6 +215,24 @@ foundation::Result<std::unique_ptr<ITraceSpan>> LocalTraceService::startSpan(
                 return;
             }
             try {
+                switch(status) {
+                case TraceStatus::Succeeded:
+                case TraceStatus::Failed:
+                case TraceStatus::Cancelled:
+                case TraceStatus::Stale:
+                    break;
+                default:
+                    error = foundation::makeError(
+                        "Trace.InvalidTerminalStatus", foundation::ErrorCategory::Validation,
+                        "Trace completion requires a declared terminal status",
+                        foundation::Value{foundation::Value::Object{
+                            {"spanId", foundation::Value{std::string(spanId_.value())}},
+                            {"requestedStatus", foundation::Value{static_cast<std::int64_t>(status)}}}},
+                        foundation::Severity::Error,
+                        error ? std::make_shared<const foundation::Error>(std::move(*error)) : nullptr);
+                    status = TraceStatus::Failed;
+                    break;
+                }
                 completion_(status, std::move(error));
             } catch(...) {
             }

@@ -3,15 +3,24 @@
 #include <lasercnc/observability/metrics_service.hpp>
 #include <lasercnc/observability/trace_service.hpp>
 
+// Exercise the production arithmetic at an unreachable-in-practice uint64 counter boundary.
+// 中文翻译：直接覆盖生产算术的 uint64 极限，不伪称实际调用了 2^64 次公共入口。
+#include "../../../src/runtime/observability/metric_accumulation.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
+#include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -119,7 +128,291 @@ private:
     std::vector<LogRecord> records_;
 };
 
+class RecordingObserver final : public ITraceExporter, public IMetricsExporter, public IDiagnosticExporter {
+public:
+    Result<void> exportSpan(const TraceSpanRecord& record) override { spans.push_back(record); return Result<void>::success(); }
+    Result<void> exportObservation(const MetricObservation& record) override { metrics.push_back(record); return Result<void>::success(); }
+    Result<void> exportReport(const DiagnosticReport& record) override { diagnostics.push_back(record); return Result<void>::success(); }
+    std::vector<TraceSpanRecord> spans;
+    std::vector<MetricObservation> metrics;
+    std::vector<DiagnosticReport> diagnostics;
+};
+
+class DiagnosticReentryDeadline final {
+public:
+    DiagnosticReentryDeadline() : worker_([ready = finished_.get_future()] {
+        if(ready.wait_for(std::chrono::seconds{10}) != std::future_status::ready) {
+            std::fputs("diagnostic-reentry-deadline-exceeded\n", stderr);
+            std::fflush(stderr);
+            std::_Exit(86);
+        }
+    }) {}
+    ~DiagnosticReentryDeadline() { finished_.set_value(); }
+private:
+    std::promise<void> finished_;
+    std::jthread worker_;
+};
+
+class DestructionCheck final : public IDiagnosticCheck {
+public:
+    explicit DestructionCheck(std::function<void()> action) : action_(std::move(action)) {}
+    ~DestructionCheck() override { action_(); }
+    Result<DiagnosticReport> run() override { throw std::logic_error("Rejected check must not run"); }
+private:
+    std::function<void()> action_;
+};
+
 } // namespace
+
+TEST_CASE("LocalTraceService normalizes every invalid terminal status to failed", "[observability][c6b6]")
+{
+    for(unsigned int raw = 0U; raw <= 255U; ++raw) {
+        if(raw >= 1U && raw <= 4U) { continue; }
+        INFO("raw=" << raw);
+        LocalTraceService traces;
+        auto observer = std::make_shared<RecordingObserver>();
+        REQUIRE(traces.addExporter(observer));
+        auto span = traces.startSpan({validId<TraceId>("trace.invalid"), validId<SpanId>("span.invalid"), {}, "invalid", {}});
+        REQUIRE(span);
+        span.value()->end(static_cast<TraceStatus>(raw), makeError("Test.Original", ErrorCategory::Internal, "original"));
+        CHECK(traces.activeSpanCount() == 0U);
+        const auto records = traces.records();
+        REQUIRE(records.size() == 1U);
+        CHECK(records.front().status == TraceStatus::Failed);
+        REQUIRE(records.front().error);
+        CHECK(std::string(records.front().error->code.value()) == "Trace.InvalidTerminalStatus");
+        if(records.front().error->cause) { CHECK(std::string(records.front().error->cause->code.value()) == "Test.Original"); }
+        else { FAIL_CHECK("Original error cause was lost"); }
+        REQUIRE(observer->spans.size() == 1U);
+        CHECK(observer->spans.front().status == TraceStatus::Failed);
+        span.value()->end(TraceStatus::Succeeded);
+        span.value().reset();
+        CHECK(traces.records().size() == 1U);
+        CHECK(observer->spans.size() == 1U);
+    }
+}
+
+TEST_CASE("LocalMetricsService rejects aggregate overflow without recording or exporting", "[observability][c6b6]")
+{
+    for(const auto kind : {MetricKind::Counter, MetricKind::Gauge, MetricKind::Histogram}) {
+        for(const double sign : {1.0, -1.0}) {
+            if(kind == MetricKind::Counter && sign < 0.0) { continue; }
+            DYNAMIC_SECTION("kind=" << static_cast<unsigned int>(kind) << " sign=" << sign) {
+                LocalMetricsService service;
+                auto observer = std::make_shared<RecordingObserver>();
+                REQUIRE(service.addExporter(observer));
+                const auto name = validId<MetricName>("metric.overflow");
+                const auto submit = [&](double value) {
+                    if(kind == MetricKind::Counter) { return service.addCounter(name, value); }
+                    if(kind == MetricKind::Gauge) { return service.setGauge(name, value); }
+                    return service.observeHistogram(name, value);
+                };
+                const double extreme = sign * std::numeric_limits<double>::max();
+                REQUIRE(submit(extreme));
+                const auto rejected = submit(extreme);
+                CHECK_FALSE(rejected);
+                if(!rejected) { CHECK(std::string(rejected.error().code.value()) == "Metrics.AggregateOverflow"); }
+                const auto snapshot = service.snapshot();
+                REQUIRE(snapshot.size() == 1U);
+                CHECK(snapshot[0].count == 1U);
+                CHECK(snapshot[0].sum == extreme);
+                CHECK(snapshot[0].value == extreme);
+                CHECK(snapshot[0].minimum == extreme);
+                CHECK(snapshot[0].maximum == extreme);
+                CHECK(observer->metrics.size() == 1U);
+                REQUIRE(submit(0.0));
+                CHECK(service.snapshot()[0].count == 2U);
+                CHECK(std::isfinite(service.snapshot()[0].sum));
+                CHECK(observer->metrics.size() == 2U);
+            }
+        }
+    }
+}
+
+TEST_CASE("DiagnosticsService converts every undefined status to unhealthy", "[observability][c6b6]")
+{
+    DiagnosticsService service;
+    auto observer = std::make_shared<RecordingObserver>();
+    REQUIRE(service.addExporter(observer));
+    const auto id = validId<DiagnosticId>("diagnostic.invalid-status");
+    unsigned int raw = 4U;
+    REQUIRE(service.registerCheck(id, std::make_shared<LambdaCheck>([&] {
+        return Result<DiagnosticReport>::success({id, static_cast<DiagnosticStatus>(raw), "invalid", {}, {}});
+    })));
+    for(; raw <= 255U; ++raw) {
+        INFO("raw=" << raw);
+        auto result = service.run(id);
+        REQUIRE(result);
+        CHECK(result.value().status == DiagnosticStatus::Unhealthy);
+        CHECK(service.latest().front().status == DiagnosticStatus::Unhealthy);
+        const auto* details = result.value().details.getIf<Value::Object>();
+        REQUIRE(details);
+        CHECK(details->at("errorCode") == Value{"Diagnostics.InvalidStatus"});
+        CHECK(details->at("reportedStatus") == Value{static_cast<std::int64_t>(raw)});
+        REQUIRE(observer->diagnostics.size() == raw - 3U);
+        CHECK(observer->diagnostics.back().status == DiagnosticStatus::Unhealthy);
+    }
+}
+
+TEST_CASE("DiagnosticsService releases rejected check ownership outside its lock", "[observability][c6b6]")
+{
+    DiagnosticReentryDeadline deadline;
+    DiagnosticsService service;
+    const auto id = validId<DiagnosticId>("diagnostic.duplicate");
+    REQUIRE(service.registerCheck(id, std::make_shared<LambdaCheck>([&] {
+        return Result<DiagnosticReport>::success({id, DiagnosticStatus::Healthy, "kept", {}, {}});
+    })));
+    REQUIRE(service.run(id));
+    unsigned int destroyed = 0U;
+    std::size_t observed = 0U;
+    const auto rejected = service.registerCheck(id, std::make_shared<DestructionCheck>([&] {
+        ++destroyed;
+        observed = service.latest().size();
+    }));
+    REQUIRE_FALSE(rejected);
+    CHECK(std::string(rejected.error().code.value()) == "Diagnostics.AlreadyRegistered");
+    CHECK(destroyed == 1U);
+    CHECK(observed == 1U);
+    const auto kept = service.run(id);
+    REQUIRE(kept);
+    CHECK(kept.value().status == DiagnosticStatus::Healthy);
+}
+
+TEST_CASE("LocalTraceService preserves valid terminals and explicit invalid status diagnostics", "[observability][c6b6]")
+{
+    for(const auto status : {TraceStatus::Succeeded, TraceStatus::Failed, TraceStatus::Cancelled, TraceStatus::Stale}) {
+        for(const bool withError : {false, true}) {
+            LocalTraceService service;
+            auto observer = std::make_shared<RecordingObserver>();
+            REQUIRE(service.addExporter(observer));
+            auto span = service.startSpan({validId<TraceId>("trace.valid"), validId<SpanId>("span.valid"), {}, "valid", {}});
+            REQUIRE(span);
+            std::optional<Error> error;
+            if(withError) { error = makeError("Test.Provided", ErrorCategory::Internal, "provided"); }
+            span.value()->end(status, error);
+            const auto records = service.records();
+            REQUIRE(records.size() == 1U);
+            CHECK(records[0].status == status);
+            CHECK(records[0].error.has_value() == withError);
+            if(withError) { CHECK(std::string(records[0].error->code.value()) == "Test.Provided"); }
+            CHECK(observer->spans.front().status == status);
+            span.value()->end(static_cast<TraceStatus>(255U));
+            span.value().reset();
+            CHECK(observer->spans.size() == 1U);
+        }
+    }
+    for(const auto raw : {0U, 255U}) {
+        LocalTraceService service;
+        auto span = service.startSpan({validId<TraceId>("trace.no-cause"), validId<SpanId>("span.no-cause"), {}, "invalid", {}});
+        REQUIRE(span);
+        span.value()->end(static_cast<TraceStatus>(raw));
+        const auto records = service.records();
+        REQUIRE(records.size() == 1U);
+        REQUIRE(records[0].error);
+        CHECK(records[0].error->category == ErrorCategory::Validation);
+        CHECK_FALSE(records[0].error->cause);
+        const auto* details = records[0].error->details.getIf<Value::Object>();
+        REQUIRE(details);
+        CHECK(details->at("requestedStatus") == Value{static_cast<std::int64_t>(raw)});
+    }
+}
+
+TEST_CASE("LocalMetricsService production arithmetic prevents count wrap without mutation", "[observability][c6b6]")
+{
+    for(const auto kind : {MetricKind::Counter, MetricKind::Gauge, MetricKind::Histogram}) {
+        lasercnc::observability::detail::MetricAggregate aggregate{kind, std::numeric_limits<std::uint64_t>::max() - 1U, 2.0, 2.0, 2.0, 2.0};
+        REQUIRE(lasercnc::observability::detail::tryAccumulateMetric(aggregate, 1.0));
+        CHECK(aggregate.count == std::numeric_limits<std::uint64_t>::max());
+        const auto before = aggregate;
+        for(const double value : {0.0, 1.0}) {
+            CHECK_FALSE(lasercnc::observability::detail::tryAccumulateMetric(aggregate, value));
+            CHECK(aggregate.count == before.count);
+            CHECK(aggregate.sum == before.sum);
+            CHECK(aggregate.value == before.value);
+            CHECK(aggregate.minimum == before.minimum);
+            CHECK(aggregate.maximum == before.maximum);
+        }
+    }
+}
+
+TEST_CASE("LocalMetricsService preserves signed finite extrema and cancellation", "[observability][c6b6]")
+{
+    for(const auto kind : {MetricKind::Gauge, MetricKind::Histogram}) {
+        LocalMetricsService service;
+        const auto name = validId<MetricName>("metric.signed");
+        const auto submit = [&](double value) {
+            return kind == MetricKind::Gauge ? service.setGauge(name, value) : service.observeHistogram(name, value);
+        };
+        const auto maximum = std::numeric_limits<double>::max();
+        REQUIRE(submit(maximum));
+        REQUIRE(submit(-maximum));
+        REQUIRE(submit(-0.0));
+        const auto snapshot = service.snapshot();
+        REQUIRE(snapshot.size() == 1U);
+        CHECK(snapshot[0].count == 3U);
+        CHECK(snapshot[0].sum == 0.0);
+        CHECK(snapshot[0].minimum == -maximum);
+        CHECK(snapshot[0].maximum == maximum);
+        CHECK(std::signbit(snapshot[0].value));
+    }
+}
+
+TEST_CASE("DiagnosticsService preserves every declared status and frozen rejection ownership", "[observability][c6b6]")
+{
+    DiagnosticReentryDeadline deadline;
+    DiagnosticsService service;
+    auto observer = std::make_shared<RecordingObserver>();
+    REQUIRE(service.addExporter(observer));
+    const auto id = validId<DiagnosticId>("diagnostic.valid-status");
+    auto status = DiagnosticStatus::Healthy;
+    REQUIRE(service.registerCheck(id, std::make_shared<LambdaCheck>([&] {
+        return Result<DiagnosticReport>::success({id, status, "valid", Value{"kept"}, {}});
+    })));
+    for(const auto declared : {DiagnosticStatus::Healthy, DiagnosticStatus::Degraded, DiagnosticStatus::Unhealthy, DiagnosticStatus::Unknown}) {
+        status = declared;
+        auto report = service.run(id);
+        REQUIRE(report);
+        CHECK(report.value().status == declared);
+        CHECK(report.value().details == Value{"kept"});
+        CHECK(observer->diagnostics.back().status == declared);
+    }
+    service.freeze();
+    unsigned int destroyed = 0U;
+    bool observedFrozen = false;
+    const auto rejected = service.registerCheck(id, std::make_shared<DestructionCheck>([&] { ++destroyed; observedFrozen = service.frozen(); }));
+    REQUIRE_FALSE(rejected);
+    CHECK(std::string(rejected.error().code.value()) == "Diagnostics.RegistryFrozen");
+    CHECK(destroyed == 1U);
+    CHECK(observedFrozen);
+}
+
+TEST_CASE("LocalTraceService concurrent valid and invalid completions publish only one terminal", "[observability][c6b6]")
+{
+    for(unsigned int iteration = 0U; iteration < 8U; ++iteration) {
+        LocalTraceService service;
+        auto observer = std::make_shared<RecordingObserver>();
+        REQUIRE(service.addExporter(observer));
+        auto span = service.startSpan({validId<TraceId>("trace.concurrent"), validId<SpanId>("span.concurrent"), {}, "concurrent", {}});
+        REQUIRE(span);
+        std::promise<void> release;
+        auto ready = release.get_future().share();
+        std::jthread valid([&] { if(ready.wait_for(std::chrono::seconds{5}) == std::future_status::ready) { span.value()->end(TraceStatus::Succeeded); } });
+        std::jthread invalid([&] { if(ready.wait_for(std::chrono::seconds{5}) == std::future_status::ready) { span.value()->end(static_cast<TraceStatus>(255U)); } });
+        release.set_value();
+        valid.join();
+        invalid.join();
+        CHECK(service.activeSpanCount() == 0U);
+        const auto records = service.records();
+        REQUIRE(records.size() == 1U);
+        CHECK((records[0].status == TraceStatus::Succeeded || records[0].status == TraceStatus::Failed));
+        if(records[0].status == TraceStatus::Failed) {
+            REQUIRE(records[0].error);
+            CHECK(std::string(records[0].error->code.value()) == "Trace.InvalidTerminalStatus");
+        }
+        REQUIRE(observer->spans.size() == 1U);
+        CHECK(observer->spans[0].status == records[0].status);
+    }
+}
 
 TEST_CASE("LocalTraceService owns span completion and isolates exporters", "[observability][trace]")
 {

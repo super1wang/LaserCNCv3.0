@@ -2,6 +2,8 @@
 
 #include <lasercnc/foundation/error.hpp>
 
+#include "metric_accumulation.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <exception>
@@ -41,14 +43,7 @@ struct LocalMetricsService::Impl final {
         MetricLabels labels;
         friend auto operator<=>(const Key&, const Key&) = default;
     };
-    struct Aggregate final {
-        MetricKind kind;
-        std::uint64_t count{0U};
-        double value{0.0};
-        double sum{0.0};
-        double minimum{0.0};
-        double maximum{0.0};
-    };
+    using Aggregate = detail::MetricAggregate;
 
     std::mutex mutex;
     std::map<Key, Aggregate> values;
@@ -135,26 +130,18 @@ foundation::Result<void> LocalMetricsService::record(
                     "The bounded metric series capacity is exhausted",
                     name));
             }
-            found = impl_->values.emplace(
-                key,
-                Impl::Aggregate {
-                    kind, 0U, 0.0, 0.0, value, value}).first;
         }
-        auto& aggregate = found->second;
-        ++aggregate.count;
-        if(kind == MetricKind::Counter) {
-            aggregate.value += value;
-            aggregate.sum = aggregate.value;
-        } else if(kind == MetricKind::Gauge) {
-            aggregate.value = value;
-            aggregate.sum += value;
-        } else {
-            aggregate.value = value;
-            aggregate.sum += value;
+        auto next = found == impl_->values.end() ? Impl::Aggregate{kind} : found->second;
+        if(!detail::tryAccumulateMetric(next, value)) {
+            return foundation::Result<void>::failure(metricError(
+                "Metrics.AggregateOverflow",
+                foundation::ErrorCategory::Validation,
+                "Metric aggregate sum and count must remain representable",
+                name));
         }
-        aggregate.minimum = std::min(aggregate.minimum, value);
-        aggregate.maximum = std::max(aggregate.maximum, value);
         exporters = impl_->exporters;
+        if(found == impl_->values.end()) { impl_->values.emplace(key, next); }
+        else { found->second = next; }
     }
 
     std::vector<foundation::Error> failures;
