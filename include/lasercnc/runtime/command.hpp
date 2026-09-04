@@ -30,7 +30,8 @@ enum class SideEffectLevel : std::uint8_t {
     Publish,
     MachineControl,
     Motion,
-    LaserControl
+    LaserControl,
+    LifecycleControl
 };
 
 struct CommandDescriptor final {
@@ -49,6 +50,9 @@ struct CommandDescriptor final {
     ReplayPolicy replayPolicy{ReplayPolicy::Never};
     std::vector<kernel::EffectGuardId> effectGuards;
     std::vector<ResourceClaim> resources;
+    // Registered fixed operation, never a caller-supplied admission override.
+    // 中文翻译：注册时确定的固定操作，绝不是调用方提供的准入跳过标记。
+    std::optional<LifecycleOperation> lifecycleOperation;
 };
 
 struct CommandRequest final {

@@ -120,21 +120,18 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::create(
     {
         std::lock_guard lock(mutex_);
         const auto existing = entries_.find(documentId);
-        if(existing != entries_.end()
-           && existing->second.state != DocumentLifecycleState::Detached) {
+        if(existing != entries_.end() && existing->second.state == DocumentLifecycleState::Detached
+           && existing->second.projectId != projectId) {
+            return foundation::Result<DocumentLifecycleSnapshot>::failure(documentRuntimeError(
+                "Document.OwnershipConflict", foundation::ErrorCategory::Conflict,
+                "The document identity is already bound to another project", documentId));
+        }
+        if(existing != entries_.end()) {
             return foundation::Result<DocumentLifecycleSnapshot>::failure(
                 documentRuntimeError(
                     "Document.LifecycleConflict",
                     foundation::ErrorCategory::Conflict,
-                    "The document is already attached or changing lifecycle state",
-                    documentId));
-        }
-        if(existing != entries_.end() && existing->second.projectId != projectId) {
-            return foundation::Result<DocumentLifecycleSnapshot>::failure(
-                documentRuntimeError(
-                    "Document.OwnershipConflict",
-                    foundation::ErrorCategory::Conflict,
-                    "The document identity is already bound to another project",
+                    "Creating a document requires an unused runtime identity",
                     documentId));
         }
         entries_.insert_or_assign(
@@ -142,6 +139,23 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::create(
             Entry {projectId, DocumentLifecycleState::Opening, {}, std::nullopt});
     }
     if(persistence_.configured()) {
+        // Reserve before reading: another create/remove must not race the durable identity check.
+        // 中文翻译：先预留再读取，防止其他创建/删除穿过持久身份检查窗口。
+        auto catalog = persistence_.documentCatalog();
+        if(!catalog) {
+            std::lock_guard lock(mutex_);
+            entries_.erase(documentId);
+            return foundation::Result<DocumentLifecycleSnapshot>::failure(std::move(catalog).error());
+        }
+        const auto existing = std::find_if(catalog.value().begin(), catalog.value().end(),
+            [&](const auto& record) { return record.documentId == documentId; });
+        if(existing != catalog.value().end()) {
+            std::lock_guard lock(mutex_);
+            entries_.erase(documentId);
+            return foundation::Result<DocumentLifecycleSnapshot>::failure(documentRuntimeError(
+                "Document.IdentityAlreadyExists", foundation::ErrorCategory::Conflict,
+                "Creating a document requires a new identity, including durable history", documentId));
+        }
         auto persisted = persistence_.saveDocumentLifecycle(
             projectId,
             documentId,
@@ -289,6 +303,12 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::attach(
 foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::open(
     const kernel::DocumentId& documentId)
 {
+    return openImpl(documentId, nullptr);
+}
+
+foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::openImpl(
+    const kernel::DocumentId& documentId, const kernel::ProjectId* expectedProject)
+{
     auto admitted = kernel::ExecutionAdmission::acquire(admission_, "Document.RuntimeNotAccepting");
     if(!admitted) { return foundation::Result<DocumentLifecycleSnapshot>::failure(std::move(admitted).error()); }
     if(!accepting()) {
@@ -331,6 +351,11 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::open(
                 foundation::ErrorCategory::Conflict,
                 "Only a durably detached document can be opened",
                 documentId));
+    }
+    if(expectedProject != nullptr && record->projectId != *expectedProject) {
+        return foundation::Result<DocumentLifecycleSnapshot>::failure(documentRuntimeError(
+            "Document.OwnershipConflict", foundation::ErrorCategory::Conflict,
+            "The durable document owner does not match the lifecycle command target", documentId));
     }
     auto projectActivity = projects_ != nullptr ? projects_->acquireActivity(record->projectId)
         : foundation::Result<ProjectActivityLease>::success({});
@@ -604,6 +629,12 @@ foundation::Result<void> DocumentRuntime::remove(
     if(!admitted) { return foundation::Result<void>::failure(std::move(admitted).error()); }
     auto projectActivity = acquireProject(documentId);
     if(!projectActivity) { return foundation::Result<void>::failure(std::move(projectActivity).error()); }
+    return removeImpl(documentId, projectActivity.value());
+}
+
+foundation::Result<void> DocumentRuntime::removeImpl(
+    const kernel::DocumentId& documentId, const ProjectActivityLease& projectLease)
+{
     if(!accepting()) {
         return foundation::Result<void>::failure(documentRuntimeError(
             "Document.RuntimeNotAccepting",
@@ -620,7 +651,7 @@ foundation::Result<void> DocumentRuntime::remove(
             "The document lifecycle entry does not exist",
             documentId));
     }
-    if(!projectActivity.value().matches(found->second.projectId)) {
+    if(!projectLease.matches(found->second.projectId)) {
         return foundation::Result<void>::failure(documentRuntimeError(
             "Document.OwnershipConflict", foundation::ErrorCategory::Conflict,
             "The document ownership changed during removal admission", documentId));

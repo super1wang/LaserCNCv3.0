@@ -19,6 +19,7 @@ class CommandRuntime;
 
 class CommandRegistry final {
 public:
+    [[nodiscard]] foundation::Result<void> registerLifecycleCommand(CommandDescriptor descriptor);
     [[nodiscard]] foundation::Result<void> registerHandler(
         CommandDescriptor descriptor,
         std::shared_ptr<ICommandHandler> handler);

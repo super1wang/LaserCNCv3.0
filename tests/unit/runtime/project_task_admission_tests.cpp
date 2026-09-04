@@ -239,3 +239,58 @@ TEST_CASE("Project only task acceptance rollback and terminal persistence retain
         REQUIRE(kernel.shutdown());
     }
 }
+
+TEST_CASE("Lifecycle commands cannot close a project while its long task is pending or publishing", "[task][project-admission][lifecycle-control]")
+{
+    using namespace lasercnc::infrastructure;
+    using namespace lasercnc::test;
+    AppKernel kernel;
+    REQUIRE(kernel.executionServices().configure(std::make_shared<JsonconsAdapter>(), std::make_shared<NullLogService>()));
+    auto owned = std::make_unique<ManualExecutor>();
+    auto& executor = *owned;
+    REQUIRE(kernel.configureTaskExecutor(std::move(owned)));
+    REQUIRE(registerTask(kernel, taskDescriptor("task.workflow.echo"), std::make_shared<EchoTaskHandler>()));
+    const auto session = validId<SessionId>("session.lifecycle");
+    const auto project = validId<ProjectId>("project.lifecycle.task");
+    REQUIRE(kernel.capabilities().replace(session, std::array{validId<CapabilityId>("document.write")}));
+    REQUIRE(kernel.addProject(project));
+    auto submission = asyncCommandDescriptor("command.lifecycle.submit");
+    submission.scope = ExecutionScope::Project;
+    REQUIRE(registerAsyncCommand(kernel, submission, std::make_shared<AsyncPlanHandler>()));
+    auto close = commandDescriptor("command.lifecycle.close", false);
+    close.scope = ExecutionScope::Project;
+    close.sideEffect = SideEffectLevel::LifecycleControl;
+    close.lifecycleOperation = LifecycleOperation::ProjectClose;
+    REQUIRE(installKernelTestModule(kernel, [&](auto& builder) { builder.lifecycleCommand(close); }));
+    auto sqlite = SqlitePersistenceBackend::open({":memory:"});
+    REQUIRE(sqlite);
+    auto backend = std::make_unique<FaultInjectingBackend>(std::move(sqlite).value());
+    auto* faults = backend.get();
+    REQUIRE(kernel.configurePersistence(std::move(backend), std::make_shared<JsonconsAdapter>(), std::make_shared<Sha256HashService>()));
+    REQUIRE(kernel.bootstrap());
+    auto request = CommandRequest{validId<RequestId>("request.lifecycle.task"), {session, project, std::nullopt},
+        submission.name, submission.version, Value{Value::Object{}}, std::nullopt,
+        validId<CorrelationId>("correlation.lifecycle.task"), validId<TraceId>("trace.lifecycle.task")};
+    auto closing = request;
+    closing.command = close.name;
+    const auto blocked = [&] {
+        auto result = kernel.execution().executeCommand(closing);
+        REQUIRE_FALSE(result);
+        CHECK(std::string(result.error().code.value()) == "Project.CloseBlocked");
+        CHECK(kernel.projectRuntime().lifecycle(project).value().state == ProjectLifecycleState::Open);
+    };
+    REQUIRE(kernel.execution().executeCommand(request));
+    blocked();
+    unsigned int terminalProbes = 0U;
+    faults->beforeOperation = [&](BackendPoint point, std::string_view sql) {
+        if(point == BackendPoint::Execute && sql.find("UPDATE task_history SET status=") != std::string_view::npos) {
+            ++terminalProbes;
+            blocked();
+        }
+    };
+    executor.runAll();
+    faults->beforeOperation = {};
+    CHECK(terminalProbes == 1U);
+    REQUIRE(kernel.execution().executeCommand(closing));
+    REQUIRE(kernel.shutdown());
+}

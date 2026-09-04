@@ -165,6 +165,15 @@ public:
         return *this;
     }
 
+    KernelTestModuleBuilder& lifecycleCommand(runtime::CommandDescriptor descriptor)
+    {
+        descriptor_.commands.push_back(runtime::CommandKey {descriptor.name, descriptor.version});
+        registrations_.push_back([descriptor = std::move(descriptor)](kernel::ModuleRegistrar& registrar) mutable {
+            return registrar.registerLifecycleCommand(std::move(descriptor));
+        });
+        return *this;
+    }
+
     KernelTestModuleBuilder& asyncCommand(
         runtime::CommandDescriptor descriptor,
         std::shared_ptr<runtime::IAsyncCommandHandler> handler)

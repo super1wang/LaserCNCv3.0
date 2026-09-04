@@ -160,6 +160,10 @@ private:
         const kernel::DocumentId& documentId,
         bool persist,
         const ProjectActivityLease* projectLease = nullptr);
+    [[nodiscard]] foundation::Result<DocumentLifecycleSnapshot> openImpl(
+        const kernel::DocumentId& documentId, const kernel::ProjectId* expectedProject);
+    [[nodiscard]] foundation::Result<void> removeImpl(
+        const kernel::DocumentId& documentId, const ProjectActivityLease& projectLease);
     [[nodiscard]] static DocumentLifecycleSnapshot snapshotOf(
         const kernel::DocumentId& documentId,
         const Entry& entry);

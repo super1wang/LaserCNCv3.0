@@ -19,6 +19,9 @@ C2b2a 已补编排实例真实归属、完整 advance/cancel 保护、未保存�
 C2b2b 已补终态 Workflow 的持久归属恢复，允许查询 Detached/Closed/Removed 容器的历史而不重新打开或执行，Debug 328/328、14 项各 10 次及纯生产通过，见 [C2b2b 交付](docs/阶段交付/2026-09-04-ST1C2b2b-终态工作流历史恢复.md)。生命周期命令分类与 legacy Project-only Task/Effect 认证根仍待处理，整体未冻结。
 
 - Phase 1：Foundation（`StrongId`、`Value`、`Result`、`Error`、`Schema`）
+C2b2c 已形成受治理固定生命周期命令及创建身份/墓碑保护的本地检查点：最终 Debug 339/339、专项 25/25、新增 11 项各 10 次及纯生产/架构通过，见 [C2b2c 交付](docs/阶段交付/2026-09-04-ST1C2b2c-受治理生命周期命令.md)。下一步继续 legacy Project-only Task/Effect 认证根、目录失效和 drain/析构；整体仍未冻结。
+
+- Phase 1：Foundation（`StrongId`、`Value`、`Result`、`Error`、`Schema`）
 - Phase 2：Application Composition（`AppKernel`、`ServiceRegistry`、`ModuleRuntime`）
 - Phase 3：Infrastructure Adapters（日志、JSON、TOML、SQLite、线程池）
 - Phase 4：Document、Revision 与 Application Transaction

@@ -21,7 +21,8 @@ namespace {
 bool isExternalSideEffect(SideEffectLevel sideEffect) noexcept
 {
     return sideEffect != SideEffectLevel::ReadOnly
-        && sideEffect != SideEffectLevel::DocumentWrite;
+        && sideEffect != SideEffectLevel::DocumentWrite
+        && sideEffect != SideEffectLevel::LifecycleControl;
 }
 
 foundation::Error effectError(

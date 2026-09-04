@@ -1,6 +1,8 @@
 #include <lasercnc/kernel/app_kernel.hpp>
 #include "persistence_fixture.hpp"
 #include "fault_injecting_backend.hpp"
+#include "kernel_test_module.hpp"
+#include <lasercnc/observability/log_service.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -47,6 +49,179 @@ template<typename Host> concept HostAcquiresProjectLease = requires(Host& host, 
     host.projectRuntime().acquireActivity(project);
 };
 static_assert(!HostStartsProjects<AppKernel> && !HostSkipsProjectClose<AppKernel> && !HostAcquiresProjectLease<AppKernel>);
+template<typename Host> concept HostOpensWithInternalOwner = requires(Host& host, DocumentId document, ProjectId project) {
+    host.documentRuntime().openImpl(document, &project);
+};
+template<typename Host> concept HostRemovesWithInternalLease = requires(Host& host, DocumentId document, ProjectActivityLease lease) {
+    host.documentRuntime().removeImpl(document, lease);
+};
+static_assert(!HostOpensWithInternalOwner<AppKernel> && !HostRemovesWithInternalLease<AppKernel>);
+
+void configureLifecycleCommands(AppKernel& kernel)
+{
+    class NullLog final : public lasercnc::observability::ILogService {
+    public:
+        Result<void> write(const lasercnc::observability::LogRecord&) override { return Result<void>::success(); }
+        Result<void> flush() override { return Result<void>::success(); }
+    };
+    REQUIRE(kernel.executionServices().configure(std::make_shared<JsonconsAdapter>(), std::make_shared<NullLog>()));
+    const auto object = Schema::create(id<SchemaId>("schema.lifecycle.object"), {1U, 0U, 0U}, SchemaKind::Object).value();
+    const std::array operations{
+        std::pair{"kernel.project.create", LifecycleOperation::ProjectCreate},
+        std::pair{"kernel.project.open", LifecycleOperation::ProjectOpen},
+        std::pair{"kernel.project.close", LifecycleOperation::ProjectClose},
+        std::pair{"kernel.document.create", LifecycleOperation::DocumentCreate},
+        std::pair{"kernel.document.open", LifecycleOperation::DocumentOpen},
+        std::pair{"kernel.document.close", LifecycleOperation::DocumentClose},
+        std::pair{"kernel.document.remove", LifecycleOperation::DocumentRemove}};
+    REQUIRE(installKernelTestModule(kernel, [&](auto& builder) {
+        for(const auto& [name, operation] : operations) {
+            CommandDescriptor descriptor{id<CommandName>(name), {1U, 0U, 0U}, object, object,
+                ExecutionMode::Synchronous, SideEffectLevel::LifecycleControl, id<CapabilityId>("kernel.lifecycle.control")};
+            descriptor.scope = operation == LifecycleOperation::ProjectCreate || operation == LifecycleOperation::ProjectOpen
+                || operation == LifecycleOperation::ProjectClose ? ExecutionScope::Project : ExecutionScope::Document;
+            descriptor.lifecycleOperation = operation;
+            builder.lifecycleCommand(descriptor);
+        }
+    }));
+    const std::array grants{id<CapabilityId>("kernel.lifecycle.control")};
+    REQUIRE(kernel.capabilities().replace(id<SessionId>("session.lifecycle"), grants));
+}
+
+CommandRequest lifecycleRequest(const char* name, const ProjectId& project, std::optional<DocumentId> document = {})
+{
+    return {id<RequestId>("request.lifecycle"), {id<SessionId>("session.lifecycle"), project, document},
+        id<CommandName>(name), {1U, 0U, 0U}, Value{Value::Object{}}, std::nullopt,
+        id<CorrelationId>("correlation.lifecycle"), id<TraceId>("trace.lifecycle")};
+}
+}
+
+TEST_CASE("Lifecycle commands persist all fixed transitions across fresh Hosts", "[project-runtime][lifecycle-control][persistence]")
+{
+    const auto root = freshRoot();
+    const auto project = id<ProjectId>("project.lifecycle");
+    const auto document = id<DocumentId>("document.lifecycle");
+    for(unsigned int restart = 0U; restart < 3U; ++restart) {
+        CAPTURE(restart);
+        AppKernel kernel;
+        configure(kernel, root);
+        configureLifecycleCommands(kernel);
+        REQUIRE(kernel.bootstrap());
+        const auto run = [&](const char* name, bool withDocument = false) {
+            INFO(name);
+            auto result = kernel.execution().executeCommand(lifecycleRequest(name, project,
+                withDocument ? std::optional<DocumentId>{document} : std::nullopt));
+            if(!result) { INFO(std::string(result.error().code.value())); }
+            REQUIRE(result);
+            CHECK_FALSE(result.value().commit);
+            CHECK(result.value().postExecutionErrors.empty());
+        };
+        if(restart == 0U) {
+            run("kernel.project.create");
+            run("kernel.document.create", true);
+            run("kernel.document.close", true);
+            CHECK_FALSE(kernel.execution().executeCommand(lifecycleRequest("kernel.document.create", project, document)));
+            run("kernel.document.open", true);
+            run("kernel.project.close");
+        } else {
+            CHECK(kernel.projectRuntime().lifecycle(project).value().state == ProjectLifecycleState::Closed);
+            CHECK_FALSE(kernel.documents().contains(document));
+            run("kernel.project.open");
+            if(restart == 1U) {
+                CHECK(kernel.documentRuntime().lifecycle(document).value().state == DocumentLifecycleState::Detached);
+                run("kernel.document.open", true);
+                auto snapshot = kernel.documentRuntime().snapshot(document);
+                REQUIRE(snapshot);
+                CHECK(snapshot.value().revisions().at(lasercnc::state::RevisionScope::Project) == lasercnc::state::Revision{0U});
+                run("kernel.document.close", true);
+                run("kernel.document.remove", true);
+            } else {
+                auto records = kernel.persistence().documentCatalog();
+                REQUIRE(records);
+                REQUIRE(records.value().size() == 1U);
+                CHECK(records.value().front().state == DocumentPersistenceState::Removed);
+                CHECK_FALSE(kernel.execution().executeCommand(lifecycleRequest("kernel.document.open", project, document)));
+                CHECK_FALSE(kernel.execution().executeCommand(lifecycleRequest("kernel.document.create", project, document)));
+            }
+            run("kernel.project.close");
+        }
+        auto observer = SqlitePersistenceBackend::open({root / "state.db"});
+        REQUIRE(observer);
+        auto journal = observer.value()->query("SELECT * FROM state_journal");
+        REQUIRE(journal);
+        CHECK(journal.value().empty());
+        REQUIRE(kernel.shutdown());
+    }
+}
+
+TEST_CASE("Lifecycle command persistence failure preserves failed state and rejects apparent success", "[project-runtime][lifecycle-control][fault-matrix]")
+{
+    for(bool throws : {false, true}) {
+        const auto root = freshRoot();
+        const auto project = id<ProjectId>("project.lifecycle.failure");
+        {
+            AppKernel kernel;
+            auto* backend = configure(kernel, root);
+            configureLifecycleCommands(kernel);
+            REQUIRE(kernel.bootstrap());
+            REQUIRE(kernel.execution().executeCommand(lifecycleRequest("kernel.project.create", project)));
+            backend->arm(BackendPoint::Execute, "INSERT INTO project_catalog", 1U, throws);
+            auto result = kernel.execution().executeCommand(lifecycleRequest("kernel.project.close", project));
+            CHECK_FALSE(result);
+            CHECK(backend->hits == 1U);
+            CHECK(kernel.projectRuntime().lifecycle(project).value().state == ProjectLifecycleState::Failed);
+            CHECK_FALSE(kernel.execution().executeCommand(lifecycleRequest("kernel.project.open", project)));
+            REQUIRE(kernel.shutdown());
+        }
+        AppKernel restarted;
+        configure(restarted, root);
+        configureLifecycleCommands(restarted);
+        REQUIRE(restarted.bootstrap());
+        CHECK(restarted.projectRuntime().lifecycle(project).value().state == ProjectLifecycleState::Failed);
+        CHECK_FALSE(restarted.execution().executeCommand(lifecycleRequest("kernel.project.open", project)));
+        REQUIRE(restarted.shutdown());
+    }
+}
+
+TEST_CASE("Lifecycle creation reserves identity during authenticated reads and releases rejected reservations", "[project-runtime][lifecycle-control][fault-matrix]")
+{
+    for(bool throws : {false, true}) {
+        AppKernel kernel;
+        auto* backend = configure(kernel, freshRoot());
+        configureLifecycleCommands(kernel);
+        REQUIRE(kernel.bootstrap());
+        const auto project = id<ProjectId>("project.lifecycle.identity");
+        const auto document = id<DocumentId>("document.lifecycle.identity");
+        REQUIRE(kernel.projectRuntime().create(project));
+        const auto request = lifecycleRequest("kernel.document.create", project, document);
+        backend->arm(BackendPoint::Query, "document_catalog", 1U, throws);
+        CHECK_FALSE(kernel.execution().executeCommand(request));
+        CHECK(backend->hits == 1U);
+        CHECK_FALSE(kernel.documentRuntime().lifecycle(document));
+        CHECK_FALSE(kernel.documents().contains(document));
+        bool probed = false;
+        backend->beforeOperation = [&](BackendPoint point, std::string_view sql) {
+            if(probed || point != BackendPoint::Query || sql.find("document_catalog") == std::string_view::npos) { return; }
+            probed = true;
+            auto reentered = kernel.execution().executeCommand(request);
+            REQUIRE_FALSE(reentered);
+            CHECK(std::string(reentered.error().code.value()) == "Document.LifecycleConflict");
+            CHECK_FALSE(kernel.documentRuntime().remove(document));
+            CHECK_FALSE(kernel.projectRuntime().close(project));
+        };
+        REQUIRE(kernel.execution().executeCommand(request));
+        backend->beforeOperation = {};
+        CHECK(probed);
+        REQUIRE(kernel.execution().executeCommand(lifecycleRequest("kernel.document.close", project, document)));
+        REQUIRE(kernel.execution().executeCommand(lifecycleRequest("kernel.document.remove", project, document)));
+        const auto before = backend->beginCalls;
+        auto reused = kernel.execution().executeCommand(request);
+        REQUIRE_FALSE(reused);
+        CHECK(std::string(reused.error().code.value()) == "Document.IdentityAlreadyExists");
+        CHECK(backend->beginCalls == before);
+        CHECK_FALSE(kernel.documentRuntime().lifecycle(document));
+        REQUIRE(kernel.shutdown());
+    }
 }
 
 TEST_CASE("ProjectRuntime owns empty project identity and lifecycle without persistence", "[project-runtime][lifecycle]")

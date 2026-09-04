@@ -31,6 +31,8 @@ C2b2b 后续补充：终态 Workflow 历史已按认证持久目录恢复，不�
 
 ## 当前实现和证据
 
+C2b2c 后续补充：受治理的固定生命周期命令已走同一 Gateway 执行链，省去自身普通目标租约但保留整体准入、权限与真实活动检查；最终 Debug 339/339、专项 25/25、新增 11 项各 10 次和纯生产/架构通过。详见 [C2b2c 交付](../阶段交付/2026-09-04-ST1C2b2c-受治理生命周期命令.md)。不提供 skip/unchecked 或自定义生命周期 Handler，legacy 根、目录失效和 drain/析构仍独立待办。
+
 私有 `src/kernel/execution_admission.hpp` 以互斥临界区同步租约计数与关闭，不在执行 Handler 或基础设施回调时持锁，不序列化普通请求。AppKernel 唯一持有准入门，Gateway 使用必需引用，Project/Document 使用仅由 AppKernel 安装的私有指针；独立组件没有默认启用的 Host 准入假象，也没有新增公共装配/重开接口。
 
 租约为不可复制的 RAII 值，不增加共享堆分配；作用域退出与异常展开释放计数。原有 accepting 和局部计数仍用于组件契约、诊断及 Document close，不再承担整体线性化证明。`Kernel.ActiveTransactions` 保留优先检查；活动公开调用返回 `Kernel.ActiveExecutions`，准入保持开放。只有检查为空并关闭准入之后才进入 Stopping。

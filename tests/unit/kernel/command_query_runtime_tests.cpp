@@ -430,6 +430,54 @@ struct RuntimeFixture final {
     std::shared_ptr<ObjectQueryHandler> query;
 };
 
+CommandDescriptor lifecycleDescriptor(const char* name, LifecycleOperation operation)
+{
+    auto descriptor = commandDescriptor(name);
+    descriptor.sideEffect = SideEffectLevel::LifecycleControl;
+    descriptor.idempotent = false;
+    descriptor.deterministic = false;
+    descriptor.lifecycleOperation = operation;
+    descriptor.scope = operation == LifecycleOperation::ProjectCreate || operation == LifecycleOperation::ProjectOpen
+        || operation == LifecycleOperation::ProjectClose ? ExecutionScope::Project : ExecutionScope::Document;
+    descriptor.capability = validId<CapabilityId>("kernel.lifecycle.control");
+    return descriptor;
+}
+
+const std::array lifecycleOperations{
+    std::pair{"kernel.project.create", LifecycleOperation::ProjectCreate},
+    std::pair{"kernel.project.open", LifecycleOperation::ProjectOpen},
+    std::pair{"kernel.project.close", LifecycleOperation::ProjectClose},
+    std::pair{"kernel.document.create", LifecycleOperation::DocumentCreate},
+    std::pair{"kernel.document.open", LifecycleOperation::DocumentOpen},
+    std::pair{"kernel.document.close", LifecycleOperation::DocumentClose},
+    std::pair{"kernel.document.remove", LifecycleOperation::DocumentRemove}};
+
+void installLifecycleCommands(RuntimeFixture& fixture)
+{
+    REQUIRE(lasercnc::test::installKernelTestModule(fixture.kernel, [](auto& builder) {
+        for(const auto& [name, operation] : lifecycleOperations) {
+            builder.lifecycleCommand(lifecycleDescriptor(name, operation));
+        }
+    }));
+    const std::array grants{validId<CapabilityId>("document.read"), validId<CapabilityId>("document.write"),
+        validId<CapabilityId>("kernel.lifecycle.control")};
+    REQUIRE(fixture.kernel.capabilities().replace(fixture.session, grants));
+}
+
+CommandRequest lifecycleRequest(RuntimeFixture& fixture, const char* name, bool projectOnly = false)
+{
+    auto request = commandRequest("request.lifecycle", fixture.project, fixture.document, fixture.session, name, "unused");
+    request.arguments = Value{Value::Object{}};
+    if(projectOnly) { request.context.documentId.reset(); }
+    return request;
+}
+
+template <typename Registrar>
+concept CanInjectLifecycleHandler = requires(Registrar& registrar, CommandDescriptor descriptor,
+    std::shared_ptr<IReadOnlyCommandHandler> handler) { registrar.registerLifecycleCommand(descriptor, handler); };
+static_assert(!CanInjectLifecycleHandler<ModuleRegistrar>);
+static_assert(!CanInjectLifecycleHandler<CommandRegistry>);
+
 } // namespace
 
 TEST_CASE("AppKernel runs one headless command and query chain", "[runtime][command][query]")
@@ -531,6 +579,266 @@ TEST_CASE("AppKernel runs one headless command and query chain", "[runtime][comm
     REQUIRE(fixture.kernel.shutdown().hasValue());
     CHECK_FALSE(fixture.kernel.execution().executeQuery(queryRequest(
         fixture.project, fixture.document, fixture.session, "object.runtime")).hasValue());
+}
+
+TEST_CASE("Lifecycle command registration accepts only fixed governed operations", "[runtime][command][lifecycle-control]")
+{
+    for(const auto& [name, operation] : lifecycleOperations) {
+        CommandRegistry registry;
+        auto descriptor = lifecycleDescriptor(name, operation);
+        REQUIRE(registry.registerLifecycleCommand(descriptor));
+        auto entry = registry.descriptor({descriptor.name, descriptor.version}, VersionResolution::Exact);
+        REQUIRE(entry);
+        CHECK(entry.value().lifecycleOperation == operation);
+        CHECK_FALSE(registry.registerLifecycleCommand(descriptor));
+    }
+    const std::vector<std::function<void(CommandDescriptor&)>> corruptions{
+        [](auto& d) { d.lifecycleOperation.reset(); },
+        [](auto& d) { d.lifecycleOperation = static_cast<LifecycleOperation>(255); },
+        [](auto& d) { d.scope = ExecutionScope::Global; },
+        [](auto& d) { d.scope = ExecutionScope::Session; },
+        [](auto& d) { d.scope = ExecutionScope::Project; },
+        [](auto& d) { d.executionMode = ExecutionMode::Asynchronous; },
+        [](auto& d) { d.sideEffect = SideEffectLevel::ReadOnly; },
+        [](auto& d) { d.sideEffect = SideEffectLevel::DocumentWrite; },
+        [](auto& d) { d.undoable = true; },
+        [](auto& d) { d.idempotent = true; },
+        [](auto& d) { d.status = static_cast<ContractStatus>(255); },
+        [](auto& d) { d.replayPolicy = ReplayPolicy::Safe; },
+        [](auto& d) { d.effectGuards.push_back(validId<EffectGuardId>("guard.lifecycle")); },
+        [](auto& d) { d.resources.push_back({ResourceKind::CPU, validId<ResourceId>("resource.lifecycle")}); },
+        [](auto& d) { d.arguments = schema("schema.lifecycle.any", SchemaKind::Any); },
+        [](auto& d) { d.result = schema("schema.lifecycle.any", SchemaKind::Any); }};
+    for(std::size_t index = 0; index < corruptions.size(); ++index) {
+        CAPTURE(index);
+        CommandRegistry registry;
+        auto descriptor = lifecycleDescriptor("kernel.document.close", LifecycleOperation::DocumentClose);
+        corruptions[index](descriptor);
+        auto rejected = registry.registerLifecycleCommand(descriptor);
+        REQUIRE_FALSE(rejected);
+        CHECK(std::string(rejected.error().code.value()) == "Command.InvalidLifecycleDescriptor");
+        CHECK_FALSE(registry.descriptor({descriptor.name, descriptor.version}, VersionResolution::Exact));
+    }
+    CommandRegistry registry;
+    auto descriptor = lifecycleDescriptor("kernel.document.close", LifecycleOperation::DocumentClose);
+    CHECK_FALSE(registry.registerHandler(descriptor, std::make_shared<CreateObjectHandler>()));
+    CHECK_FALSE(registry.registerReadOnlyHandler(descriptor, std::make_shared<ScopeCommandHandler>()));
+    CHECK_FALSE(registry.registerAsyncHandler(descriptor, nullptr));
+    CHECK_FALSE(registry.registerExternalEffectHandler(descriptor, nullptr));
+    descriptor.lifecycleOperation.reset();
+    CHECK_FALSE(registry.registerReadOnlyHandler(descriptor, std::make_shared<ScopeCommandHandler>()));
+}
+
+TEST_CASE("Lifecycle commands create open close and remove without self blocking or business commits", "[runtime][command][lifecycle-control]")
+{
+    RuntimeFixture fixture;
+    installLifecycleCommands(fixture);
+    REQUIRE(fixture.kernel.bootstrap());
+    fixture.project = validId<ProjectId>("project.lifecycle.new");
+    fixture.document = validId<DocumentId>("document.lifecycle.new");
+    const auto run = [&](const char* name, bool projectOnly, const char* state) {
+        auto result = fixture.kernel.execution().executeCommand(lifecycleRequest(fixture, name, projectOnly));
+        INFO(name);
+        if(!result) { INFO(std::string(result.error().code.value())); }
+        REQUIRE(result);
+        CHECK_FALSE(result.value().commit);
+        CHECK_FALSE(result.value().taskId);
+        CHECK_FALSE(result.value().replayed);
+        CHECK(result.value().postExecutionErrors.empty());
+        const auto* object = result.value().result.getIf<Value::Object>();
+        REQUIRE(object);
+        CHECK(*object->at("state").getIf<std::string>() == state);
+        CHECK(*object->at("projectId").getIf<std::string>() == std::string(fixture.project.value()));
+        if(!projectOnly) { CHECK(*object->at("documentId").getIf<std::string>() == std::string(fixture.document.value())); }
+    };
+    run("kernel.project.create", true, "open");
+    run("kernel.document.create", false, "open");
+    run("kernel.document.close", false, "detached");
+    auto opened = fixture.kernel.execution().executeCommand(lifecycleRequest(fixture, "kernel.document.open"));
+    REQUIRE_FALSE(opened);
+    CHECK(std::string(opened.error().code.value()) == "Document.OpenRequiresPersistence");
+    run("kernel.project.close", true, "closed");
+    CHECK_FALSE(fixture.kernel.documents().contains(fixture.document));
+    run("kernel.project.open", true, "open");
+    run("kernel.document.remove", false, "removed");
+    CHECK_FALSE(fixture.kernel.execution().executeCommand(lifecycleRequest(fixture, "kernel.document.open")));
+    REQUIRE(fixture.kernel.shutdown());
+}
+
+TEST_CASE("Lifecycle commands reject untrusted targets parameters and admission metadata before mutation", "[runtime][command][lifecycle-control]")
+{
+    RuntimeFixture fixture;
+    installLifecycleCommands(fixture);
+    const auto foreign = validId<ProjectId>("project.lifecycle.foreign");
+    REQUIRE(fixture.kernel.addProject(foreign));
+    REQUIRE(fixture.kernel.bootstrap());
+    const auto base = lifecycleRequest(fixture, "kernel.document.close");
+    const std::vector<std::pair<std::function<void(CommandRequest&)>, const char*>> corruptions{
+        {[](auto& r) { r.context.sessionId = validId<SessionId>("session.denied"); }, "Capability.Denied"},
+        {[](auto& r) { r.context.projectId.reset(); }, "Command.ScopeMismatch"},
+        {[](auto& r) { r.context.documentId.reset(); }, "Command.ScopeMismatch"},
+        {[&](auto& r) { r.context.projectId = foreign; }, "Command.ProjectMismatch"},
+        {[](auto& r) { r.expectedRevision = Revision{0U}; }, "Command.LifecycleRevisionUnsupported"},
+        {[](auto& r) { r.idempotencyKey = validId<IdempotencyKey>("key.lifecycle"); }, "Command.IdempotencyUnsupported"},
+        {[](auto& r) { r.arguments = Value{Value::Object{{"skip", Value{true}}}}; }, "Command.LifecycleArgumentsUnsupported"},
+        {[](auto& r) { r.arguments = Value{Value::Object{{"documentId", Value{"document.other"}}}}; }, "Command.LifecycleArgumentsUnsupported"},
+        {[](auto& r) { r.arguments = Value{true}; }, "Runtime.SchemaInvalid"}};
+    for(std::size_t index = 0; index < corruptions.size(); ++index) {
+        CAPTURE(index);
+        auto request = base;
+        corruptions[index].first(request);
+        auto result = fixture.kernel.execution().executeCommand(request);
+        REQUIRE_FALSE(result);
+        CHECK(std::string(result.error().code.value()) == corruptions[index].second);
+        CHECK(fixture.kernel.documentRuntime().lifecycle(fixture.document).value().state == DocumentLifecycleState::Open);
+    }
+    auto versioned = base;
+    versioned.version = {2U, 0U, 0U};
+    CHECK_FALSE(fixture.kernel.execution().executeCommand(versioned));
+    CHECK(fixture.kernel.documentRuntime().lifecycle(fixture.document).value().state == DocumentLifecycleState::Open);
+    REQUIRE(fixture.kernel.execution().executeCommand(base));
+    // A repeated request is evaluated against real state, never a cached close reply.
+    // 中文翻译：重复请求必须检查真实状态，不能重放缓存的关闭成功响应。
+    CHECK_FALSE(fixture.kernel.execution().executeCommand(base));
+    REQUIRE(fixture.kernel.shutdown());
+}
+
+TEST_CASE("Lifecycle close retains other command activities without an admission escape", "[runtime][command][lifecycle-control]")
+{
+    for(const auto scope : {ExecutionScope::Project, ExecutionScope::Document}) {
+        RuntimeFixture fixture;
+        installLifecycleCommands(fixture);
+        auto probe = std::make_shared<ProjectActivityProbe>();
+        auto descriptor = commandDescriptor("kernel.lifecycle.busy");
+        descriptor.scope = scope;
+        descriptor.sideEffect = SideEffectLevel::ReadOnly;
+        descriptor.idempotent = false;
+        REQUIRE(lasercnc::test::registerReadOnlyCommand(fixture.kernel, descriptor, probe));
+        REQUIRE(fixture.kernel.bootstrap());
+        probe->probe = [&] {
+            auto closed = fixture.kernel.execution().executeCommand(lifecycleRequest(fixture,
+                scope == ExecutionScope::Project ? "kernel.project.close" : "kernel.document.close",
+                scope == ExecutionScope::Project));
+            REQUIRE_FALSE(closed);
+            CHECK(fixture.kernel.projectRuntime().lifecycle(fixture.project).value().state == ProjectLifecycleState::Open);
+            CHECK(fixture.kernel.documentRuntime().lifecycle(fixture.document).value().state == DocumentLifecycleState::Open);
+        };
+        auto request = lifecycleRequest(fixture, "kernel.lifecycle.busy", scope == ExecutionScope::Project);
+        REQUIRE(fixture.kernel.execution().executeCommand(request));
+        CHECK(probe->calls == 1U);
+        REQUIRE(fixture.kernel.execution().executeCommand(lifecycleRequest(fixture,
+            scope == ExecutionScope::Project ? "kernel.project.close" : "kernel.document.close",
+            scope == ExecutionScope::Project)));
+        REQUIRE(fixture.kernel.shutdown());
+    }
+}
+
+TEST_CASE("Lifecycle completion retains kernel admission and reports observer failures as post execution errors", "[runtime][command][lifecycle-control]")
+{
+    RuntimeFixture fixture;
+    installLifecycleCommands(fixture);
+    auto exporter = std::make_shared<ShutdownTraceExporter>(fixture.kernel);
+    REQUIRE(fixture.kernel.traces().addExporter(exporter));
+    REQUIRE(fixture.kernel.bootstrap());
+    fixture.log->failWrites = true;
+    auto closed = fixture.kernel.execution().executeCommand(lifecycleRequest(fixture, "kernel.document.close"));
+    REQUIRE(closed);
+    REQUIRE(closed.value().postExecutionErrors.size() == 1U);
+    CHECK(std::string(closed.value().postExecutionErrors.front().code.value()) == "Test.LogFailed");
+    CHECK(fixture.kernel.documentRuntime().lifecycle(fixture.document).value().state == DocumentLifecycleState::Detached);
+    REQUIRE(exporter->stopped.has_value());
+    REQUIRE_FALSE(*exporter->stopped);
+    CHECK(std::string(exporter->stopped->error().code.value()) == "Kernel.ActiveExecutions");
+    CHECK(fixture.kernel.state() == AppKernelState::Ready);
+    fixture.log->failWrites = false;
+    REQUIRE(fixture.kernel.shutdown());
+}
+
+TEST_CASE("Lifecycle contributions obey declarations rollback freeze and versioned discovery", "[kernel][modules][lifecycle-control]")
+{
+    SECTION("ignored undeclared or invalid contributions poison and roll back their module") {
+        for(bool undeclared : {false, true}) {
+            RuntimeFixture fixture;
+            auto good = lifecycleDescriptor("kernel.document.close", LifecycleOperation::DocumentClose);
+            auto bad = lifecycleDescriptor("kernel.document.open", LifecycleOperation::DocumentOpen);
+            ModuleDescriptor module{validId<ModuleId>("module.lifecycle.invalid"), "Lifecycle test", {1U, 0U, 0U}};
+            module.commands.push_back({good.name, good.version});
+            if(!undeclared) { module.commands.push_back({bad.name, bad.version}); bad.scope = ExecutionScope::Global; }
+            std::vector<lasercnc::test::KernelTestModule::Registration> registrations;
+            registrations.push_back([good, bad](ModuleRegistrar& registrar) {
+                auto first = registrar.registerLifecycleCommand(good);
+                if(!first) { return first; }
+                static_cast<void>(registrar.registerLifecycleCommand(bad));
+                return Result<void>::success();
+            });
+            REQUIRE(fixture.kernel.addModule(std::make_unique<lasercnc::test::KernelTestModule>(module, registrations)));
+            CHECK_FALSE(fixture.kernel.bootstrap());
+            CHECK_FALSE(fixture.kernel.commandRegistry().descriptor({good.name, good.version}));
+            CHECK_FALSE(fixture.kernel.commandRegistry().descriptor({bad.name, bad.version}));
+        }
+    }
+    SECTION("catalog exposes fixed metadata and compatible resolution uses the registered operation") {
+        RuntimeFixture fixture;
+        auto descriptor = lifecycleDescriptor("kernel.document.close", LifecycleOperation::DocumentClose);
+        descriptor.version = {1U, 1U, 0U};
+        descriptor.status = ContractStatus::Deprecated;
+        REQUIRE(lasercnc::test::installKernelTestModule(fixture.kernel, [&](auto& builder) {
+            builder.lifecycleCommand(descriptor);
+        }));
+        const std::array grants{descriptor.capability};
+        REQUIRE(fixture.kernel.capabilities().replace(fixture.session, grants));
+        REQUIRE(fixture.kernel.bootstrap());
+        CHECK(fixture.kernel.commandRegistry().frozen());
+        const auto catalog = fixture.kernel.execution().catalog();
+        const auto found = std::find_if(catalog.commands.begin(), catalog.commands.end(), [&](const auto& d) {
+            return d.name == descriptor.name;
+        });
+        REQUIRE(found != catalog.commands.end());
+        CHECK(found->lifecycleOperation == LifecycleOperation::DocumentClose);
+        CHECK(found->scope == ExecutionScope::Document);
+        CHECK(found->capability == descriptor.capability);
+        CHECK_FALSE(lasercnc::test::installKernelTestModule(fixture.kernel, [&](auto& builder) {
+            builder.lifecycleCommand(descriptor);
+        }));
+        auto request = lifecycleRequest(fixture, "kernel.document.close");
+        CHECK_FALSE(fixture.kernel.execution().executeCommand(request));
+        request.versionResolution = VersionResolution::Compatible;
+        auto result = fixture.kernel.execution().executeCommand(request);
+        REQUIRE(result);
+        CHECK(result.value().resolvedVersion == descriptor.version);
+        CHECK(result.value().contractStatus == ContractStatus::Deprecated);
+        REQUIRE(fixture.kernel.shutdown());
+    }
+}
+
+TEST_CASE("Lifecycle result schema failure cannot turn a completed transition into a retryable failure", "[runtime][command][lifecycle-control]")
+{
+    class ResultFaultValidator final : public ISchemaValidator {
+    public:
+        explicit ResultFaultValidator(bool throws) : throws_(throws) {}
+        Result<void> validate(const Schema& expected, const Value&) const override {
+            if(expected.id() == validId<SchemaId>("schema.command.result.object")) {
+                if(throws_) { throw std::runtime_error("Lifecycle result validation fault"); }
+                return Result<void>::failure(makeError("Test.ResultRejected", ErrorCategory::Validation, "Injected failure"));
+            }
+            return Result<void>::success();
+        }
+    private:
+        bool throws_;
+    };
+    for(bool throws : {false, true}) {
+        RuntimeFixture fixture;
+        installLifecycleCommands(fixture);
+        REQUIRE(fixture.kernel.executionServices().configure(std::make_shared<ResultFaultValidator>(throws), fixture.log));
+        REQUIRE(fixture.kernel.bootstrap());
+        auto result = fixture.kernel.execution().executeCommand(lifecycleRequest(fixture, "kernel.document.close"));
+        REQUIRE(result);
+        REQUIRE(result.value().postExecutionErrors.size() == 1U);
+        CHECK(std::string(result.value().postExecutionErrors.front().code.value())
+            == (throws ? "Command.PostExecutionIntegrationFailed" : "Test.ResultRejected"));
+        CHECK(fixture.kernel.documentRuntime().lifecycle(fixture.document).value().state == DocumentLifecycleState::Detached);
+        REQUIRE(fixture.kernel.shutdown());
+    }
 }
 
 TEST_CASE("Command and query requests resolve compatible deprecated contracts explicitly", "[runtime][command][query][version]")

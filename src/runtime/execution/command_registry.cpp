@@ -41,6 +41,7 @@ bool validExternalSideEffect(SideEffectLevel sideEffect) noexcept
         return true;
     case SideEffectLevel::ReadOnly:
     case SideEffectLevel::DocumentWrite:
+    case SideEffectLevel::LifecycleControl:
         return false;
     }
     return false;
@@ -54,11 +55,57 @@ bool hasExternalMetadata(const CommandDescriptor& descriptor) noexcept
 
 } // namespace
 
+foundation::Result<void> CommandRegistry::registerLifecycleCommand(CommandDescriptor descriptor)
+{
+    const auto key = keyOf(descriptor);
+    bool projectScope = false;
+    bool validOperation = descriptor.lifecycleOperation.has_value();
+    if(validOperation) {
+        switch(*descriptor.lifecycleOperation) {
+        case LifecycleOperation::ProjectCreate:
+        case LifecycleOperation::ProjectOpen:
+        case LifecycleOperation::ProjectClose: projectScope = true; break;
+        case LifecycleOperation::DocumentCreate:
+        case LifecycleOperation::DocumentOpen:
+        case LifecycleOperation::DocumentClose:
+        case LifecycleOperation::DocumentRemove: break;
+        default: validOperation = false; break;
+        }
+    }
+    if(!validOperation || descriptor.sideEffect != SideEffectLevel::LifecycleControl
+       || descriptor.executionMode != ExecutionMode::Synchronous
+       || descriptor.scope != (projectScope ? ExecutionScope::Project : ExecutionScope::Document)
+       || !validContractStatus(descriptor.status) || descriptor.undoable || descriptor.idempotent
+       || hasExternalMetadata(descriptor)
+       || descriptor.arguments.rootKind() != foundation::SchemaKind::Object
+       || descriptor.result.rootKind() != foundation::SchemaKind::Object) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.InvalidLifecycleDescriptor", foundation::ErrorCategory::Validation,
+            "Lifecycle commands require a fixed synchronous scoped operation without replay or external metadata", key));
+    }
+    std::unique_lock lock(mutex_);
+    if(frozen_) {
+        return foundation::Result<void>::failure(commandError("Command.RegistryFrozen",
+            foundation::ErrorCategory::Conflict, "Command registration is closed", key));
+    }
+    const auto [unused, inserted] = entries_.emplace(key, Entry{std::move(descriptor), nullptr, nullptr});
+    static_cast<void>(unused);
+    if(!inserted) {
+        return foundation::Result<void>::failure(commandError("Command.AlreadyRegistered",
+            foundation::ErrorCategory::Conflict, "The exact command is already registered", key));
+    }
+    return foundation::Result<void>::success();
+}
+
 foundation::Result<void> CommandRegistry::registerHandler(
     CommandDescriptor descriptor,
     std::shared_ptr<ICommandHandler> handler)
 {
     const auto key = keyOf(descriptor);
+    if(descriptor.lifecycleOperation.has_value()) {
+        return foundation::Result<void>::failure(commandError("Command.LifecycleMetadataUnsupported",
+            foundation::ErrorCategory::Validation, "Fixed lifecycle operations require lifecycle registration", key));
+    }
     if(!validContractStatus(descriptor.status)) {
         return foundation::Result<void>::failure(commandError(
             "Command.InvalidStatus", foundation::ErrorCategory::Validation,
@@ -133,6 +180,10 @@ foundation::Result<void> CommandRegistry::registerAsyncHandler(
     std::shared_ptr<IAsyncCommandHandler> handler)
 {
     const auto key = keyOf(descriptor);
+    if(descriptor.lifecycleOperation.has_value()) {
+        return foundation::Result<void>::failure(commandError("Command.LifecycleMetadataUnsupported",
+            foundation::ErrorCategory::Validation, "Fixed lifecycle operations require lifecycle registration", key));
+    }
     if(!validContractStatus(descriptor.status)) {
         return foundation::Result<void>::failure(commandError(
             "Command.InvalidStatus", foundation::ErrorCategory::Validation,
@@ -207,6 +258,10 @@ foundation::Result<void> CommandRegistry::registerReadOnlyHandler(
     std::shared_ptr<IReadOnlyCommandHandler> handler)
 {
     const auto key = keyOf(descriptor);
+    if(descriptor.lifecycleOperation.has_value()) {
+        return foundation::Result<void>::failure(commandError("Command.LifecycleMetadataUnsupported",
+            foundation::ErrorCategory::Validation, "Fixed lifecycle operations require lifecycle registration", key));
+    }
     if(!validContractStatus(descriptor.status)) {
         return foundation::Result<void>::failure(commandError(
             "Command.InvalidStatus", foundation::ErrorCategory::Validation,
@@ -288,6 +343,10 @@ foundation::Result<void> CommandRegistry::registerExternalEffectHandler(
     std::shared_ptr<IExternalEffectHandler> handler)
 {
     const auto key = keyOf(descriptor);
+    if(descriptor.lifecycleOperation.has_value()) {
+        return foundation::Result<void>::failure(commandError("Command.LifecycleMetadataUnsupported",
+            foundation::ErrorCategory::Validation, "Fixed lifecycle operations require lifecycle registration", key));
+    }
     if(!validContractStatus(descriptor.status)) {
         return foundation::Result<void>::failure(commandError(
             "Command.InvalidStatus", foundation::ErrorCategory::Validation,

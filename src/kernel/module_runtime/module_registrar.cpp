@@ -100,6 +100,17 @@ foundation::Result<void> ModuleRegistrar::registerCommand(
     return foundation::Result<void>::success();
 }
 
+foundation::Result<void> ModuleRegistrar::registerLifecycleCommand(runtime::CommandDescriptor descriptor)
+{
+    const runtime::CommandKey key{descriptor.name, descriptor.version};
+    auto admitted = admit(contains(descriptor_.commands, key), "command", descriptor.name.value());
+    if(!admitted) { return admitted; }
+    auto registered = commands_.registerLifecycleCommand(std::move(descriptor));
+    if(!registered) { return remember(std::move(registered).error()); }
+    contributions_.commands.push_back(key);
+    return foundation::Result<void>::success();
+}
+
 foundation::Result<void> ModuleRegistrar::registerAsyncCommand(
     runtime::CommandDescriptor descriptor,
     std::shared_ptr<runtime::IAsyncCommandHandler> handler)

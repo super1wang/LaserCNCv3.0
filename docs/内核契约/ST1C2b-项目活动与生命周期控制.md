@@ -9,7 +9,7 @@
 | 子节点 | 必须完成的内容 | 当前状态 |
 | --- | --- | --- |
 | C2b1 | Project-only Command/Query 直接活动租约；异步提交持有项目直到 Scheduler 接管；空项目关闭检查长期 Task，终态发布期间继续阻止关闭 | 本地检查点通过：Debug 320/320、专项 13/13、13 项各 10 次、纯生产/架构/文档通过；见 [C2b1 交付](../阶段交付/2026-09-04-ST1C2b1-项目活动与任务关闭桥接.md) |
-| C2b2 | 生命周期控制与普通执行的明确分类，不能以改成 Global scope 绕过；Workflow/Script 长期归属与关闭/取消边界；legacy 持久身份恢复 | 进行中：[C2b2a 交付](../阶段交付/2026-09-04-ST1C2b2a-编排活动与关闭预检.md) 本地检查点通过，Debug 324/324、专项 20 项各 10 次及纯生产通过；下一步命令分类与恢复，C2b2 全项未签核 |
+| C2b2 | 生命周期控制与普通执行的明确分类，不能以改成 Global scope 绕过；Workflow/Script 长期归属与关闭/取消边界；legacy 持久身份恢复 | 进行中：C2b2a 编排活动、C2b2b 终态恢复和 [C2b2c 固定命令](../阶段交付/2026-09-04-ST1C2b2c-受治理生命周期命令.md) 本地检查点通过，最新 Debug 339/339、11 项各 10 次及纯生产通过；下一步 legacy Task/Effect 根认证，C2b2 全项未签核 |
 | C2b3 | CatalogRevision/epoch 的定义、失效触发与重启语义；不得把 open/close 当作 Project 业务内容提交，不得用墙钟时间冒充单调版本 | 待实施 |
 
 这些子节点只是 C2b 的实施顺序，不改变完整验收范围。C2b1 通过不能将 C2b 标记为已完成；C2c drain/析构和 ST1D 最终认证仍独立保留。
@@ -38,7 +38,7 @@
 ## C2b2 实施与剩余验收顺序
 
 1. C2b2a 编排活动与关闭预检：请求 ProjectId 必须拥有 DocumentId，拒绝不创建实例；在途 advance/cancel 覆盖节点回调、终态 trace/metrics 和取消检查点；终态未保存不能提前关闭，失败重试恢复；不要求已完成实例的只读/幂等清理控制重新打开容器。本地检查点通过，完整证据见 C2b2a 交付。
-2. 生命周期命令分类：明确治理的控制操作、能力、目标身份及允许状态，close 不被自身普通执行租约阻塞，open 不要求目标已 Open；禁止调用方 skip/unchecked 或改成 Global 绕过。不得把直接 Runtime API 已有支持当作命令化控制已交付。
+2. C2b2c 生命周期命令分类：已实现固定操作注册、能力与目标状态检查；close 不持有自己的普通执行租约，open 不要求目标已 Open。本地检查点通过：最终 Debug 339/339、专项 25/25、11 项各 10 次及纯生产/架构通过，见 [C2b2c 交付](../阶段交付/2026-09-04-ST1C2b2c-受治理生命周期命令.md)。禁止调用方 skip/unchecked 或改成 Global 绕过，不接受自定义生命周期 Handler。不得把直接 Runtime API 已有支持当作命令化控制已交付。
 3. 持久归属与恢复：终态 Workflow 在文档 Detached、项目 Closed 和文档 Removed 后的恢复/历史查询本地检查点通过，见 [C2b2b 交付](../阶段交付/2026-09-04-ST1C2b2b-终态工作流历史恢复.md)：Debug 328/328、14 项各 10 次及纯生产通过；终态从认证的 DocumentCatalog（含 Removed 墓碑）核验所有者，非终态仍要求真实 Open 文档。缺失/错误归属、目录读取错误/异常均拒绝，不从 checkpoint 造项目或文档。legacy Project-only Task/Effect 的认证根仍待核验，不由此项代签。
 
 生产修改前两项实例回归为 0/2、0.17 秒，证实错误 ProjectId 被接受及终态发布中提前关闭。扩展取消故障矩阵又暴露先写 Document Closing、后检查长期活动造成持久化回调重入锁和错误中间态，专项为 19/20；修复预检顺序后 20/20、7.54 秒。失败日志均保留，最终证据随本地交付登记。完成 C2b2a 不关闭后两项，也不关闭 C2b3/C2c/ST1D。
@@ -50,3 +50,33 @@
 - 保留工作流定义存在、版本、摘要、步骤集合及完成顺序校验；本轮不授予升级后的任意定义解释旧历史的权利，定义兼容性由 C6 完整限定。
 - 终态快照不得转换 Running 步骤或设置重放标记；终态 advance/cancel 沿既有幂等终态路径返回，不进入 Handler。失败 Host 销毁后再重试，不在 Failed Host 原地强行重开。
 - 六个自然终态场景（成功/取消 × Detached/Closed/Removed）生产修改前均重启失败；修复后每场景连续两次新 Host 恢复通过。其余 Failed/Compensated/CompensationFailed 通过认证检查点夹具验证状态保留，不等同于新增真实补偿执行测试。真实跨进程崩溃认证继续使用既有门禁，最终扩展由 ST1D 签核。
+
+## 固定生命周期命令契约（C2b2c）
+
+模块通过 `ModuleRegistrar::registerLifecycleCommand(CommandDescriptor)` 注册固定 `LifecycleOperation`，仍须在模块的 commands 清单声明精确名称/版本，失败污染注册结果并撤销贡献，bootstrap 后冻结。内核不默认安装命令模块或授予能力；命令名称和 CapabilityId 由可信模块注册，运行会话须显式获授权。普通 Handler 的注册通道拒绝 lifecycleOperation 元数据。
+
+| 固定操作 | Scope 与目标 | 前提和结果 |
+| --- | --- | --- |
+| ProjectCreate | ProjectId / Project | 新项目 → Open |
+| ProjectOpen | ProjectId / Project | Closed → Open，不自动打开子文档 |
+| ProjectClose | ProjectId / Project | Open 且没有真实阻塞活动 → Closed，按既有协议关闭子文档 |
+| DocumentCreate | ProjectId + DocumentId / Document | 父项目 Open，内存身份未占用且认证持久目录无同 ID → Open |
+| DocumentOpen | ProjectId + DocumentId / Document | 同一所有者、父项目 Open、持久 Detached → Open；无持久化时拒绝 |
+| DocumentClose | ProjectId + DocumentId / Document | 同一所有者、父项目 Open、文档 Open 且无真实阻塞活动 → Detached |
+| DocumentRemove | ProjectId + DocumentId / Document | 同一所有者、父项目 Open、Detached → 持久 Removed 墓碑，移出运行目录 |
+
+- 元数据只允许 Synchronous + LifecycleControl，匹配操作的精确 Scope、Object 参数/结果根类型，不允许 undoable、idempotent、外部资源/Guard 或 ReplayPolicy 非 Never。deterministic 不赋予重放权。
+- 请求参数必须为空 Object；目标仅来自 ExecutionContext，调用方不能指定操作枚举、第二目标或 skip。保留现有版本解析、Scope、Schema、Capability 检查。业务 expectedRevision 与 idempotencyKey 显式拒绝；目录版本前置条件仍由 C2b3 定义，当前不伪造支持。
+- 控制命令不获取自身目标的普通 Command 活动租约，但保留整体 Kernel 准入至 trace/metrics 发布结束，并通过原 Runtime 状态机检查其他短期/长期活动；不新增第二套事务或外部副作用执行路径。文档控制持有请求父项目的短期租约，close/remove 在状态转换锁内用该租约再次匹配所有者；open 匹配认证目录中的请求所有者，不仅依赖前置查询，相关辅助入口保持私有。返回 projectId、可选 documentId 和 state，无业务 commit/Task/replayed。
+- 转换成功后结果 Schema/日志故障属于 postExecutionErrors，不把已完成转换报告成未执行；持久化转换失败仍返回失败并保留 Runtime 的真实 Failed/局部状态，不承诺多文档关闭原子回滚。
+- 新回归发现 create 可复用 Removed 墓碑及 Detached 身份。现在 Runtime create 先预留 Opening 身份，再读取认证目录，拒绝/读取故障撤销未写入的预留；拒绝不写 Closing/Opening 或产生新可执行文档。无持久化的 remove 仅移除内存记录，不承诺跨进程墓碑。公开 attach、配置期装载及 Journal/Snapshot 单独来源的完整身份域仍由 C3/C4 验收，不能借本修复代签。
+- 本节点新增全目录认证读取，未宣称常数时间创建；定向查询及容量成本纳入 C7 实测。持久格式未改变；公共枚举/Descriptor 新增字段影响源码编译，C6 清单须登记，不承诺跨工具链二进制 ABI。
+
+## 下一检查点：legacy 根认证
+
+当前 AppKernel 只从认证文档镜像/目录汇集项目根，迁移写事务也只比对 document_catalog、state_journal、snapshot_index。Task/Effect 现有按 ID 查询不能替代完整历史根枚举。下一步必须同时更新根认证、一次性集合核验和迁移后的缺根拒绝，不能只给启动路径拼接几个 ProjectId。
+
+1. 对只有 Project-only Task 或 Effect 历史、没有任何 Document 的旧库补先失败回归；Global/Session 历史不得合成项目。
+2. 根必须来自已核验受支持格式、结构、摘要及身份一致性的真实请求/签名；畸形载荷、被篡改摘要和缺失归属拒绝。不得只信 SQL 控制列或从任意 JSON 文本递归搜 projectId。现有 taskHistory 主要核验任务/Trace/修订等字段，不能把其成功返回视为 projectId/documentId 已认证；须补明确的归属解析。Task 的 lasercnc.task-acceptance 与 Effect 的 lasercnc.external-effect-signature 各有 format/version，须分别按真实既有编码验证，不擅自修改旧格式。
+3. pending 迁移一次性核验完整去重集合；迁移完成后缺根必须拒绝，不在每次启动自动造项目修补。失败/异常不部分安装运行目录，原材料保留。
+4. 覆盖同进程新 Host 再恢复和故障重试，明确终态历史只提供身份依据、不授予执行/重放权限。独立进程和最终三配置仍在 ST1D 统一认证。

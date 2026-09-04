@@ -59,6 +59,7 @@ public:
         return foundation::Result<void>::success();
     }
 
+    [[nodiscard]] foundation::Result<void> registerLifecycleCommand(runtime::CommandDescriptor descriptor);
     [[nodiscard]] foundation::Result<void> registerCommand(
         runtime::CommandDescriptor descriptor,
         std::shared_ptr<runtime::ICommandHandler> handler);

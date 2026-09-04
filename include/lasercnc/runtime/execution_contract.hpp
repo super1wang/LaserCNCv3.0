@@ -27,6 +27,11 @@ enum class ExecutionScope : std::uint8_t {
     Document
 };
 
+enum class LifecycleOperation : std::uint8_t {
+    ProjectCreate, ProjectOpen, ProjectClose,
+    DocumentCreate, DocumentOpen, DocumentClose, DocumentRemove
+};
+
 enum class ReplayPolicy : std::uint8_t {
     Safe,
     Idempotent,

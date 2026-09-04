@@ -34,7 +34,8 @@ namespace {
 bool isExternalSideEffect(SideEffectLevel sideEffect) noexcept
 {
     return sideEffect != SideEffectLevel::ReadOnly
-        && sideEffect != SideEffectLevel::DocumentWrite;
+        && sideEffect != SideEffectLevel::DocumentWrite
+        && sideEffect != SideEffectLevel::LifecycleControl;
 }
 
 foundation::Error commandError(
@@ -343,6 +344,79 @@ public:
         return entry && isExternalSideEffect(entry.value().descriptor.sideEffect);
     }
 
+    bool isLifecycleRequest(const CommandRequest& request) const
+    {
+        auto entry = registry.resolve(CommandKey{request.command, request.version}, request.versionResolution);
+        return entry && entry.value().descriptor.sideEffect == SideEffectLevel::LifecycleControl
+            && entry.value().descriptor.lifecycleOperation.has_value();
+    }
+
+    foundation::Result<foundation::Value> executeLifecycle(
+        const CommandRequest& request, LifecycleOperation operation)
+    {
+        using foundation::Result;
+        using foundation::Value;
+        if(documentRuntime == nullptr || documentRuntime->projects_ == nullptr) {
+            return Result<Value>::failure(commandError("Command.LifecycleRuntimeUnavailable",
+                foundation::ErrorCategory::Infrastructure, "Lifecycle control requires the composed kernel runtimes", request));
+        }
+        if(request.expectedRevision.has_value()) {
+            return Result<Value>::failure(commandError("Command.LifecycleRevisionUnsupported",
+                foundation::ErrorCategory::Validation, "Content revisions are not lifecycle preconditions", request));
+        }
+        const auto* arguments = request.arguments.getIf<Value::Object>();
+        if(arguments == nullptr || !arguments->empty()) {
+            return Result<Value>::failure(commandError("Command.LifecycleArgumentsUnsupported",
+                foundation::ErrorCategory::Validation, "Fixed lifecycle commands take their target only from execution context", request));
+        }
+        const auto projectResult = [](Result<ProjectLifecycleSnapshot> result) -> Result<Value> {
+            if(!result) { return Result<Value>::failure(std::move(result).error()); }
+            return Result<Value>::success(Value{Value::Object{
+                {"projectId", Value{std::string(result.value().projectId.value())}},
+                {"state", Value{projectLifecycleStateName(result.value().state)}}}});
+        };
+        const auto documentResult = [](Result<DocumentLifecycleSnapshot> result) -> Result<Value> {
+            if(!result) { return Result<Value>::failure(std::move(result).error()); }
+            return Result<Value>::success(Value{Value::Object{
+                {"projectId", Value{std::string(result.value().projectId.value())}},
+                {"documentId", Value{std::string(result.value().documentId.value())}},
+                {"state", Value{documentLifecycleStateName(result.value().state)}}}});
+        };
+        switch(operation) {
+        case LifecycleOperation::ProjectCreate: return projectResult(documentRuntime->projects_->create(*request.context.projectId));
+        case LifecycleOperation::ProjectOpen: return projectResult(documentRuntime->projects_->open(*request.context.projectId));
+        case LifecycleOperation::ProjectClose: return projectResult(documentRuntime->projects_->close(*request.context.projectId));
+        case LifecycleOperation::DocumentCreate:
+            return documentResult(documentRuntime->create(*request.context.projectId, *request.context.documentId));
+        default: break;
+        }
+        auto owner = documentRuntime->lifecycle(*request.context.documentId);
+        if(!owner) { return Result<Value>::failure(std::move(owner).error()); }
+        if(owner.value().projectId != *request.context.projectId) {
+            return Result<Value>::failure(commandError("Command.ProjectMismatch", foundation::ErrorCategory::Conflict,
+                "The command project does not own the lifecycle target", request));
+        }
+        // Bind the requested owner through the actual state transition, not just a preceding lookup.
+        // 中文翻译：请求所有者必须绑定到实际状态转换，不能只在前置查询时校验。
+        auto projectActivity = documentRuntime->acquireProjectActivity(*request.context.projectId);
+        if(!projectActivity) { return Result<Value>::failure(std::move(projectActivity).error()); }
+        switch(operation) {
+        case LifecycleOperation::DocumentOpen:
+            return documentResult(documentRuntime->openImpl(*request.context.documentId, &*request.context.projectId));
+        case LifecycleOperation::DocumentClose:
+            return documentResult(documentRuntime->detachImpl(*request.context.documentId, true, &projectActivity.value()));
+        case LifecycleOperation::DocumentRemove: {
+            auto removed = documentRuntime->removeImpl(*request.context.documentId, projectActivity.value());
+            if(!removed) { return Result<Value>::failure(std::move(removed).error()); }
+            return Result<Value>::success(Value{Value::Object{
+                {"projectId", Value{std::string(request.context.projectId->value())}},
+                {"documentId", Value{std::string(request.context.documentId->value())}}, {"state", Value{"removed"}}}});
+        }
+        default: return Result<Value>::failure(commandError("Command.InvalidLifecycleOperation",
+            foundation::ErrorCategory::Internal, "The registered lifecycle operation is invalid", request));
+        }
+    }
+
     foundation::Result<CommandResponse> executeOnce(
         const CommandRequest& request,
         std::optional<kernel::SpanId> activeSpanId)
@@ -387,6 +461,29 @@ public:
         if(!authorized.hasValue()) {
             logFailure(services.value(), request, &descriptor.version);
             return foundation::Result<CommandResponse>::failure(std::move(authorized).error());
+        }
+
+        if(descriptor.sideEffect == SideEffectLevel::LifecycleControl) {
+            auto executed = executeLifecycle(request, *descriptor.lifecycleOperation);
+            if(!executed) {
+                logFailure(services.value(), request, &descriptor.version);
+                return foundation::Result<CommandResponse>::failure(std::move(executed).error());
+            }
+            CommandResponse response{std::move(executed).value(), std::nullopt, std::nullopt, {}, false,
+                descriptor.version, descriptor.status};
+            // The lifecycle transition is committed; observer/validation failures cannot undo it.
+            // 中文翻译：生命周期转换已经完成，结果校验或观察失败不能把它伪装成未执行。
+            try {
+                auto valid = services.value().schemaValidator->validate(descriptor.result, response.result);
+                if(!valid) { response.postExecutionErrors.push_back(std::move(valid).error()); }
+                auto logged = services.value().logService->write(commandLog(request,
+                    observability::LogLevel::Info, "success", &descriptor.version));
+                if(!logged) { response.postExecutionErrors.push_back(std::move(logged).error()); }
+            } catch(...) {
+                response.postExecutionErrors.push_back(commandError("Command.PostExecutionIntegrationFailed",
+                    foundation::ErrorCategory::Internal, "Lifecycle completion observation raised an exception", request));
+            }
+            return foundation::Result<CommandResponse>::success(std::move(response));
         }
 
         if(isExternalSideEffect(descriptor.sideEffect)) {
@@ -927,7 +1024,8 @@ foundation::Result<CommandResponse> CommandRuntime::executeObserved(
                 "The command runtime is not accepting requests",
                 request));
         }
-        if(impl_->documentRuntime != nullptr
+        const bool lifecycle = impl_->isLifecycleRequest(request);
+        if(!lifecycle && impl_->documentRuntime != nullptr
            && request.context.documentId.has_value()) {
             auto admitted = impl_->documentRuntime->acquireActivity(
                 *request.context.documentId, DocumentActivityKind::Command);
@@ -936,7 +1034,7 @@ foundation::Result<CommandResponse> CommandRuntime::executeObserved(
                     std::move(admitted).error());
             }
             documentActivity.emplace(std::move(admitted).value());
-        } else if(impl_->documentRuntime != nullptr && request.context.projectId.has_value()) {
+        } else if(!lifecycle && impl_->documentRuntime != nullptr && request.context.projectId.has_value()) {
             auto admitted = impl_->documentRuntime->acquireProjectActivity(*request.context.projectId);
             if(!admitted) { return foundation::Result<CommandResponse>::failure(std::move(admitted).error()); }
             projectActivity.emplace(std::move(admitted).value());
@@ -944,7 +1042,7 @@ foundation::Result<CommandResponse> CommandRuntime::executeObserved(
         ActiveExecution active(impl_->activeExecutions);
 
         if(!request.idempotencyKey.has_value()
-           || impl_->isExternalEffectRequest(request)) {
+           || lifecycle || impl_->isExternalEffectRequest(request)) {
             return impl_->executeSafe(request, activeSpanId);
         }
 
