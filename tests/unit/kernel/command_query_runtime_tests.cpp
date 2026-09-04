@@ -906,6 +906,50 @@ TEST_CASE("Command and query requests resolve compatible deprecated contracts ex
     REQUIRE(fixture.kernel.shutdown().hasValue());
 }
 
+TEST_CASE("Command and query requests reject unknown version resolution without execution",
+          "[runtime][command][query][version][c6b15]")
+{
+    RuntimeFixture fixture;
+    fixture.registerStandardHandlers();
+    REQUIRE(fixture.kernel.bootstrap().hasValue());
+
+    auto command = commandRequest(
+        "request.invalid-command-resolution",
+        fixture.project,
+        fixture.document,
+        fixture.session,
+        "kernel.object.create",
+        "object.invalid-resolution");
+    command.versionResolution = static_cast<VersionResolution>(255U);
+    const auto commandResult = fixture.kernel.execution().executeCommand(command);
+    REQUIRE_FALSE(commandResult.hasValue());
+    CHECK(std::string(commandResult.error().code.value())
+          == "Command.InvalidVersionResolution");
+    CHECK(fixture.create->calls == 0U);
+
+    auto query = queryRequest(
+        fixture.project, fixture.document, fixture.session, "object.invalid-resolution");
+    query.versionResolution = static_cast<VersionResolution>(255U);
+    const auto queryResult = fixture.kernel.execution().executeQuery(query);
+    REQUIRE_FALSE(queryResult.hasValue());
+    CHECK(std::string(queryResult.error().code.value())
+          == "Query.InvalidVersionResolution");
+    CHECK(fixture.query->calls == 0U);
+
+    const auto spans = fixture.kernel.traces().records();
+    REQUIRE(spans.size() == 2U);
+    for(const auto& span : spans) {
+        const auto found = span.attributes.find("versionResolution");
+        REQUIRE(found != span.attributes.end());
+        const auto* value = found->second.getIf<std::string>();
+        REQUIRE(value != nullptr);
+        CHECK(*value == "unknown");
+        CHECK(span.status == TraceStatus::Failed);
+    }
+
+    REQUIRE(fixture.kernel.shutdown().hasValue());
+}
+
 TEST_CASE("QueryRuntime enforces global session project and document scopes", "[runtime][query][scope]")
 {
     RuntimeFixture fixture;

@@ -107,6 +107,16 @@ C6b13 只修改 Registry 私有实现与错误分支，不改两份公共头、�
 
 Task 的 ResourceManager 仲裁发生在提交被接受后的 Scheduler 泵内，所以非法声明形成可查询的 Failed 终态并保留原 Validation Error，handler 零调用；这不改成同步 submit 参数失败。C6b14 只关闭枚举闭集与单任务聚合算术，不代签等待公平、取消/deadline、全局容量或有界终态保留，见 [契约](ST1C6b14-资源声明枚举与算术准入.md)。
 
+## Command/Query 版本解析策略
+
+| 文件与声明 | 字段及公开操作 | 已验证边界与后续缺口 |
+| --- | --- | --- |
+| [execution_contract.hpp](../../include/lasercnc/runtime/execution_contract.hpp)：VersionResolution | uint8_t 枚举 Exact/Compatible；由 Registry descriptor 发现、CommandRequest、QueryRequest 使用 | C6b15 在 Command/Query Registry 查找前闭集验证，未知值分别为 Command.InvalidVersionResolution/Query.InvalidVersionResolution，不混为合法策略的 UnsupportedVersion |
+| [command.hpp](../../include/lasercnc/runtime/command.hpp)：CommandRequest.versionResolution | 默认 Exact；参与进程内请求签名、持久命令签名及外部 Effect 签名 | 未知值不执行 handler/Schema/Capability/事务/幂等/Effect；失败 Trace 写 unknown。Exact/Compatible 正向签名与选择不变；请求/签名内容预算仍归 C6c/d |
+| [query.hpp](../../include/lasercnc/runtime/query.hpp)：QueryRequest.versionResolution | 默认 Exact；Query 无幂等写签名 | 未知值不执行 handler/Schema/Capability/文档读取；失败 Trace 写 unknown。合法策略下 NotFound/UnsupportedVersion、resolvedVersion 和 Deprecated 保持 |
+
+C6b15 不改公共头、枚举数字、DTO 或持久格式；它只收紧非法枚举的错误分类及观察字符串，见 [契约](ST1C6b15-版本解析策略枚举准入.md)。Version 数值、请求文本/Value、幂等及历史总量继续在后续预算和持久族审计中保留。
+
 ## 后续顺序（保留完整目标）
 
 C6b5 登记的观察负例中，前三类由 C6b6 取得真实红灯并修复；以下按证据区分已补范围与剩余项：
@@ -118,6 +128,6 @@ C6b5 登记的观察负例中，前三类由 C6b6 取得真实红灯并修复；
 
 以上与观察身份淘汰复用、活动总量、时间顺序和资源预算账本并存；不能以修好某一个枚举后删掉其他必须项。
 
-1. C6b2–b12 检查点保留；C6b13 补 Workflow/Script 定义枚举，C6b14 补资源声明枚举与算术准入，见 [交付](../阶段交付/2026-09-05-ST1C6b14-资源声明枚举与算术准入.md)。下一步补 Host、其余执行、状态与持久族 DTO/格式；不以观察、编排或资源局部修复代签其他入口。
+1. C6b2–b12 检查点保留；C6b13–b15 补 Workflow/Script 定义、资源声明及 Command/Query 版本解析策略，见 [最新交付](../阶段交付/2026-09-05-ST1C6b15-版本解析策略枚举准入.md)。下一步补 Host、状态与持久族 DTO/格式；不以观察、编排、资源或版本局部修复代签其他入口。
 2. 继续 Foundation、Observability、Messaging 已登记的行为缺口及 Host/执行/状态/持久族逐类型、枚举和 DTO 字段；将源码兼容、权限阶段、线程/寿命、Error cause 和 wire 版本分别关联到测试。已修复的 Schema/消息枚举与合并/错投仅覆盖各子节点列出的范围；观察记录的未知枚举、数值/终态/寿命问题不因“非业务真值”而免审。
 3. C6c/d 执行统一预算、同步与 Task、终态保留；C7 测容量，C8 完整日志/脚本/私有头门禁，ST1D 最终三配置签核。上述均未被本轮 8 个 Adapter 声明登记替代。

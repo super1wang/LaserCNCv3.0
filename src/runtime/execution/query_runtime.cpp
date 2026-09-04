@@ -20,6 +20,15 @@
 namespace lasercnc::runtime {
 namespace {
 
+const char* versionResolutionName(VersionResolution resolution) noexcept
+{
+    switch(resolution) {
+    case VersionResolution::Exact: return "exact";
+    case VersionResolution::Compatible: return "compatible";
+    }
+    return "unknown";
+}
+
 foundation::Error queryError(
     const char* code,
     foundation::ErrorCategory category,
@@ -36,7 +45,7 @@ foundation::Error queryError(
             {"query", foundation::Value {std::string(request.query.value())}},
             {"requestedVersion", foundation::Value {request.version.toString()}},
             {"versionResolution", foundation::Value {
-                request.versionResolution == VersionResolution::Exact ? "exact" : "compatible"}},
+                versionResolutionName(request.versionResolution)}},
         }},
         foundation::Severity::Error,
         std::move(cause));
@@ -69,8 +78,7 @@ void startQuerySpan(
                 {"query", foundation::Value {std::string(request.query.value())}},
                 {"requestedVersion", foundation::Value {request.version.toString()}},
                 {"versionResolution", foundation::Value {
-                    request.versionResolution == VersionResolution::Exact
-                        ? "exact" : "compatible"}},
+                    versionResolutionName(request.versionResolution)}},
             }});
         if(started && started.value() != nullptr) {
             span = std::move(started).value();
@@ -113,7 +121,7 @@ observability::LogRecord queryLog(
         {"outcome", foundation::Value {outcome}},
         {"requestedVersion", foundation::Value {request.version.toString()}},
         {"versionResolution", foundation::Value {
-            request.versionResolution == VersionResolution::Exact ? "exact" : "compatible"}},
+            versionResolutionName(request.versionResolution)}},
     };
     if(version != nullptr) {
         data.emplace("version", foundation::Value {version->toString()});

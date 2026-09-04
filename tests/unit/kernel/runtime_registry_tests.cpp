@@ -470,6 +470,28 @@ TEST_CASE("QueryRegistry resolves exact compatible and deprecated versions", "[r
     CHECK(std::string(missing.error().code.value()) == "Query.NotFound");
 }
 
+TEST_CASE("Execution registries reject unknown version resolution values",
+          "[runtime][command][query][version][c6b15]")
+{
+    CommandRegistry commands;
+    const auto command = commandDescriptor("kernel.command.invalid-resolution");
+    REQUIRE(commands.registerHandler(command, std::make_shared<CommandHandler>()).hasValue());
+    const auto invalidCommand = commands.descriptor(
+        CommandKey {command.name, command.version}, static_cast<VersionResolution>(255U));
+    REQUIRE_FALSE(invalidCommand.hasValue());
+    CHECK(std::string(invalidCommand.error().code.value())
+          == "Command.InvalidVersionResolution");
+
+    QueryRegistry queries;
+    const auto query = queryDescriptor("kernel.query.invalid-resolution");
+    REQUIRE(queries.registerHandler(query, std::make_shared<QueryHandler>()).hasValue());
+    const auto invalidQuery = queries.descriptor(
+        QueryKey {query.name, query.version}, static_cast<VersionResolution>(255U));
+    REQUIRE_FALSE(invalidQuery.hasValue());
+    CHECK(std::string(invalidQuery.error().code.value())
+          == "Query.InvalidVersionResolution");
+}
+
 TEST_CASE("ExecutionServices requires both replaceable Kernel ports", "[runtime][execution]")
 {
     ExecutionServices services;

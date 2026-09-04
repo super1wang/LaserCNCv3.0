@@ -116,6 +116,14 @@ foundation::Result<QueryRegistry::Entry> QueryRegistry::resolve(
     const QueryKey& key,
     VersionResolution resolution) const
 {
+    if(resolution != VersionResolution::Exact
+       && resolution != VersionResolution::Compatible) {
+        return foundation::Result<Entry>::failure(queryError(
+            "Query.InvalidVersionResolution",
+            foundation::ErrorCategory::Validation,
+            "The query version resolution policy is invalid",
+            key));
+    }
     std::shared_lock lock(mutex_);
     const auto exact = entries_.find(key);
     if(resolution == VersionResolution::Exact && exact != entries_.end()) {

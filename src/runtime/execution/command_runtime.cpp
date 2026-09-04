@@ -38,6 +38,15 @@ bool isExternalSideEffect(SideEffectLevel sideEffect) noexcept
         && sideEffect != SideEffectLevel::LifecycleControl;
 }
 
+const char* versionResolutionName(VersionResolution resolution) noexcept
+{
+    switch(resolution) {
+    case VersionResolution::Exact: return "exact";
+    case VersionResolution::Compatible: return "compatible";
+    }
+    return "unknown";
+}
+
 foundation::Error commandError(
     const char* code,
     foundation::ErrorCategory category,
@@ -54,7 +63,7 @@ foundation::Error commandError(
             {"command", foundation::Value {std::string(request.command.value())}},
             {"requestedVersion", foundation::Value {request.version.toString()}},
             {"versionResolution", foundation::Value {
-                request.versionResolution == VersionResolution::Exact ? "exact" : "compatible"}},
+                versionResolutionName(request.versionResolution)}},
         }},
         foundation::Severity::Error,
         std::move(cause));
@@ -89,8 +98,7 @@ void startCommandSpan(
                 {"command", foundation::Value {std::string(request.command.value())}},
                 {"requestedVersion", foundation::Value {request.version.toString()}},
                 {"versionResolution", foundation::Value {
-                    request.versionResolution == VersionResolution::Exact
-                        ? "exact" : "compatible"}},
+                    versionResolutionName(request.versionResolution)}},
             }});
         if(started && started.value() != nullptr) {
             activeSpanId = spanId;
@@ -166,7 +174,7 @@ foundation::Value persistentSignature(
         {"requestedVersion", foundation::Value {request.version.toString()}},
         {"resolvedVersion", foundation::Value {descriptor.version.toString()}},
         {"versionResolution", foundation::Value {
-            request.versionResolution == VersionResolution::Exact ? "exact" : "compatible"}},
+            versionResolutionName(request.versionResolution)}},
     }};
 }
 
@@ -214,7 +222,7 @@ observability::LogRecord commandLog(
         {"outcome", foundation::Value {outcome}},
         {"requestedVersion", foundation::Value {request.version.toString()}},
         {"versionResolution", foundation::Value {
-            request.versionResolution == VersionResolution::Exact ? "exact" : "compatible"}},
+            versionResolutionName(request.versionResolution)}},
     };
     if(version != nullptr) {
         data.emplace("version", foundation::Value {version->toString()});
