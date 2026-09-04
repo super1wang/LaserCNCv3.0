@@ -9,7 +9,7 @@
 
 namespace lasercnc::test {
 
-enum class BackendPoint { Begin, Execute, Query, Commit, Rollback };
+enum class BackendPoint { Begin, Execute, Query, Commit, Rollback, HostSession };
 
 // Faults happen before delegation; a failed commit has not committed in SQLite.
 // 中文翻译：在委托调用前注入故障，提交失败表示 SQLite 尚未提交。
@@ -17,6 +17,13 @@ class FaultInjectingBackend final : public platform::IPersistenceBackend {
 public:
     explicit FaultInjectingBackend(std::unique_ptr<platform::IPersistenceBackend> delegate)
         : delegate_(std::move(delegate)) {}
+
+    foundation::Result<platform::PersistenceSessionInfo> acquireHostSession() override
+    {
+        auto checked = check(BackendPoint::HostSession);
+        if(!checked) { return foundation::Result<platform::PersistenceSessionInfo>::failure(std::move(checked).error()); }
+        return delegate_->acquireHostSession();
+    }
 
     void arm(BackendPoint point, std::string fragment, unsigned int occurrence, bool throws)
     {

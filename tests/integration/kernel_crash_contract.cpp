@@ -104,6 +104,8 @@ struct CrashControl {
 
 class CrashBackend final : public platform::IPersistenceBackend {
 public:
+    Result<platform::PersistenceSessionInfo> acquireHostSession() override
+    { return backend_->acquireHostSession(); }
     CrashBackend(std::unique_ptr<platform::IPersistenceBackend> backend, CrashControl& control)
         : backend_(std::move(backend)), control_(control) {}
     Result<std::size_t> execute(std::string_view sql, std::span<const Value> values = {}) override

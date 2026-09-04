@@ -50,6 +50,21 @@ endif()
 # Benchmark harness is test-only; it is not a product command-line host.
 # 中文翻译：基准程序仅用于测试，不是产品命令行宿主。
 if(WIN32)
+    find_program(LCNC_WINDOWS_POWERSHELL NAMES powershell.exe REQUIRED)
+    add_executable(lasercnc_persistence_session_probe integration/kernel_persistence_session_probe.cpp)
+    target_link_libraries(lasercnc_persistence_session_probe PRIVATE LaserCNC::Infrastructure)
+    target_compile_features(lasercnc_persistence_session_probe PRIVATE cxx_std_20)
+    set_target_properties(lasercnc_persistence_session_probe PROPERTIES CXX_EXTENSIONS OFF)
+    lcnc_enable_warnings(lasercnc_persistence_session_probe)
+    add_test(NAME integration.persistence_host_session_process
+        COMMAND "${CMAKE_COMMAND}"
+            "-DLCNC_EXECUTABLE=${LCNC_WINDOWS_POWERSHELL}"
+            "-DLCNC_ARGUMENTS=-NoProfile;-ExecutionPolicy;Bypass;-File;${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_persistence_session.ps1;-Executable;$<TARGET_FILE:lasercnc_persistence_session_probe>;-EvidenceRoot;${CMAKE_CURRENT_BINARY_DIR}/host-session-process-runs"
+            "-DLCNC_EXPECTED_OUTPUT=host-session-process-verified" "-DLCNC_TIMEOUT=35"
+            -P "${PROJECT_SOURCE_DIR}/cmake/RunVerifiedProgram.cmake")
+    set_tests_properties(integration.persistence_host_session_process PROPERTIES
+        TIMEOUT 45 RUN_SERIAL TRUE)
+
     add_executable(lasercnc_kernel_benchmark benchmark/kernel_benchmark.cpp)
     target_link_libraries(lasercnc_kernel_benchmark PRIVATE LaserCNC::Infrastructure Psapi)
     target_include_directories(lasercnc_kernel_benchmark PRIVATE "${PROJECT_SOURCE_DIR}/tests/support")

@@ -60,6 +60,8 @@ public:
 
 class FailingJournalBackend final : public lasercnc::platform::IPersistenceBackend {
 public:
+    Result<lasercnc::platform::PersistenceSessionInfo> acquireHostSession() override
+    { return delegate_->acquireHostSession(); }
     explicit FailingJournalBackend(
         std::unique_ptr<lasercnc::platform::IPersistenceBackend> delegate)
         : delegate_(std::move(delegate))

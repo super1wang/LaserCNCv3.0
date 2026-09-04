@@ -385,6 +385,11 @@ public:
     QuarantiningBackend(std::unique_ptr<platform::IPersistenceBackend> delegate, bool& initialized)
         : delegate_(std::move(delegate)), initialized_(initialized) {}
 
+    foundation::Result<platform::PersistenceSessionInfo> acquireHostSession() override
+    {
+        return failed_ ? unavailable<platform::PersistenceSessionInfo>() : delegate_->acquireHostSession();
+    }
+
     foundation::Result<std::size_t> execute(std::string_view sql,
         std::span<const foundation::Value> parameters) override
     {

@@ -25,6 +25,8 @@ public:
     SqlitePersistenceBackend(SqlitePersistenceBackend&&) = delete;
     SqlitePersistenceBackend& operator=(SqlitePersistenceBackend&&) = delete;
 
+    [[nodiscard]] foundation::Result<platform::PersistenceSessionInfo> acquireHostSession() override;
+
     [[nodiscard]] foundation::Result<std::size_t> execute(
         std::string_view statement,
         std::span<const foundation::Value> parameters = {}) override;

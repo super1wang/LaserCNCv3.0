@@ -160,6 +160,11 @@ void configureKernelPersistence(
 
 class ThrowingBackend final : public lasercnc::platform::IPersistenceBackend {
 public:
+    Result<lasercnc::platform::PersistenceSessionInfo> acquireHostSession() override
+    {
+        return Result<lasercnc::platform::PersistenceSessionInfo>::failure(makeError(
+            "Test.HostSessionUnavailable", ErrorCategory::Infrastructure, "Synthetic backend has no Host session"));
+    }
     Result<std::size_t> execute(std::string_view, std::span<const Value>) override
     {
         throw std::runtime_error("expected backend exception");
@@ -200,6 +205,8 @@ public:
 class FailingTaskTerminalBackend final
     : public lasercnc::platform::IPersistenceBackend {
 public:
+    Result<lasercnc::platform::PersistenceSessionInfo> acquireHostSession() override
+    { return delegate_->acquireHostSession(); }
     explicit FailingTaskTerminalBackend(
         std::unique_ptr<lasercnc::platform::IPersistenceBackend> delegate)
         : delegate_(std::move(delegate))
@@ -251,6 +258,8 @@ private:
 class FailingWorkflowCheckpointBackend final
     : public lasercnc::platform::IPersistenceBackend {
 public:
+    Result<lasercnc::platform::PersistenceSessionInfo> acquireHostSession() override
+    { return delegate_->acquireHostSession(); }
     explicit FailingWorkflowCheckpointBackend(
         std::unique_ptr<lasercnc::platform::IPersistenceBackend> delegate)
         : delegate_(std::move(delegate))

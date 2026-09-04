@@ -1,11 +1,14 @@
 #include <lasercnc/infrastructure/sqlite_persistence_backend.hpp>
 
 #include <catch2/catch_test_macros.hpp>
+#include "fault_injecting_backend.hpp"
 
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <future>
+#include <latch>
 #include <string>
 #include <vector>
 
@@ -38,6 +41,184 @@ void removeFile(const std::filesystem::path& path)
 }
 
 } // namespace
+
+TEST_CASE("SQLite Host session excludes aliases until backend destruction across threads", "[sqlite][host-session]")
+{
+    const auto root = std::filesystem::path{LCNC_STRESS_TEST_ROOT} / "host-session"
+        / uniqueDatabasePath().stem();
+    std::filesystem::create_directories(root);
+    const auto path = root / "state.db";
+    auto alias = path;
+    bool hardLink = false;
+    SECTION("same path") {}
+    SECTION("dot path alias") { alias = root / "." / "state.db"; }
+    SECTION("case alias") { alias = root / "STATE.DB"; }
+    SECTION("hard link alias") { alias = root / "alias.db"; hardLink = true; }
+    INFO("Retained Host fixture: " << root.string());
+    auto opened = SqlitePersistenceBackend::open({path});
+    REQUIRE(opened);
+    auto first = std::move(opened).value();
+    auto admitted = first->acquireHostSession();
+    REQUIRE(admitted);
+    CHECK(admitted.value().persistent);
+    CHECK(admitted.value().backend == "sqlite");
+    CHECK(std::filesystem::file_size(path) == 0U);
+    REQUIRE(first->beginTransaction());
+    REQUIRE(first->execute("CREATE TABLE proof(value INTEGER)"));
+    REQUIRE(first->execute("INSERT INTO proof VALUES(7)"));
+    REQUIRE(first->commitTransaction());
+    if(hardLink) { std::filesystem::create_hard_link(path, alias); }
+    auto second = SqlitePersistenceBackend::open({alias});
+    REQUIRE(second);
+    auto denied = second.value()->acquireHostSession();
+    REQUIRE_FALSE(denied);
+    CHECK(std::string(denied.error().code.value()) == "Persistence.HostAlreadyOwned");
+    auto read = second.value()->query("SELECT value FROM proof");
+    REQUIRE(read);
+    CHECK(read.value().front().at("value") == Value{std::int64_t{7}});
+    REQUIRE(first->beginTransaction());
+    REQUIRE(first->execute("INSERT INTO proof VALUES(8)"));
+    REQUIRE(first->rollbackTransaction());
+    REQUIRE(first->execute("VACUUM"));
+    CHECK_FALSE(second.value()->acquireHostSession());
+    auto release = std::async(std::launch::async, [owned = std::move(first)]() mutable {
+        const bool readmitted = owned->acquireHostSession().hasValue();
+        owned.reset();
+        return readmitted;
+    });
+    REQUIRE(release.get());
+    REQUIRE(second.value()->acquireHostSession());
+    REQUIRE(second.value()->beginTransaction());
+    REQUIRE(second.value()->execute("INSERT INTO proof VALUES(9)"));
+    REQUIRE(second.value()->commitTransaction());
+    CHECK(second.value()->query("SELECT value FROM proof").value().size() == 2U);
+}
+
+TEST_CASE("SQLite Host session admits exactly one simultaneous contender", "[sqlite][host-session][concurrency]")
+{
+    for(unsigned int round = 0U; round < 20U; ++round) {
+        const auto root = std::filesystem::path{LCNC_STRESS_TEST_ROOT} / "host-session" / uniqueDatabasePath().stem();
+        std::filesystem::create_directories(root);
+        auto a = SqlitePersistenceBackend::open({root / "race.db"});
+        auto b = SqlitePersistenceBackend::open({root / "race.db"});
+        REQUIRE(a);
+        REQUIRE(b);
+        std::latch start{1};
+        auto one = std::async(std::launch::async, [&] { start.wait(); return a.value()->acquireHostSession(); });
+        auto two = std::async(std::launch::async, [&] { start.wait(); return b.value()->acquireHostSession(); });
+        start.count_down();
+        auto first = one.get();
+        auto second = two.get();
+        REQUIRE(first.hasValue() != second.hasValue());
+        CHECK(std::string((first ? second : first).error().code.value()) == "Persistence.HostAlreadyOwned");
+    }
+}
+
+TEST_CASE("SQLite Host session fault proxy refuses or forwards real ownership", "[sqlite][host-session][fault-matrix]")
+{
+    for(const bool throws : {false, true}) {
+        const auto root = std::filesystem::path{LCNC_STRESS_TEST_ROOT} / "host-session" / uniqueDatabasePath().stem();
+        std::filesystem::create_directories(root);
+        auto opened = SqlitePersistenceBackend::open({root / "proxy.db"});
+        REQUIRE(opened);
+        lasercnc::test::FaultInjectingBackend proxy{std::move(opened).value()};
+        proxy.arm(lasercnc::test::BackendPoint::HostSession, "", 1U, throws);
+        if(throws) { CHECK_THROWS_AS(proxy.acquireHostSession(), std::runtime_error); }
+        else { CHECK_FALSE(proxy.acquireHostSession()); }
+        auto other = SqlitePersistenceBackend::open({root / "proxy.db"});
+        REQUIRE(other);
+        REQUIRE(other.value()->acquireHostSession());
+        auto denied = proxy.acquireHostSession();
+        REQUIRE_FALSE(denied);
+        CHECK(std::string(denied.error().code.value()) == "Persistence.HostAlreadyOwned");
+        other.value().reset();
+        REQUIRE(proxy.acquireHostSession());
+    }
+}
+
+TEST_CASE("SQLite Host session sets and reads back explicit file durability policy", "[sqlite][host-session]")
+{
+    const auto root = std::filesystem::path{LCNC_STRESS_TEST_ROOT} / "host-session" / uniqueDatabasePath().stem();
+    std::filesystem::create_directories(root);
+    auto opened = SqlitePersistenceBackend::open({root / "policy.db", 5000, false});
+    REQUIRE(opened);
+    auto& database = *opened.value();
+    REQUIRE(database.query("PRAGMA journal_mode=MEMORY"));
+    REQUIRE(database.execute("PRAGMA synchronous=OFF"));
+    auto admitted = database.acquireHostSession();
+    REQUIRE(admitted);
+    REQUIRE(admitted.value().configuration.getIf<Value::Object>() != nullptr);
+    const auto& info = *admitted.value().configuration.getIf<Value::Object>();
+    CHECK(info.at("journalMode") == Value{"delete"});
+    CHECK(info.at("synchronous") == Value{std::int64_t{3}});
+    CHECK(info.at("foreignKeys") == Value{std::int64_t{1}});
+    CHECK(info.at("ownership") == Value{"native-file-range-lock-v1"});
+    CHECK(database.query("PRAGMA journal_mode").value().front().at("journal_mode") == info.at("journalMode"));
+    CHECK(database.query("PRAGMA synchronous").value().front().at("synchronous") == info.at("synchronous"));
+    CHECK(database.query("PRAGMA foreign_keys").value().front().at("foreign_keys") == info.at("foreignKeys"));
+    auto other = SqlitePersistenceBackend::open({root / "other.db"});
+    REQUIRE(other);
+    REQUIRE(other.value()->acquireHostSession());
+}
+
+TEST_CASE("SQLite Host session rejects policy drift on repeated admission and transactions", "[sqlite][host-session]")
+{
+    const auto root = std::filesystem::path{LCNC_STRESS_TEST_ROOT} / "host-session" / uniqueDatabasePath().stem();
+    std::filesystem::create_directories(root);
+    auto opened = SqlitePersistenceBackend::open({root / "drift.db"});
+    REQUIRE(opened);
+    auto database = std::move(opened).value();
+    std::string alter = "PRAGMA synchronous=OFF";
+    std::string restore = "PRAGMA synchronous=EXTRA";
+    std::string read = "PRAGMA synchronous";
+    std::string column = "synchronous";
+    Value changed{std::int64_t{0}};
+    bool row = false;
+    SECTION("synchronous drift") {}
+    SECTION("foreign key drift") { alter = "PRAGMA foreign_keys=OFF"; restore = "PRAGMA foreign_keys=ON";
+        read = "PRAGMA foreign_keys"; column = "foreign_keys"; }
+    SECTION("journal mode drift") { alter = "PRAGMA journal_mode=MEMORY"; restore = "PRAGMA journal_mode=DELETE";
+        read = "PRAGMA journal_mode"; column = "journal_mode"; changed = Value{"memory"}; row = true; }
+    REQUIRE(database->acquireHostSession());
+    if(row) { REQUIRE(database->query(alter)); } else { REQUIRE(database->execute(alter)); }
+    auto repeated = database->acquireHostSession();
+    CHECK_FALSE(repeated);
+    auto begun = database->beginTransaction();
+    CHECK_FALSE(begun);
+    if(begun) { REQUIRE(database->rollbackTransaction()); }
+    CHECK(database->query(read).value().front().at(column) == changed);
+    auto competitor = SqlitePersistenceBackend::open({root / "drift.db"});
+    REQUIRE(competitor);
+    CHECK_FALSE(competitor.value()->acquireHostSession());
+    if(row) { REQUIRE(database->query(restore)); } else { REQUIRE(database->execute(restore)); }
+    REQUIRE(database->acquireHostSession());
+    REQUIRE(database->beginTransaction());
+    REQUIRE(database->rollbackTransaction());
+}
+
+TEST_CASE("SQLite Host session identifies private memory without claiming file durability", "[sqlite][host-session]")
+{
+    auto first = openMemoryDatabase();
+    auto second = openMemoryDatabase();
+    auto admitted = first->acquireHostSession();
+    REQUIRE(admitted);
+    CHECK_FALSE(admitted.value().persistent);
+    const auto& info = *admitted.value().configuration.getIf<Value::Object>();
+    CHECK(info.at("journalMode") == Value{"memory"});
+    CHECK(info.at("ownership") == Value{"private-memory"});
+    REQUIRE(second->acquireHostSession());
+}
+
+TEST_CASE("SQLite Host session refuses admission inside a transaction", "[sqlite][host-session]")
+{
+    auto database = openMemoryDatabase();
+    REQUIRE(database->beginTransaction());
+    auto admitted = database->acquireHostSession();
+    REQUIRE_FALSE(admitted);
+    CHECK(std::string(admitted.error().code.value()) == "Persistence.TransactionStateConflict");
+    REQUIRE(database->rollbackTransaction());
+    REQUIRE(database->acquireHostSession());
+}
 
 TEST_CASE("SqlitePersistenceBackend executes parameterized control-plane SQL", "[infrastructure][sqlite]")
 {
