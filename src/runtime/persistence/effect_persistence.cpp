@@ -797,6 +797,12 @@ foundation::Result<std::optional<ExternalEffectRecord>> PersistenceService::exte
     const kernel::IdempotencyKey& key) const
 {
     std::lock_guard lock(mutex_);
+    return externalEffectUnlocked(key);
+}
+
+foundation::Result<std::optional<ExternalEffectRecord>> PersistenceService::externalEffectUnlocked(
+    const kernel::IdempotencyKey& key, foundation::Value* verifiedSignature) const
+{
     if(!initialized_) {
         return foundation::Result<std::optional<ExternalEffectRecord>>::failure(
             effectPersistenceError(
@@ -874,6 +880,13 @@ foundation::Result<std::optional<ExternalEffectRecord>> PersistenceService::exte
                         foundation::ErrorCategory::Infrastructure,
                         "An unfinished external effect contains terminal outcome material"));
             }
+        }
+        if(verifiedSignature != nullptr) {
+            auto decoded = serializer_->deserialize(signaturePayload.value());
+            if(!decoded) {
+                return foundation::Result<std::optional<ExternalEffectRecord>>::failure(std::move(decoded).error());
+            }
+            *verifiedSignature = std::move(decoded).value();
         }
         return foundation::Result<std::optional<ExternalEffectRecord>>::success(
             ExternalEffectRecord {

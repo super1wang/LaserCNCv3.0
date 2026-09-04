@@ -724,6 +724,12 @@ foundation::Result<std::optional<runtime::TaskSnapshot>> PersistenceService::tas
     const kernel::TaskId& taskId) const
 {
     std::lock_guard lock(mutex_);
+    return taskHistoryUnlocked(taskId);
+}
+
+foundation::Result<std::optional<runtime::TaskSnapshot>> PersistenceService::taskHistoryUnlocked(
+    const kernel::TaskId& taskId, foundation::Value* verifiedRequest) const
+{
     if(!initialized_) {
         return foundation::Result<std::optional<runtime::TaskSnapshot>>::failure(
             taskPersistenceError(
@@ -818,6 +824,7 @@ foundation::Result<std::optional<runtime::TaskSnapshot>> PersistenceService::tas
                 "Task acceptance payload contains invalid typed fields"));
     }
     if(status.value() == "accepted" || status.value() == "running") {
+        if(verifiedRequest != nullptr) { *verifiedRequest = request.value(); }
         return foundation::Result<std::optional<runtime::TaskSnapshot>>::success(
             runtime::TaskSnapshot {
                 taskId,
@@ -831,6 +838,7 @@ foundation::Result<std::optional<runtime::TaskSnapshot>> PersistenceService::tas
                 std::nullopt});
     }
     if(status.value() == "interrupted") {
+        if(verifiedRequest != nullptr) { *verifiedRequest = request.value(); }
         return foundation::Result<std::optional<runtime::TaskSnapshot>>::success(
             runtime::TaskSnapshot {
                 taskId,
@@ -873,8 +881,8 @@ foundation::Result<std::optional<runtime::TaskSnapshot>> PersistenceService::tas
                 foundation::ErrorCategory::Infrastructure,
                 "A terminal task payload does not match its control-plane status"));
     }
-    return foundation::Result<std::optional<runtime::TaskSnapshot>>::success(
-        std::move(decodedTerminal).value());
+    if(verifiedRequest != nullptr) { *verifiedRequest = request.value(); }
+    return foundation::Result<std::optional<runtime::TaskSnapshot>>::success(std::move(decodedTerminal).value());
 }
 
 } // namespace lasercnc::persistence

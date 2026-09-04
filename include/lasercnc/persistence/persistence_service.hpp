@@ -231,6 +231,17 @@ public:
 private:
     friend class kernel::AppKernel;
 
+    struct ExecutionOwnership final {
+        kernel::ProjectId projectId;
+        std::optional<kernel::DocumentId> documentId;
+    };
+    [[nodiscard]] foundation::Result<std::vector<ExecutionOwnership>> executionOwnerships() const;
+    [[nodiscard]] foundation::Result<std::vector<ExecutionOwnership>> executionOwnershipsUnlocked() const;
+    [[nodiscard]] foundation::Result<std::optional<runtime::TaskSnapshot>> taskHistoryUnlocked(
+        const kernel::TaskId& taskId, foundation::Value* verifiedRequest = nullptr) const;
+    [[nodiscard]] foundation::Result<std::optional<ExternalEffectRecord>> externalEffectUnlocked(
+        const kernel::IdempotencyKey& key, foundation::Value* verifiedSignature = nullptr) const;
+
     void freeze();
     [[nodiscard]] foundation::Result<void> completeCommandInOpenTransaction(
         const runtime::TransactionCommit& commit,

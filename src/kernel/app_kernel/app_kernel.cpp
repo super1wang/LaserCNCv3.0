@@ -296,11 +296,29 @@ foundation::Result<void> AppKernel::restoreState()
                     "Verified recovery images disagree on their project revision"));
             }
         }
-        // Only verified durable roots can seed the once-only legacy migration.
-        // 中文翻译：只有已验证的持久文档根身份可以参与一次性旧目录迁移。
+        // Only verified durable ownership can seed the once-only legacy migration.
+        // 中文翻译：只有已验证的持久归属可以参与一次性旧目录迁移。
         std::set<ProjectId> durableRoots;
         for(const auto& image : recovered.value().documents) { durableRoots.insert(image.projectId); }
         for(const auto& record : catalog.value()) { durableRoots.insert(record.projectId); }
+        auto executionOwners = persistence_.executionOwnerships();
+        if(!executionOwners) { return foundation::Result<void>::failure(std::move(executionOwners).error()); }
+        for(const auto& owner : executionOwners.value()) {
+            if(owner.documentId.has_value()) {
+                const auto catalogOwner = std::find_if(catalog.value().begin(), catalog.value().end(),
+                    [&](const auto& record) { return record.documentId == *owner.documentId; });
+                const auto imageOwner = std::find_if(recovered.value().documents.begin(), recovered.value().documents.end(),
+                    [&](const auto& image) { return image.documentId == *owner.documentId; });
+                if((catalogOwner == catalog.value().end() && imageOwner == recovered.value().documents.end())
+                   || (catalogOwner != catalog.value().end() && catalogOwner->projectId != owner.projectId)
+                   || (imageOwner != recovered.value().documents.end() && imageOwner->projectId != owner.projectId)) {
+                    return foundation::Result<void>::failure(foundation::makeError(
+                        "Project.RecoveryExecutionOwnershipInvalid", foundation::ErrorCategory::Infrastructure,
+                        "Durable execution history refers to a missing or foreign document owner"));
+                }
+            }
+            durableRoots.insert(owner.projectId);
+        }
         const std::vector<ProjectId> migrationRoots(durableRoots.begin(), durableRoots.end());
         auto migrated = persistence_.completeProjectCatalogMigration(migrationRoots);
         if(!migrated) { return migrated; }
@@ -311,7 +329,7 @@ foundation::Result<void> AppKernel::restoreState()
                 [&](const auto& record) { return record.projectId == root; })) {
                 return foundation::Result<void>::failure(foundation::makeError(
                     "Project.RecoveryMissingRoot", foundation::ErrorCategory::Infrastructure,
-                    "A durable document root has no project catalog entry"));
+                    "A verified durable root has no project catalog entry"));
             }
         }
         auto projectsAdopted = projectRuntime_.adoptCatalog(projects.value());

@@ -9,6 +9,8 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <functional>
+#include <span>
 #include <string>
 
 using namespace lasercnc::foundation;
@@ -56,6 +58,10 @@ template<typename Host> concept HostRemovesWithInternalLease = requires(Host& ho
     host.documentRuntime().removeImpl(document, lease);
 };
 static_assert(!HostOpensWithInternalOwner<AppKernel> && !HostRemovesWithInternalLease<AppKernel>);
+template<typename Host> concept HostReadsInternalExecutionOwnership = requires(Host& host) {
+    host.persistence().executionOwnerships();
+};
+static_assert(!HostReadsInternalExecutionOwnership<AppKernel>);
 
 void configureLifecycleCommands(AppKernel& kernel)
 {
@@ -94,6 +100,379 @@ CommandRequest lifecycleRequest(const char* name, const ProjectId& project, std:
         id<CommandName>(name), {1U, 0U, 0U}, Value{Value::Object{}}, std::nullopt,
         id<CorrelationId>("correlation.lifecycle"), id<TraceId>("trace.lifecycle")};
 }
+
+Value legacyEffectSignature(std::optional<ProjectId> project, std::optional<DocumentId> document = {})
+{
+    const auto version = Value{Value::Object{{"major", Value{std::int64_t{1}}},
+        {"minor", Value{std::int64_t{0}}}, {"patch", Value{std::int64_t{0}}}}};
+    return Value{Value::Object{
+        {"format", Value{"lasercnc.external-effect-signature"}}, {"version", Value{std::int64_t{1}}},
+        {"projectId", project ? Value{std::string(project->value())} : Value{}},
+        {"documentId", document ? Value{std::string(document->value())} : Value{}},
+        {"command", Value{"command.legacy.effect"}}, {"sessionId", Value{"session.legacy"}},
+        {"requestedVersion", version}, {"resolvedVersion", version}, {"versionResolution", Value{std::int64_t{0}}},
+        {"sideEffect", Value{static_cast<std::int64_t>(SideEffectLevel::FileSystemWrite)}},
+        {"replayPolicy", Value{"never"}}, {"expectedRevision", Value{}},
+        {"arguments", Value{Value::Object{}}}, {"resources", Value{Value::Array{}}},
+        {"effectGuards", Value{Value::Array{}}}}};
+}
+
+void seedLegacyExecution(PersistenceService& persistence, unsigned int source, std::optional<ProjectId> project,
+    bool terminal = false)
+{
+    if(source == 0U || source == 2U) {
+        TaskRequest request{id<TaskId>("task.legacy.root"), id<TaskName>("task.legacy.worker"),
+            Value{Value::Object{}}, id<TraceId>("trace.legacy")};
+        request.projectId = project;
+        REQUIRE(persistence.acceptTask(request, std::nullopt));
+        if(terminal) {
+            REQUIRE(persistence.recordTaskTerminal(TaskSnapshot{request.taskId, request.task, TaskState::Succeeded,
+                1.0, "done", request.traceId, std::nullopt, Value{"stored"}, std::nullopt}));
+        }
+    }
+    if(source == 1U || source == 2U) {
+        REQUIRE(persistence.claimExternalEffect(id<IdempotencyKey>("effect.legacy.root"),
+            legacyEffectSignature(project), ReplayPolicy::Never));
+        if(terminal) {
+            REQUIRE(persistence.completeExternalEffect(id<IdempotencyKey>("effect.legacy.root"),
+                legacyEffectSignature(project), Value{Value::Object{{"completed", Value{true}}}}));
+        }
+    }
+}
+
+void mutateLegacyExecution(const std::filesystem::path& root, unsigned int source,
+    const std::function<void(Value&)>& mutate, bool validDigest = true)
+{
+    auto observer = SqlitePersistenceBackend::open({root / "state.db"});
+    REQUIRE(observer);
+    const auto payloadColumn = source == 0U ? "request_payload" : "signature_payload";
+    const auto digestColumn = source == 0U ? "request_digest" : "signature_digest";
+    const auto table = source == 0U ? "task_history" : "external_effects";
+    auto rows = observer.value()->query(std::string("SELECT ") + payloadColumn + " FROM " + table);
+    REQUIRE(rows);
+    REQUIRE(rows.value().size() == 1U);
+    JsonconsAdapter serializer;
+    auto decoded = serializer.deserialize(*rows.value().front().at(payloadColumn).getIf<std::string>());
+    REQUIRE(decoded);
+    mutate(decoded.value());
+    auto encoded = serializer.serialize(decoded.value());
+    REQUIRE(encoded);
+    auto digest = Sha256HashService{}.digest(std::as_bytes(std::span{encoded.value().data(), encoded.value().size()}));
+    REQUIRE(digest);
+    const std::array parameters{Value{encoded.value()}, Value{validDigest ? std::string(digest.value().value()) : "bad.digest"}};
+    // Raw SQL is deliberately outside the Host contract, solely to inject authenticated-shape corruption.
+    // 中文翻译：原始 SQL 仅用于注入带摘要的畸形材料，明确处于正式 Host 契约之外。
+    REQUIRE(observer.value()->execute(std::string("UPDATE ") + table + " SET " + payloadColumn + "=?," + digestColumn + "=?", parameters));
+}
+}
+
+TEST_CASE("Legacy execution roots reject malformed authenticated identities before project installation", "[project-runtime][legacy-execution-roots][fault-matrix]")
+{
+    for(unsigned int source = 0U; source < 2U; ++source) {
+        for(unsigned int corruption = 0U; corruption < (source == 0U ? 10U : 16U); ++corruption) {
+            for(bool completed : {false, true}) {
+                CAPTURE(source, corruption, completed);
+                const auto root = freshRoot();
+                const auto project = id<ProjectId>("project.legacy.integrity");
+                {
+                    auto persistence = openPersistenceFixture(root / "state.db", root / "snapshots");
+                    seedLegacyExecution(*persistence, source, project);
+                    if(completed) { REQUIRE(persistence->completeProjectCatalogMigration(std::array{project})); }
+                }
+                mutateLegacyExecution(root, source, [&](Value& payload) {
+                    auto& object = *payload.getIf<Value::Object>();
+                    switch(corruption) {
+                    case 0U: object.erase("projectId"); break;
+                    case 1U: object.insert_or_assign("projectId", Value{std::int64_t{17}}); break;
+                    case 2U: object.insert_or_assign("projectId", Value{""}); break;
+                    case 3U:
+                        object.insert_or_assign("projectId", Value{});
+                        object.insert_or_assign("documentId", Value{"document.orphan"}); break;
+                    case 4U: object.insert_or_assign("format", Value{"unknown.format"}); break;
+                    case 5U: object.insert_or_assign("version", Value{std::int64_t{2}}); break;
+                    case 6U: payload = Value{Value::Array{}}; break;
+                    case 7U: object.insert_or_assign("documentId", Value{true}); break;
+                    case 8U: object.insert_or_assign(source == 0U ? "taskId" : "command", Value{}); break;
+                    case 9U: break;
+                    case 10U: object.insert_or_assign("replayPolicy", Value{"safe"}); break;
+                    case 11U: object.insert_or_assign("sideEffect", Value{static_cast<std::int64_t>(SideEffectLevel::LifecycleControl)}); break;
+                    case 12U: object.insert_or_assign("requestedVersion", Value{true}); break;
+                    case 13U: object.insert_or_assign("sessionId", Value{}); break;
+                    case 14U: object.insert_or_assign("resources", Value{true}); break;
+                    case 15U: object.insert_or_assign("versionResolution", Value{std::int64_t{99}}); break;
+                    }
+                }, corruption != 9U);
+                AppKernel kernel;
+                configure(kernel, root);
+                CHECK_FALSE(kernel.bootstrap());
+                CHECK(kernel.projectRuntime().list().empty());
+                CHECK(kernel.documentRuntime().list().empty());
+                auto observer = SqlitePersistenceBackend::open({root / "state.db"});
+                REQUIRE(observer);
+                auto projects = observer.value()->query("SELECT * FROM project_catalog");
+                REQUIRE(projects);
+                CHECK(projects.value().size() == (completed ? 1U : 0U));
+                CHECK(kernel.persistence().projectCatalogMigrationPending().value() == !completed);
+            }
+        }
+    }
+}
+
+TEST_CASE("Legacy execution roots require matching durable document ownership including tombstones", "[project-runtime][legacy-execution-roots]")
+{
+    for(unsigned int source = 0U; source < 2U; ++source) {
+        for(unsigned int ownership = 0U; ownership < 3U; ++ownership) {
+            CAPTURE(source, ownership);
+            const auto root = freshRoot();
+            const auto project = id<ProjectId>("project.legacy.document");
+            const auto document = id<DocumentId>("document.legacy.history");
+            {
+                auto persistence = openPersistenceFixture(root / "state.db", root / "snapshots");
+                seedLegacyExecution(*persistence, source, project);
+                if(ownership != 0U) {
+                    REQUIRE(persistence->removeDocumentLifecycle(ownership == 1U ? id<ProjectId>("project.foreign") : project, document));
+                }
+            }
+            mutateLegacyExecution(root, source, [&](Value& payload) {
+                payload.getIf<Value::Object>()->insert_or_assign("documentId", Value{std::string(document.value())});
+            });
+            AppKernel kernel;
+            configure(kernel, root);
+            auto started = kernel.bootstrap();
+            if(ownership == 2U) {
+                REQUIRE(started);
+                REQUIRE(kernel.projectRuntime().lifecycle(project));
+                CHECK(kernel.documentRuntime().list().empty());
+                REQUIRE(kernel.shutdown());
+            } else {
+                REQUIRE_FALSE(started);
+                CHECK(std::string(started.error().code.value()) == "Project.RecoveryExecutionOwnershipInvalid");
+                CHECK(kernel.projectRuntime().list().empty());
+                CHECK(kernel.persistence().projectCatalogMigrationPending().value());
+            }
+        }
+    }
+}
+
+TEST_CASE("Legacy execution roots roll back read faults and allow a clean Host retry", "[project-runtime][legacy-execution-roots][fault-matrix]")
+{
+    const std::array points{"SELECT task_id FROM task_history ORDER BY task_id", "SELECT task_name,status,request_payload",
+        "SELECT idempotency_key FROM external_effects ORDER BY idempotency_key", "SELECT signature_payload,signature_digest,replay_policy,state,"};
+    for(const auto* point : points) {
+        for(unsigned int occurrence : {1U, 2U}) {
+            for(bool throws : {false, true}) {
+                CAPTURE(point, occurrence, throws);
+                const auto root = freshRoot();
+                const auto project = id<ProjectId>("project.legacy.retry");
+                {
+                    auto persistence = openPersistenceFixture(root / "state.db", root / "snapshots");
+                    seedLegacyExecution(*persistence, 2U, project);
+                }
+                {
+                    AppKernel kernel;
+                    auto* faults = configure(kernel, root);
+                    faults->arm(BackendPoint::Query, point, occurrence, throws);
+                    CHECK_FALSE(kernel.bootstrap());
+                    CHECK(faults->hits == 1U);
+                    CHECK(kernel.projectRuntime().list().empty());
+                    CHECK(kernel.persistence().projectCatalogMigrationPending().value());
+                    auto observer = SqlitePersistenceBackend::open({root / "state.db"});
+                    REQUIRE(observer);
+                    auto projects = observer.value()->query("SELECT * FROM project_catalog");
+                    REQUIRE(projects);
+                    CHECK(projects.value().empty());
+                }
+                AppKernel restarted;
+                configure(restarted, root);
+                REQUIRE(restarted.bootstrap());
+                CHECK(restarted.projectRuntime().list().size() == 1U);
+                CHECK_FALSE(restarted.persistence().projectCatalogMigrationPending().value());
+                REQUIRE(restarted.shutdown());
+            }
+        }
+    }
+}
+
+TEST_CASE("Legacy execution roots migrate projects without documents and never replay history", "[project-runtime][legacy-execution-roots]")
+{
+    for(unsigned int source = 0U; source < 3U; ++source) {
+        for(bool scoped : {false, true}) {
+            CAPTURE(source, scoped);
+            const auto root = freshRoot();
+            const auto project = id<ProjectId>("project.legacy.execution");
+            {
+                auto persistence = openPersistenceFixture(root / "state.db", root / "snapshots");
+                seedLegacyExecution(*persistence, source, scoped ? std::optional<ProjectId>{project} : std::nullopt);
+            }
+            for(unsigned int restart = 0U; restart < 2U; ++restart) {
+                AppKernel kernel;
+                configure(kernel, root);
+                REQUIRE(kernel.bootstrap());
+                CHECK(kernel.projectRuntime().list().size() == (scoped ? 1U : 0U));
+                CHECK(kernel.documentRuntime().list().empty());
+                CHECK(kernel.scheduler().activeTaskCount() == 0U);
+                CHECK_FALSE(kernel.persistence().projectCatalogMigrationPending().value());
+                if(scoped) {
+                    auto lifecycle = kernel.projectRuntime().lifecycle(project);
+                    CHECK(lifecycle);
+                    if(lifecycle) {
+                        if(restart == 0U) { REQUIRE(kernel.projectRuntime().close(project)); }
+                        CHECK(kernel.projectRuntime().lifecycle(project).value().state == ProjectLifecycleState::Closed);
+                    }
+                }
+                if(source != 1U) {
+                    auto history = kernel.persistence().taskHistory(id<TaskId>("task.legacy.root"));
+                    REQUIRE(history);
+                    REQUIRE(history.value());
+                    CHECK(history.value()->state == TaskState::Failed);
+                }
+                if(source != 0U) {
+                    auto history = kernel.persistence().externalEffect(id<IdempotencyKey>("effect.legacy.root"));
+                    REQUIRE(history);
+                    REQUIRE(history.value());
+                    CHECK(history.value()->state == ExternalEffectState::Indeterminate);
+                }
+                REQUIRE(kernel.shutdown());
+            }
+        }
+    }
+}
+
+TEST_CASE("Legacy execution roots cannot silently repair a completed project migration", "[project-runtime][legacy-execution-roots]")
+{
+    for(unsigned int source = 0U; source < 3U; ++source) {
+        const auto root = freshRoot();
+        {
+            auto persistence = openPersistenceFixture(root / "state.db", root / "snapshots");
+            REQUIRE(persistence->completeProjectCatalogMigration({}));
+            seedLegacyExecution(*persistence, source, id<ProjectId>("project.missing.execution"));
+        }
+        AppKernel kernel;
+        configure(kernel, root);
+        auto started = kernel.bootstrap();
+        CHECK_FALSE(started);
+        if(!started) { CHECK(std::string(started.error().code.value()) == "Project.RecoveryMissingRoot"); }
+        CHECK(kernel.projectRuntime().list().empty());
+        auto observer = SqlitePersistenceBackend::open({root / "state.db"});
+        REQUIRE(observer);
+        auto rows = observer.value()->query("SELECT * FROM project_catalog");
+        REQUIRE(rows);
+        CHECK(rows.value().empty());
+    }
+}
+
+TEST_CASE("Legacy execution roots upgrade schema v8 with terminal task and effect projects", "[project-runtime][legacy-execution-roots]")
+{
+    const auto root = freshRoot();
+    const auto taskProject = id<ProjectId>("project.legacy.task");
+    const auto effectProject = id<ProjectId>("project.legacy.effect");
+    {
+        auto persistence = openPersistenceFixture(root / "state.db", root / "snapshots");
+        seedLegacyExecution(*persistence, 0U, taskProject);
+        seedLegacyExecution(*persistence, 1U, effectProject);
+        REQUIRE(persistence->recordTaskTerminal(TaskSnapshot{id<TaskId>("task.legacy.root"),
+            id<TaskName>("task.legacy.worker"), TaskState::Succeeded, 1.0, "done", id<TraceId>("trace.legacy"),
+            std::nullopt, Value{"stored"}, std::nullopt}));
+        REQUIRE(persistence->completeExternalEffect(id<IdempotencyKey>("effect.legacy.root"),
+            legacyEffectSignature(effectProject), Value{Value::Object{{"completed", Value{true}}}}));
+    }
+    {
+        // Rebuild the preceding schema only in this newly-created isolated fixture.
+        // 中文翻译：仅在本测试刚创建的隔离数据库中重建前一版 schema。
+        auto observer = SqlitePersistenceBackend::open({root / "state.db"});
+        REQUIRE(observer);
+        REQUIRE(observer.value()->execute("DROP TABLE project_catalog"));
+        REQUIRE(observer.value()->execute("DROP TABLE project_catalog_migration"));
+        REQUIRE(observer.value()->execute("DELETE FROM schema_migrations WHERE version=9"));
+    }
+    for(unsigned int restart = 0U; restart < 2U; ++restart) {
+        AppKernel kernel;
+        configure(kernel, root);
+        REQUIRE(kernel.bootstrap());
+        REQUIRE(kernel.projectRuntime().list().size() == 2U);
+        CHECK(kernel.documentRuntime().list().empty());
+        CHECK(kernel.scheduler().activeTaskCount() == 0U);
+        auto task = kernel.persistence().taskHistory(id<TaskId>("task.legacy.root"));
+        REQUIRE(task);
+        REQUIRE(task.value());
+        CHECK(task.value()->state == TaskState::Succeeded);
+        CHECK(task.value()->result == Value{"stored"});
+        auto effect = kernel.persistence().externalEffect(id<IdempotencyKey>("effect.legacy.root"));
+        REQUIRE(effect);
+        REQUIRE(effect.value());
+        CHECK(effect.value()->state == ExternalEffectState::Completed);
+        REQUIRE(effect.value()->outcome);
+        CHECK(*effect.value()->outcome == Value{Value::Object{{"completed", Value{true}}}});
+        for(const auto project : {taskProject, effectProject}) {
+            if(restart == 0U) { REQUIRE(kernel.projectRuntime().close(project)); }
+            CHECK(kernel.projectRuntime().lifecycle(project).value().state == ProjectLifecycleState::Closed);
+        }
+        REQUIRE(kernel.shutdown());
+    }
+}
+
+TEST_CASE("Legacy execution roots require an exact once only verified project set", "[project-runtime][legacy-execution-roots]")
+{
+    const auto root = freshRoot();
+    auto persistence = openPersistenceFixture(root / "state.db", root / "snapshots");
+    const auto a = id<ProjectId>("project.legacy.a");
+    const auto b = id<ProjectId>("project.legacy.b");
+    seedLegacyExecution(*persistence, 0U, a);
+    seedLegacyExecution(*persistence, 1U, b);
+    const std::array missing{a};
+    const std::array extra{a, b, id<ProjectId>("project.extra")};
+    const std::array duplicates{a, b, a};
+    for(const auto candidate : {std::span<const ProjectId>{}, std::span<const ProjectId>{missing},
+        std::span<const ProjectId>{extra}, std::span<const ProjectId>{duplicates}}) {
+        CHECK_FALSE(persistence->completeProjectCatalogMigration(candidate));
+        CHECK(persistence->projectCatalogMigrationPending().value());
+    }
+    REQUIRE(persistence->completeProjectCatalogMigration(std::array{a, b}));
+    CHECK(persistence->projectCatalog().value().size() == 2U);
+    REQUIRE(persistence->saveProjectLifecycle(a, ProjectPersistenceState::Closed));
+    REQUIRE(persistence->completeProjectCatalogMigration(extra));
+    const auto projects = persistence->projectCatalog();
+    REQUIRE(projects);
+    CHECK(projects.value().size() == 2U);
+    CHECK(projects.value().front().state == ProjectPersistenceState::Closed);
+}
+
+TEST_CASE("Legacy execution roots authenticate terminal payloads and indexed policy before migration", "[project-runtime][legacy-execution-roots][fault-matrix]")
+{
+    for(unsigned int source = 0U; source < 2U; ++source) {
+        for(bool digestFault : {false, true}) {
+            for(bool completed : {false, true}) {
+                CAPTURE(source, digestFault, completed);
+                const auto root = freshRoot();
+                const auto project = id<ProjectId>("project.legacy.terminal-fault");
+                {
+                    auto persistence = openPersistenceFixture(root / "state.db", root / "snapshots");
+                    seedLegacyExecution(*persistence, source, project, true);
+                    if(completed) { REQUIRE(persistence->completeProjectCatalogMigration(std::array{project})); }
+                }
+                {
+                    auto observer = SqlitePersistenceBackend::open({root / "state.db"});
+                    REQUIRE(observer);
+                    const auto* sql = source == 0U
+                        ? (digestFault ? "UPDATE task_history SET terminal_digest='bad.digest'"
+                                       : "UPDATE task_history SET task_name='task.forged'")
+                        : (digestFault ? "UPDATE external_effects SET outcome_digest='bad.digest'"
+                                       : "UPDATE external_effects SET replay_policy='safe'");
+                    REQUIRE(observer.value()->execute(sql));
+                }
+                AppKernel kernel;
+                configure(kernel, root);
+                CHECK_FALSE(kernel.bootstrap());
+                CHECK(kernel.projectRuntime().list().empty());
+                CHECK(kernel.persistence().projectCatalogMigrationPending().value() == !completed);
+                auto observer = SqlitePersistenceBackend::open({root / "state.db"});
+                REQUIRE(observer);
+                auto projects = observer.value()->query("SELECT * FROM project_catalog");
+                REQUIRE(projects);
+                CHECK(projects.value().size() == (completed ? 1U : 0U));
+            }
+        }
+    }
 }
 
 TEST_CASE("Lifecycle commands persist all fixed transitions across fresh Hosts", "[project-runtime][lifecycle-control][persistence]")

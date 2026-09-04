@@ -31,6 +31,7 @@ target_sources(
         assets/asset_validation.cpp
         persistence/document_persistence.cpp
         persistence/project_persistence.cpp
+        persistence/execution_ownership.cpp
         persistence/idempotency_persistence.cpp
         persistence/effect_persistence.cpp
         persistence/recovery.cpp

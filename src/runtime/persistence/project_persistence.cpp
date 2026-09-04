@@ -237,9 +237,12 @@ Result<void> PersistenceService::completeProjectCatalogMigration(
             if(!id) { return Result<void>::failure(std::move(id).error()); }
             expected.insert(std::move(id).value());
         }
+        auto executions = executionOwnershipsUnlocked();
+        if(!executions) { return Result<void>::failure(std::move(executions).error()); }
+        for(const auto& owner : executions.value()) { expected.insert(owner.projectId); }
         if(expected != verified) {
             return Result<void>::failure(projectError("Persistence.LegacyProjectSetMismatch",
-                "Verified project identities do not match all durable document ownership sources",
+                "Verified project identities do not match all durable ownership sources",
                 ErrorCategory::Conflict));
         }
         for(const auto& id : verified) {
