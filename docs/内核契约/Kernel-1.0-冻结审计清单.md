@@ -2,6 +2,8 @@
 
 ## 当前工作状态：ST1 补齐中
 
+2026-09-04 用户已确认按交叉审计补齐计划。当前独立待闭合项见 [ST1C 补充执行计划](ST1C-补充审计与剩余执行计划.md)：C1 修订恢复/写入检查、C2 整体准入和析构、C3 存储键、C4 attach、C5 独占与耐久配置、C6–C8 冻结契约/容量/门禁。历史 31/32 不表示当前仅剩一项；对应条目按新增回归重开审计，不否定原用例的真实成功记录。
+
 复核原规划总览、K10B 标题和 State 清单后，独立 Project 生命周期被确认为原目标内的必需能力，不再作为额外范围决策阻塞。ST1A 的持久组件以及 ST1B 的 ProjectRuntime、文档联动和关闭协调均已通过本地检查点。Project-only 执行准入、完整恢复与最终认证仍未签核，不能宣布 Frozen；详见 [ST1 收口契约](ST1-独立项目生命周期收口.md)。
 
 ST1 将影响状态、执行、持久化和恢复；以下 31 项通过记录属于 F5C 固定版本，不自动延伸到新增代码。所有受影响项须在 ST1D 完成三配置、故障/恢复/压力与新基线后重新签核，当前仍不得宣布 Frozen。
@@ -12,9 +14,9 @@ ST1 将影响状态、执行、持久化和恢复；以下 31 项通过记录属
 
 ## F5C 时发现的范围差异（已按原目标决定补齐）
 
-最终清单的 State 第一项写明“Project/Document 可以运行期创建、打开、关闭”；K10B 细则则只指定 DocumentRuntime 的 create/attach/open/snapshot/close/detach/remove/list，以及 Project ownership 冲突。当前代码只有后者：Document 归属 ProjectId，Project Revision 按项目共享，没有独立 ProjectRuntime、ProjectLifecycle 或项目级 create/open/close。
+F5C 时，清单要求 Project/Document 生命周期，但实现仅覆盖 DocumentRuntime 和 Project ownership。当时缺少独立 ProjectRuntime；ST1B 已补齐基础接口，剩余问题按上面的当前计划处理。
 
-因此当前证据不能证明独立项目生命周期已完成。已向用户提出范围确认：补齐项目级内核生命周期（不做项目 UI），或明确本阶段按 K10B 细则验收文档生命周期与项目所属关系。在明确前，该项保持未闭合；不能通过改写“已验收”的定义绕过它。
+当时曾提出范围确认；之后已按原目标决定实现完整项目内核生命周期，不再等待该选择。这里保留决策来源，不作为当前阻塞原因，也不能通过改写验收定义绕过新增正确性问题。
 
 ## 第 5 节逐项证据索引
 
@@ -28,7 +30,7 @@ ST1 将影响状态、执行、持久化和恢复；以下 31 项通过记录属
 | EX2 | 四类 Execution scope 完整 | execution_scope、Command/Query Runtime；四 scope 用例及异步 Global Task 用例 | 无文档 scope 不应取得文档快照 |
 | EX3 | ReadOnly/DocumentWrite/ExternalEffect 语义闭环 | CommandRuntime、EffectExecutor、TaskRuntime；执行链及故障用例 | 不让只读/外部副作用走普通文档 Undo |
 | EX4 | External recovery/replay policy | effect_executor、effect_persistence；F2B Safe/Idempotent/ReconcileOnly/Never | 仅显式允许重试，不自动调用 handler |
-| ST1 | Project/Document 运行期 create/open/close | DocumentRuntime、document_state_tests、持久目录用例 | **项目级含义未闭合，见范围确认** |
+| ST1 | Project/Document 运行期 create/open/close | 历史 DocumentRuntime；ST1B 新增 ProjectRuntime 与关闭协调 | **仍未整体闭合，按 C1–C5 补充回归，不再等待范围确认** |
 | ST2 | Document 生命周期与 Task/Transaction 一致 | DocumentActivityLease、CloseBlockers；F3 Query/Task/Workflow/关闭压力 | 活动准入和长期工作检查不能有空窗 |
 | ST3 | Revision 冲突 fail-closed | RevisionManager、TransactionManager；版本冲突及八路竞争用例 | 唯一持久胜者，失败候选无状态残留 |
 | TX1 | DocumentWrite 唯一 Transaction 链 | AppKernel 私有 transactions_、CommandRuntime、Workflow/Script 调度 | AppKernel 不公开可变存储/事务管理器 |

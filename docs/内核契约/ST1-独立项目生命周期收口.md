@@ -18,6 +18,8 @@ ST1 整体实施中，尚未验收；ST1A 持久组件检查点已通过下述 D
 
 ## 分节点实施与验收
 
+2026-09-04 交叉审计后，剩余顺序及独立缺陷门禁以 [ST1C 补充执行计划](ST1C-补充审计与剩余执行计划.md) 为准。ST1C 不再仅指项目存在性租约，还包括独立修订恢复、Kernel 停止/析构、存储键、可信装载、单 Host 与冻结契约。先执行 C1a 非零 ProjectRevision 重启回归；全部必须项闭合后进入 ST1D。
+
 - ST1A：schema v9 的 Project catalog、版本化/摘要绑定的状态、一次性迁移标记与回滚；空项目持久化、篡改、未知状态、迁移失败与中断状态测试。此节点只提供持久化基础，不宣称已具备 ProjectRuntime。
 - ST1B：AppKernel 所有权、ProjectRuntime 状态机、Document 生命周期联动和项目关闭协调；内存/SQLite/多文档/空项目测试。
 - ST1C：Project/Document scope 的统一租约、Task/Workflow/Script 长期活动桥接、启动恢复与 legacy 准入；明确交错和失败状态断言。
