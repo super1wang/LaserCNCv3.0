@@ -20,6 +20,19 @@ lcnc_enable_warnings(lasercnc_foundation_tests)
 include(Catch)
 catch_discover_tests(lasercnc_foundation_tests)
 
+# Allocation replacement is isolated to this test process, never a production target.
+# 中文翻译：分配替换仅存在于此测试进程，不进入生产目标或其他测试进程。
+add_executable(lasercnc_trace_allocation_probe integration/trace_allocation_probe.cpp)
+target_link_libraries(lasercnc_trace_allocation_probe PRIVATE LaserCNC::Kernel)
+target_compile_features(lasercnc_trace_allocation_probe PRIVATE cxx_std_20)
+set_target_properties(lasercnc_trace_allocation_probe PROPERTIES CXX_EXTENSIONS OFF)
+lcnc_enable_warnings(lasercnc_trace_allocation_probe)
+add_test(NAME integration.trace_start_allocation_atomicity
+    COMMAND "${CMAKE_COMMAND}" "-DLCNC_EXECUTABLE=$<TARGET_FILE:lasercnc_trace_allocation_probe>"
+        "-DLCNC_EXPECTED_OUTPUT=trace-start-allocation-verified" "-DLCNC_TIMEOUT=30"
+        -P "${PROJECT_SOURCE_DIR}/cmake/RunVerifiedProgram.cmake")
+set_tests_properties(integration.trace_start_allocation_atomicity PROPERTIES TIMEOUT 40)
+
 # Test-only process probe; no product command-line contract is introduced.
 # 中文翻译：仅供测试的进程探针，不新增产品命令行契约。
 add_executable(lasercnc_lifecycle_catalog_probe integration/lifecycle_catalog_probe.cpp)

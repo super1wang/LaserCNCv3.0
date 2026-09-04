@@ -630,6 +630,53 @@ TEST_CASE("LocalTraceService owns span completion and isolates exporters", "[obs
     CHECK(bounded.records().front().spanId == validId<SpanId>("span.bounded.2"));
 }
 
+TEST_CASE("LocalTraceService reuses span identity only after retained history eviction", "[observability][c6b8]")
+{
+    LocalTraceService traces{1U};
+    auto first = traces.startSpan({validId<TraceId>("trace.first"), validId<SpanId>("span.reused"), {}, "first", {}});
+    REQUIRE(first);
+    first.value()->end(TraceStatus::Succeeded);
+    auto retained = traces.startSpan({validId<TraceId>("trace.rejected"), validId<SpanId>("span.reused"), {}, "retained", {}});
+    REQUIRE_FALSE(retained);
+    CHECK(std::string(retained.error().code.value()) == "Trace.SpanIdAlreadyExists");
+
+    auto replacement = traces.startSpan({validId<TraceId>("trace.second"), validId<SpanId>("span.second"), {}, "second", {}});
+    REQUIRE(replacement);
+    replacement.value()->end(TraceStatus::Failed);
+    REQUIRE(traces.records().size() == 1U);
+    CHECK(traces.records().front().spanId == validId<SpanId>("span.second"));
+
+    auto reused = traces.startSpan({validId<TraceId>("trace.third"), validId<SpanId>("span.reused"), {}, "third", {}});
+    REQUIRE(reused);
+    reused.value()->end(TraceStatus::Cancelled);
+    REQUIRE(traces.records().size() == 1U);
+    CHECK(traces.records().front().spanId == validId<SpanId>("span.reused"));
+    CHECK(traces.records().front().status == TraceStatus::Cancelled);
+    CHECK(traces.activeSpanCount() == 0U);
+}
+
+TEST_CASE("LocalTraceService span handle keeps completion core alive after service owner leaves", "[observability][c6b8]")
+{
+    auto exporter = std::make_shared<RecordingObserver>();
+    std::unique_ptr<ITraceSpan> handle;
+    {
+        LocalTraceService traces;
+        REQUIRE(traces.addExporter(exporter));
+        auto started = traces.startSpan({validId<TraceId>("trace.detached-owner"),
+            validId<SpanId>("span.detached-owner"), {}, "detached-owner", {}});
+        REQUIRE(started);
+        handle = std::move(started).value();
+        CHECK(traces.activeSpanCount() == 1U);
+    }
+    REQUIRE(exporter->spans.empty());
+    handle->end(TraceStatus::Stale);
+    REQUIRE(exporter->spans.size() == 1U);
+    CHECK(exporter->spans.front().spanId == validId<SpanId>("span.detached-owner"));
+    CHECK(exporter->spans.front().status == TraceStatus::Stale);
+    handle.reset();
+    CHECK(exporter->spans.size() == 1U);
+}
+
 TEST_CASE("LocalMetricsService aggregates deterministically without exporter control flow", "[observability][metrics]")
 {
     LocalMetricsService metrics;

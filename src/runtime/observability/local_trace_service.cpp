@@ -99,34 +99,6 @@ foundation::Result<std::unique_ptr<ITraceSpan>> LocalTraceService::startSpan(
     }
     const auto spanId = start.spanId;
     const auto traceId = start.traceId;
-    {
-        std::lock_guard lock(core_->mutex);
-        const auto completed = std::find_if(
-            core_->completed.begin(),
-            core_->completed.end(),
-            [&spanId](const TraceSpanRecord& record) { return record.spanId == spanId; });
-        if(core_->active.contains(spanId) || completed != core_->completed.end()) {
-            return foundation::Result<std::unique_ptr<ITraceSpan>>::failure(traceError(
-                "Trace.SpanIdAlreadyExists",
-                foundation::ErrorCategory::Conflict,
-                "A trace span id can only be used once",
-                spanId));
-        }
-        const auto now = std::chrono::system_clock::now();
-        core_->active.emplace(
-            spanId,
-            TraceSpanRecord {
-                std::move(start.traceId),
-                start.spanId,
-                std::move(start.parentSpanId),
-                std::move(start.name),
-                now,
-                now,
-                TraceStatus::Running,
-                std::move(start.attributes),
-                std::nullopt});
-    }
-
     using Completion = std::function<void(TraceStatus, std::optional<foundation::Error>)>;
     Completion completion = [core = core_, spanId](
                                 TraceStatus status,
@@ -194,7 +166,7 @@ foundation::Result<std::unique_ptr<ITraceSpan>> LocalTraceService::startSpan(
 
         ~Span() override
         {
-            if(!ended_.exchange(true, std::memory_order_acq_rel)) {
+            if(armed_ && !ended_.exchange(true, std::memory_order_acq_rel)) {
                 try {
                     completion_(TraceStatus::Failed, traceError(
                         "Trace.SpanAbandoned",
@@ -208,6 +180,7 @@ foundation::Result<std::unique_ptr<ITraceSpan>> LocalTraceService::startSpan(
 
         const kernel::TraceId& traceId() const noexcept override { return traceId_; }
         const kernel::SpanId& spanId() const noexcept override { return spanId_; }
+        void arm() noexcept { armed_ = true; }
 
         void end(TraceStatus status, std::optional<foundation::Error> error) noexcept override
         {
@@ -243,10 +216,44 @@ foundation::Result<std::unique_ptr<ITraceSpan>> LocalTraceService::startSpan(
         kernel::SpanId spanId_;
         Completion completion_;
         std::atomic_bool ended_{false};
+        bool armed_{false};
     };
 
+    // Allocate every fallible handle resource before publishing the active identity. A disarmed
+    // handle is inert if allocation or duplicate admission fails; after insertion no allocation
+    // is needed to transfer its ownership into Result.
+    // 中文翻译：先完成句柄全部可失败分配，再发布活动身份；未准入的句柄析构不会生成虚假完成。
+    auto span = std::make_unique<Span>(traceId, spanId, std::move(completion));
+    {
+        std::lock_guard lock(core_->mutex);
+        const auto completed = std::find_if(
+            core_->completed.begin(),
+            core_->completed.end(),
+            [&spanId](const TraceSpanRecord& record) { return record.spanId == spanId; });
+        if(core_->active.contains(spanId) || completed != core_->completed.end()) {
+            return foundation::Result<std::unique_ptr<ITraceSpan>>::failure(traceError(
+                "Trace.SpanIdAlreadyExists",
+                foundation::ErrorCategory::Conflict,
+                "A trace span id is reserved while active or retained",
+                spanId));
+        }
+        const auto now = std::chrono::system_clock::now();
+        core_->active.emplace(
+            spanId,
+            TraceSpanRecord {
+                std::move(start.traceId),
+                start.spanId,
+                std::move(start.parentSpanId),
+                std::move(start.name),
+                now,
+                now,
+                TraceStatus::Running,
+                std::move(start.attributes),
+                std::nullopt});
+        span->arm();
+    }
     return foundation::Result<std::unique_ptr<ITraceSpan>>::success(
-        std::make_unique<Span>(traceId, spanId, std::move(completion)));
+        std::move(span));
 }
 
 std::vector<TraceSpanRecord> LocalTraceService::records() const
