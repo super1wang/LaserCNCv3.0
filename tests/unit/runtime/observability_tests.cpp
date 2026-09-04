@@ -164,6 +164,162 @@ private:
 
 } // namespace
 
+TEST_CASE("LogObservabilityExporter rejects invalid direct metric values and kinds", "[observability][c6b7]")
+{
+    auto log = std::make_shared<RecordingLogService>();
+    auto exporter = LogObservabilityExporter::create(log);
+    REQUIRE(exporter);
+    MetricObservation value{validId<MetricName>("metric.direct"), MetricKind::Counter, 0.0, {}, {}};
+    for(unsigned int raw = 3U; raw <= 255U; ++raw) {
+        value.kind = static_cast<MetricKind>(raw);
+        const auto result = exporter.value()->exportObservation(value);
+        CHECK_FALSE(result);
+        if(!result) { CHECK(std::string(result.error().code.value()) == "Observability.InvalidMetricKind"); }
+    }
+    for(const auto kind : {MetricKind::Counter, MetricKind::Gauge, MetricKind::Histogram}) {
+        value.kind = kind;
+        for(const auto invalid : {std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+            value.value = invalid;
+            CHECK_FALSE(exporter.value()->exportObservation(value));
+        }
+    }
+    value.kind = MetricKind::Counter;
+    value.value = -1.0;
+    const auto negative = exporter.value()->exportObservation(value);
+    CHECK_FALSE(negative);
+    if(!negative) { CHECK(std::string(negative.error().code.value()) == "Observability.InvalidMetricValue"); }
+    CHECK(log->records().empty());
+}
+
+TEST_CASE("LogObservabilityExporter rejects invalid direct span completion", "[observability][c6b7]")
+{
+    auto log = std::make_shared<RecordingLogService>();
+    auto exporter = LogObservabilityExporter::create(log);
+    REQUIRE(exporter);
+    TraceSpanRecord span{validId<TraceId>("trace.direct"), validId<SpanId>("span.direct"), {}, "direct", {}, {}, TraceStatus::Succeeded, {}, {}};
+    for(unsigned int raw = 0U; raw <= 255U; ++raw) {
+        if(raw >= 1U && raw <= 4U) { continue; }
+        span.status = static_cast<TraceStatus>(raw);
+        const auto result = exporter.value()->exportSpan(span);
+        CHECK_FALSE(result);
+        if(!result) { CHECK(std::string(result.error().code.value()) == "Observability.InvalidSpanStatus"); }
+    }
+    span.status = TraceStatus::Succeeded;
+    span.name.clear();
+    CHECK_FALSE(exporter.value()->exportSpan(span));
+    span.name = "direct";
+    span.startedAt = span.finishedAt + std::chrono::system_clock::duration{1};
+    const auto reversed = exporter.value()->exportSpan(span);
+    CHECK_FALSE(reversed);
+    if(!reversed) { CHECK(std::string(reversed.error().code.value()) == "Observability.InvalidSpanTimeRange"); }
+    CHECK(log->records().empty());
+}
+
+TEST_CASE("LogObservabilityExporter calculates extreme elapsed times without signed wrap", "[observability][c6b7]")
+{
+    using Clock = std::chrono::system_clock;
+    using Duration = Clock::duration;
+    auto log = std::make_shared<RecordingLogService>();
+    auto exporter = LogObservabilityExporter::create(log);
+    REQUIRE(exporter);
+    TraceSpanRecord span{validId<TraceId>("trace.extreme"), validId<SpanId>("span.extreme"), {}, "extreme", Clock::time_point::min(), Clock::time_point::max(), TraceStatus::Succeeded, {}, {}};
+    REQUIRE(exporter.value()->exportSpan(span));
+    const auto expected = static_cast<double>((static_cast<long double>(Duration::max().count()) - static_cast<long double>(Duration::min().count())) * Duration::period::num * 1000.0L / Duration::period::den);
+    auto records = log->records();
+    const auto actual = *records.back().structuredData.at("durationMs").getIf<double>();
+    CHECK(std::isfinite(actual));
+    CHECK(actual > 0.0);
+    CHECK(std::abs(actual - expected) <= expected * 1e-14);
+    span.startedAt = Clock::time_point::max() - Duration{1};
+    REQUIRE(exporter.value()->exportSpan(span));
+    records = log->records();
+    CHECK(*records.back().structuredData.at("durationMs").getIf<double>() == std::chrono::duration<double, std::milli>(Duration{1}).count());
+}
+
+TEST_CASE("LogObservabilityExporter contains direct log backend exceptions", "[observability][c6b7]")
+{
+    class ThrowingLog final : public ILogService {
+    public:
+        bool unknown{false};
+        Result<void> write(const LogRecord&) override {
+            if(unknown) { throw 42; }
+            throw std::runtime_error("log backend threw");
+        }
+        Result<void> flush() override { return Result<void>::success(); }
+    };
+    for(const bool unknown : {false, true}) {
+        auto log = std::make_shared<ThrowingLog>();
+        log->unknown = unknown;
+        auto exporter = LogObservabilityExporter::create(log);
+        REQUIRE(exporter);
+        TraceSpanRecord span{validId<TraceId>("trace.throw"), validId<SpanId>("span.throw"), {}, "throw", {}, {}, TraceStatus::Succeeded, {}, {}};
+        for(const bool metric : {false, true}) {
+            DYNAMIC_SECTION("unknown=" << unknown << " metric=" << metric) {
+                const auto result = metric ? exporter.value()->exportObservation({validId<MetricName>("metric.throw"), MetricKind::Gauge, 1.0, {}, {}}) : exporter.value()->exportSpan(span);
+                REQUIRE_FALSE(result);
+                CHECK(std::string(result.error().code.value()) == "Observability.LogExportFailed");
+            }
+        }
+    }
+}
+
+TEST_CASE("LogObservabilityExporter preserves direct legal mappings and small elapsed times", "[observability][c6b7]")
+{
+    using Clock = std::chrono::system_clock;
+    using Duration = Clock::duration;
+    auto log = std::make_shared<RecordingLogService>();
+    auto exporter = LogObservabilityExporter::create(log);
+    REQUIRE(exporter);
+    TraceSpanRecord span{validId<TraceId>("trace.valid-direct"), validId<SpanId>("span.valid-direct"), {}, "valid", {}, {}, TraceStatus::Succeeded, {}, {}};
+    for(const auto status : {TraceStatus::Succeeded, TraceStatus::Failed, TraceStatus::Cancelled, TraceStatus::Stale}) {
+        span.status = status;
+        REQUIRE(exporter.value()->exportSpan(span));
+        const auto record = log->records().back();
+        CHECK(record.structuredData.at("durationMs") == Value{0.0});
+        const auto expected = status == TraceStatus::Succeeded ? LogLevel::Info : status == TraceStatus::Failed ? LogLevel::Error : LogLevel::Warning;
+        CHECK(record.level == expected);
+    }
+    for(const auto start : {Clock::time_point::min(), Clock::time_point{} - Duration{2}}) {
+        span.startedAt = start;
+        span.finishedAt = start + Duration{5};
+        REQUIRE(exporter.value()->exportSpan(span));
+        CHECK(log->records().back().structuredData.at("durationMs") == Value{std::chrono::duration<double, std::milli>(Duration{5}).count()});
+    }
+    for(const auto kind : {MetricKind::Counter, MetricKind::Gauge, MetricKind::Histogram}) {
+        for(const double value : {0.0, -1.0, std::numeric_limits<double>::max()}) {
+            if(kind == MetricKind::Counter && value < 0.0) { continue; }
+            REQUIRE(exporter.value()->exportObservation({validId<MetricName>("metric.valid-direct"), kind, value, {}, {}}));
+            CHECK(log->records().back().structuredData.at("value") == Value{value});
+        }
+    }
+}
+
+TEST_CASE("LogObservabilityExporter preserves returned backend errors without retry", "[observability][c6b7]")
+{
+    class FailedLog final : public ILogService {
+    public:
+        unsigned int calls{0U};
+        Error error = makeError("Test.Backend", ErrorCategory::Infrastructure, "backend", Value{"detail"}, Severity::Warning,
+            std::make_shared<const Error>(makeError("Test.Cause", ErrorCategory::Internal, "cause")));
+        Result<void> write(const LogRecord&) override { ++calls; return Result<void>::failure(error); }
+        Result<void> flush() override { FAIL_CHECK("Unexpected flush"); return Result<void>::success(); }
+    };
+    auto log = std::make_shared<FailedLog>();
+    auto exporter = LogObservabilityExporter::create(log);
+    REQUIRE(exporter);
+    TraceSpanRecord span{validId<TraceId>("trace.backend"), validId<SpanId>("span.backend"), {}, "backend", {}, {}, TraceStatus::Succeeded, {}, {}};
+    for(const bool metric : {false, true}) {
+        const auto result = metric ? exporter.value()->exportObservation({validId<MetricName>("metric.backend"), MetricKind::Counter, 1.0, {}, {}}) : exporter.value()->exportSpan(span);
+        REQUIRE_FALSE(result);
+        CHECK(result.error().code == log->error.code);
+        CHECK(result.error().category == log->error.category);
+        CHECK(result.error().severity == log->error.severity);
+        CHECK(result.error().details == log->error.details);
+        CHECK(result.error().cause == log->error.cause);
+    }
+    CHECK(log->calls == 2U);
+}
+
 TEST_CASE("LocalTraceService normalizes every invalid terminal status to failed", "[observability][c6b6]")
 {
     for(unsigned int raw = 0U; raw <= 255U; ++raw) {

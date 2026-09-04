@@ -252,6 +252,26 @@ foundation::Result<std::unique_ptr<SpdlogLogService>> SpdlogLogService::create(
 foundation::Result<void> SpdlogLogService::write(const observability::LogRecord& record)
 {
     try {
+        switch(record.level) {
+        case observability::LogLevel::Trace:
+        case observability::LogLevel::Debug:
+        case observability::LogLevel::Info:
+        case observability::LogLevel::Warning:
+        case observability::LogLevel::Error:
+        case observability::LogLevel::Critical:
+            break;
+        default:
+            return foundation::Result<void>::failure(foundation::makeError(
+                "Logging.InvalidLevel", foundation::ErrorCategory::Validation,
+                "A declared logging level is required"));
+        }
+        // Windows UTC conversion does not support pre-epoch dates; reject before floor conversion can overflow.
+        // 中文翻译：Windows UTC 转换不支持纪元前日期，在向下取整可能溢出前明确拒绝。
+        if(record.timestamp < std::chrono::system_clock::time_point{}) {
+            return foundation::Result<void>::failure(foundation::makeError(
+                "Logging.InvalidTimestamp", foundation::ErrorCategory::Validation,
+                "Log timestamps before the Unix epoch are not supported"));
+        }
         const auto timestamp = formatTimestamp(record.timestamp);
         const auto structured = implementation_->json_.serialize(
             makeStructuredRecord(record, timestamp));

@@ -3,8 +3,11 @@
 #include <lasercnc/foundation/error.hpp>
 
 #include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <exception>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 namespace lasercnc::observability {
@@ -53,6 +56,20 @@ foundation::Value labelsValue(const MetricLabels& labels)
     return foundation::Value {std::move(result)};
 }
 
+foundation::Result<void> invalidExport(const char* code, const char* message)
+{
+    return foundation::Result<void>::failure(foundation::makeError(
+        code, foundation::ErrorCategory::Validation, message));
+}
+
+foundation::Result<void> exportFailure(const char* reason)
+{
+    return foundation::Result<void>::failure(foundation::makeError(
+        "Observability.LogExportFailed", foundation::ErrorCategory::Internal,
+        "The log observation could not be exported",
+        foundation::Value{foundation::Value::Object{{"reason", foundation::Value{reason}}}}));
+}
+
 } // namespace
 
 foundation::Result<std::shared_ptr<LogObservabilityExporter>>
@@ -78,12 +95,35 @@ LogObservabilityExporter::LogObservabilityExporter(
 
 foundation::Result<void> LogObservabilityExporter::exportSpan(
     const TraceSpanRecord& span)
-{
+try {
+    switch(span.status) {
+    case TraceStatus::Succeeded:
+    case TraceStatus::Failed:
+    case TraceStatus::Cancelled:
+    case TraceStatus::Stale:
+        break;
+    default:
+        return invalidExport("Observability.InvalidSpanStatus", "Only completed spans can be exported");
+    }
+    if(span.name.empty()) {
+        return invalidExport("Observability.InvalidSpanName", "An exported span name is required");
+    }
+    if(span.finishedAt < span.startedAt) {
+        return invalidExport("Observability.InvalidSpanTimeRange", "Span completion cannot precede its start");
+    }
+    using ClockDuration = std::chrono::system_clock::duration;
+    static_assert(std::is_integral_v<ClockDuration::rep> && std::is_signed_v<ClockDuration::rep>);
+    using UnsignedTicks = std::make_unsigned_t<ClockDuration::rep>;
+    // Ordered unsigned subtraction spans the entire signed clock range without wrapping signed arithmetic.
+    // 中文翻译：先核对时间顺序，再用无符号差计算完整有符号时钟范围，保留极端位置的单 tick 差。
+    const auto ticks = static_cast<UnsignedTicks>(span.finishedAt.time_since_epoch().count())
+        - static_cast<UnsignedTicks>(span.startedAt.time_since_epoch().count());
+    const auto elapsed = std::chrono::duration<double, std::milli>(
+        std::chrono::duration<long double, ClockDuration::period>{static_cast<long double>(ticks)}).count();
     foundation::Value::Object data {
         {"attributes", foundation::Value {span.attributes}},
         {"durationMs",
-         foundation::Value {std::chrono::duration<double, std::milli>(
-             span.finishedAt - span.startedAt).count()}},
+         foundation::Value {elapsed}},
         {"name", foundation::Value {span.name}},
         {"spanId", foundation::Value {std::string(span.spanId.value())}},
         {"status", foundation::Value {traceStatusName(span.status)}},
@@ -114,11 +154,27 @@ foundation::Result<void> LogObservabilityExporter::exportSpan(
             std::nullopt,
             std::string(span.traceId.value())},
         std::move(data)});
+} catch(const std::exception& exception) {
+    return exportFailure(exception.what());
+} catch(...) {
+    return exportFailure("Unknown failure");
 }
 
 foundation::Result<void> LogObservabilityExporter::exportObservation(
     const MetricObservation& observation)
-{
+try {
+    switch(observation.kind) {
+    case MetricKind::Counter:
+    case MetricKind::Gauge:
+    case MetricKind::Histogram:
+        break;
+    default:
+        return invalidExport("Observability.InvalidMetricKind", "A declared metric kind is required");
+    }
+    if(!std::isfinite(observation.value)
+       || (observation.kind == MetricKind::Counter && observation.value < 0.0)) {
+        return invalidExport("Observability.InvalidMetricValue", "Metric values must be finite and counter deltas nonnegative");
+    }
     return logService_->write(LogRecord {
         observation.timestamp,
         LogLevel::Info,
@@ -132,6 +188,10 @@ foundation::Result<void> LogObservabilityExporter::exportObservation(
             {"name", foundation::Value {std::string(observation.name.value())}},
             {"value", foundation::Value {observation.value}},
         }});
+} catch(const std::exception& exception) {
+    return exportFailure(exception.what());
+} catch(...) {
+    return exportFailure("Unknown failure");
 }
 
 } // namespace lasercnc::observability

@@ -31,6 +31,7 @@ std::filesystem::path uniqueLogPath(const char* extension)
 std::string readText(const std::filesystem::path& path)
 {
     std::ifstream input(path, std::ios::binary);
+    REQUIRE(input.is_open());
     std::ostringstream output;
     output << input.rdbuf();
     return output.str();
@@ -129,4 +130,90 @@ TEST_CASE("SpdlogLogService validates output configuration", "[infrastructure][l
     auto failed = SpdlogLogService::create(backendFailure);
     REQUIRE_FALSE(failed.hasValue());
     CHECK(std::string(failed.error().code.value()) == "Logging.InitializeFailed");
+}
+
+TEST_CASE("SpdlogLogService rejects undefined levels without output side effects", "[infrastructure][logging][c6b7]")
+{
+    const auto human = uniqueLogPath("-admission.log");
+    const auto jsonl = uniqueLogPath("-admission.jsonl");
+    INFO("Preserved human evidence: " << human.string());
+    INFO("Preserved JSONL evidence: " << jsonl.string());
+    SpdlogLogOptions options;
+    options.enableConsole = false;
+    options.rotatingFilePath = human;
+    options.jsonlFilePath = jsonl;
+    auto log = SpdlogLogService::create(options);
+    REQUIRE(log);
+    LogRecord record;
+    record.timestamp = std::chrono::system_clock::now();
+    record.message = "baseline";
+    REQUIRE(log.value()->write(record));
+    REQUIRE(log.value()->flush());
+    const auto beforeHuman = readText(human);
+    const auto beforeJsonl = readText(jsonl);
+    REQUIRE_FALSE(beforeHuman.empty());
+    REQUIRE_FALSE(beforeJsonl.empty());
+    for(unsigned int raw = 6U; raw <= 255U; ++raw) {
+        record.level = static_cast<LogLevel>(raw);
+        const auto result = log.value()->write(record);
+        CHECK_FALSE(result);
+        if(!result) { CHECK(std::string(result.error().code.value()) == "Logging.InvalidLevel"); }
+    }
+    REQUIRE(log.value()->flush());
+    CHECK(readText(human) == beforeHuman);
+    CHECK(readText(jsonl) == beforeJsonl);
+}
+
+TEST_CASE("SpdlogLogService rejects pre epoch timestamps before conversion", "[infrastructure][logging][c6b7]")
+{
+    const auto path = uniqueLogPath("-time-admission.jsonl");
+    INFO("Preserved timestamp evidence: " << path.string());
+    SpdlogLogOptions options;
+    options.enableConsole = false;
+    options.jsonlFilePath = path;
+    auto log = SpdlogLogService::create(options);
+    REQUIRE(log);
+    LogRecord record;
+    for(const auto time : {std::chrono::system_clock::time_point::min(), std::chrono::system_clock::time_point{} - std::chrono::system_clock::duration{1}}) {
+        record.timestamp = time;
+        const auto result = log.value()->write(record);
+        REQUIRE_FALSE(result);
+        CHECK(std::string(result.error().code.value()) == "Logging.InvalidTimestamp");
+    }
+    REQUIRE(log.value()->flush());
+    CHECK(readText(path).empty());
+}
+
+TEST_CASE("SpdlogLogService preserves all declared levels and epoch timestamps", "[infrastructure][logging][c6b7]")
+{
+    const auto path = uniqueLogPath("-valid-admission.jsonl");
+    INFO("Preserved valid-level evidence: " << path.string());
+    SpdlogLogOptions options;
+    options.enableConsole = false;
+    options.jsonlFilePath = path;
+    auto log = SpdlogLogService::create(options);
+    REQUIRE(log);
+    const char* names[] = {"trace", "debug", "info", "warning", "error", "critical"};
+    for(unsigned int raw = 0U; raw < 6U; ++raw) {
+        LogRecord record;
+        record.timestamp = std::chrono::system_clock::time_point{};
+        record.level = static_cast<LogLevel>(raw);
+        record.message = names[raw];
+        REQUIRE(log.value()->write(record));
+    }
+    REQUIRE(log.value()->flush());
+    std::istringstream lines(readText(path));
+    JsonconsAdapter json;
+    for(const auto* name : names) {
+        std::string line;
+        REQUIRE(static_cast<bool>(std::getline(lines, line)));
+        const auto decoded = json.deserialize(line);
+        REQUIRE(decoded);
+        const auto* value = decoded.value().getIf<Value::Object>();
+        REQUIRE(value);
+        CHECK(value->at("level") == Value{name});
+        CHECK(value->at("timestamp") == Value{"1970-01-01T00:00:00.000Z"});
+    }
+    std::string extra;
+    CHECK_FALSE(static_cast<bool>(std::getline(lines, extra)));
 }
