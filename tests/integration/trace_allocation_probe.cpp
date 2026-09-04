@@ -156,6 +156,45 @@ struct HealthyCheck final : IDiagnosticCheck {
     DiagnosticId id_;
 };
 
+struct AddingTraceExporter final : ITraceExporter {
+    LocalTraceService* service{};
+    std::shared_ptr<ITraceExporter> late;
+    Result<void> exportSpan(const TraceSpanRecord&) override
+    {
+        ++calls;
+        if(!added) { added = service->addExporter(late).hasValue(); }
+        return Result<void>::success();
+    }
+    std::size_t calls{0};
+    bool added{false};
+};
+
+struct AddingMetricsExporter final : IMetricsExporter {
+    LocalMetricsService* service{};
+    std::shared_ptr<IMetricsExporter> late;
+    Result<void> exportObservation(const MetricObservation&) override
+    {
+        ++calls;
+        if(!added) { added = service->addExporter(late).hasValue(); }
+        return Result<void>::success();
+    }
+    std::size_t calls{0};
+    bool added{false};
+};
+
+struct AddingDiagnosticExporter final : IDiagnosticExporter {
+    DiagnosticsService* service{};
+    std::shared_ptr<IDiagnosticExporter> late;
+    Result<void> exportReport(const DiagnosticReport&) override
+    {
+        ++calls;
+        if(!added) { added = service->addExporter(late).hasValue(); }
+        return Result<void>::success();
+    }
+    std::size_t calls{0};
+    bool added{false};
+};
+
 TraceSpanStart request()
 {
     return {id<TraceId>("trace.allocation.long-identity-outside-small-string-storage"),
@@ -248,6 +287,8 @@ bool completionAttempt(
     for(const auto& record : records) {
         if(record.spanId == targetId) { targetRetained = true; }
     }
+    ok &= require(fixture.exporter->calls == (targetRetained ? 2U : 1U),
+        "retained completion must reach exporter snapshot", failIndex);
     auto retry = fixture.service.startSpan(request());
     ok &= require(retry.hasValue() != targetRetained,
         "identity retry must agree with bounded retained history", failIndex);
@@ -338,6 +379,145 @@ bool verifyExporterBookkeeping(bool throws, bool persistentFailure, std::size_t 
     }
     return ok;
 }
+
+bool metricsSnapshotAttempt(std::size_t failIndex, bool expectFailure, std::size_t& allocations)
+{
+    LocalMetricsService service;
+    auto first = std::make_shared<FollowingExporter>();
+    auto second = std::make_shared<FollowingExporter>();
+    if(!service.addExporter(first) || !service.addExporter(second)) {
+        throw std::logic_error("Metrics snapshot exporter setup failed");
+    }
+    auto name = id<MetricName>("metric.snapshot-allocation-long-identity-outside-small-string-storage");
+    std::optional<Result<void>> result;
+    bool escaped = false;
+    {
+        allocation_probe::Scope scope{failIndex};
+        try { result.emplace(service.addCounter(std::move(name), 1.0)); }
+        catch(const std::bad_alloc&) { escaped = true; }
+    }
+    allocations = allocation_probe::calls;
+    const auto snapshot = service.snapshot();
+    bool ok = require(allocation_probe::injected == expectFailure, "metrics snapshot injection", failIndex);
+    if(snapshot.empty()) {
+        ok &= require(escaped && !result.has_value(), "metrics pre-publication failure is atomic", failIndex);
+        ok &= require(first->metricCalls == 0U && second->metricCalls == 0U,
+            "metrics unpublished fact is not exported", failIndex);
+    } else {
+        ok &= require(!escaped && result && result->hasValue(), "metrics published fact returns success", failIndex);
+        ok &= require(first->metricCalls == 1U && second->metricCalls == 1U,
+            "metrics published fact reaches exporter snapshot", failIndex);
+    }
+    return ok;
+}
+
+bool diagnosticsSnapshotAttempt(std::size_t failIndex, bool expectFailure, std::size_t& allocations)
+{
+    DiagnosticsService service;
+    const auto diagnosticId = id<DiagnosticId>("diagnostic.snapshot-allocation-long-identity-outside-small-string-storage");
+    auto first = std::make_shared<FollowingExporter>();
+    auto second = std::make_shared<FollowingExporter>();
+    if(!service.registerCheck(diagnosticId, std::make_shared<HealthyCheck>(diagnosticId))
+       || !service.addExporter(first) || !service.addExporter(second)) {
+        throw std::logic_error("Diagnostics snapshot exporter setup failed");
+    }
+    std::optional<Result<DiagnosticReport>> result;
+    bool escaped = false;
+    {
+        allocation_probe::Scope scope{failIndex};
+        try { result.emplace(service.run(diagnosticId)); }
+        catch(const std::bad_alloc&) { escaped = true; }
+    }
+    allocations = allocation_probe::calls;
+    const auto latest = service.latest();
+    bool ok = require(allocation_probe::injected == expectFailure, "diagnostics snapshot injection", failIndex);
+    if(latest.empty()) {
+        ok &= require(escaped && !result.has_value(), "diagnostics pre-publication failure is atomic", failIndex);
+        ok &= require(first->diagnosticCalls == 0U && second->diagnosticCalls == 0U,
+            "diagnostics unpublished report is not exported", failIndex);
+    } else {
+        ok &= require(!escaped && result && result->hasValue(), "diagnostics published report returns success", failIndex);
+        ok &= require(first->diagnosticCalls == 1U && second->diagnosticCalls == 1U,
+            "diagnostics published report reaches exporter snapshot", failIndex);
+    }
+    return ok;
+}
+
+template<class Attempt>
+bool verifySnapshotPath(Attempt attempt, std::size_t& count)
+{
+    if(!attempt(std::numeric_limits<std::size_t>::max(), false, count) || count == 0 || count > 1000) {
+        return false;
+    }
+    bool ok = true;
+    for(std::size_t index = 0; index < count; ++index) {
+        std::size_t observed = 0;
+        ok &= attempt(index, true, observed);
+        ok &= require(observed == index + 1, "exact snapshot allocation index reached", index);
+    }
+    std::size_t observed = 0;
+    ok &= attempt(count, false, observed);
+    ok &= require(observed == count, "stable snapshot allocation path", count);
+    return ok;
+}
+
+bool verifySnapshotMembership()
+{
+    bool ok = true;
+    {
+        LocalTraceService service;
+        auto late = std::make_shared<FollowingExporter>();
+        auto adding = std::make_shared<AddingTraceExporter>();
+        adding->service = &service;
+        adding->late = late;
+        ok &= require(service.addExporter(adding).hasValue(), "trace adding exporter registered", 0);
+        auto first = service.startSpan({id<TraceId>("trace.snapshot-first"),
+            id<SpanId>("span.snapshot-first"), {}, "first", {}});
+        ok &= require(first.hasValue(), "trace first snapshot span starts", 0);
+        if(first) { first.value()->end(TraceStatus::Succeeded); }
+        ok &= require(adding->added && late->traceCalls == 0U,
+            "trace late exporter excluded from current snapshot", 0);
+        auto second = service.startSpan({id<TraceId>("trace.snapshot-second"),
+            id<SpanId>("span.snapshot-second"), {}, "second", {}});
+        ok &= require(second.hasValue(), "trace second snapshot span starts", 0);
+        if(second) { second.value()->end(TraceStatus::Succeeded); }
+        ok &= require(late->traceCalls == 1U, "trace late exporter enters next snapshot", 0);
+    }
+    {
+        LocalMetricsService service;
+        auto late = std::make_shared<FollowingExporter>();
+        auto adding = std::make_shared<AddingMetricsExporter>();
+        adding->service = &service;
+        adding->late = late;
+        ok &= require(service.addExporter(adding).hasValue(), "metrics adding exporter registered", 1);
+        ok &= require(service.addCounter(id<MetricName>("metric.snapshot-membership"), 1.0).hasValue(),
+            "metrics first snapshot record succeeds", 1);
+        ok &= require(adding->added && late->metricCalls == 0U,
+            "metrics late exporter excluded from current snapshot", 1);
+        ok &= require(service.addCounter(id<MetricName>("metric.snapshot-membership"), 1.0).hasValue(),
+            "metrics second snapshot record succeeds", 1);
+        ok &= require(late->metricCalls == 1U, "metrics late exporter enters next snapshot", 1);
+    }
+    {
+        DiagnosticsService service;
+        const auto diagnosticId = id<DiagnosticId>("diagnostic.snapshot-membership");
+        auto late = std::make_shared<FollowingExporter>();
+        auto adding = std::make_shared<AddingDiagnosticExporter>();
+        adding->service = &service;
+        adding->late = late;
+        ok &= require(service.registerCheck(
+            diagnosticId, std::make_shared<HealthyCheck>(diagnosticId)).hasValue(),
+            "diagnostics snapshot check registered", 2);
+        ok &= require(service.addExporter(adding).hasValue(), "diagnostics adding exporter registered", 2);
+        ok &= require(service.run(diagnosticId).hasValue(), "diagnostics first snapshot run succeeds", 2);
+        ok &= require(adding->added && late->diagnosticCalls == 0U,
+            "diagnostics late exporter excluded from current snapshot", 2);
+        ok &= require(service.run(diagnosticId).hasValue(), "diagnostics second snapshot run succeeds", 2);
+        ok &= require(late->diagnosticCalls == 1U,
+            "diagnostics late exporter enters next snapshot", 2);
+    }
+    return ok;
+}
 }
 
 int main()
@@ -375,9 +555,15 @@ int main()
         for(std::size_t scenario = 0; scenario < 4U; ++scenario) {
             ok &= verifyExporterBookkeeping((scenario & 1U) != 0U, (scenario & 2U) != 0U, scenario);
         }
+        std::size_t metricsSnapshotCount = 0;
+        std::size_t diagnosticsSnapshotCount = 0;
+        ok &= verifySnapshotPath(metricsSnapshotAttempt, metricsSnapshotCount);
+        ok &= verifySnapshotPath(diagnosticsSnapshotAttempt, diagnosticsSnapshotCount);
+        ok &= verifySnapshotMembership();
         if(!ok) { return 3; }
-        std::printf("trace-start-allocation-verified start=%zu completion-valid=%zu completion-invalid=%zu completion-abandoned=%zu exporter-bookkeeping=12/12 retry-and-state=passed\n",
-            count, validCompletionCount, invalidCompletionCount, abandonedCompletionCount);
+        std::printf("trace-start-allocation-verified start=%zu completion-valid=%zu completion-invalid=%zu completion-abandoned=%zu exporter-bookkeeping=12/12 snapshot-metrics=%zu snapshot-diagnostics=%zu snapshot-membership=3/3 retry-and-state=passed\n",
+            count, validCompletionCount, invalidCompletionCount, abandonedCompletionCount,
+            metricsSnapshotCount, diagnosticsSnapshotCount);
         return 0;
     } catch(const std::exception& error) {
         std::fprintf(stderr, "trace-allocation-unexpected: %s\n", error.what());

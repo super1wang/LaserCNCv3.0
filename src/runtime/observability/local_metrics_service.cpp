@@ -110,7 +110,7 @@ foundation::Result<void> LocalMetricsService::record(
 
     MetricObservation observation {
         name, kind, value, labels, std::chrono::system_clock::now()};
-    std::vector<std::shared_ptr<IMetricsExporter>> exporters;
+    std::size_t exporterCount = 0;
     {
         std::lock_guard lock(impl_->mutex);
         const Impl::Key key {name, labels};
@@ -139,7 +139,10 @@ foundation::Result<void> LocalMetricsService::record(
                 "Metric aggregate sum and count must remain representable",
                 name));
         }
-        exporters = impl_->exporters;
+        // The exporter registry is append-only. Freeze only its count so publication of the
+        // aggregate does not depend on allocating a copied exporter vector.
+        // 中文翻译：出口注册表只追加；仅冻结数量，使聚合发布不依赖出口向量复制分配。
+        exporterCount = impl_->exporters.size();
         if(found == impl_->values.end()) { impl_->values.emplace(key, next); }
         else { found->second = next; }
     }
@@ -154,7 +157,12 @@ foundation::Result<void> LocalMetricsService::record(
         } catch(...) {
         }
     };
-    for(const auto& exporter : exporters) {
+    for(std::size_t index = 0; index < exporterCount; ++index) {
+        std::shared_ptr<IMetricsExporter> exporter;
+        {
+            std::lock_guard lock(impl_->mutex);
+            exporter = impl_->exporters[index];
+        }
         try {
             auto exported = exporter->exportObservation(observation);
             if(!exported) {

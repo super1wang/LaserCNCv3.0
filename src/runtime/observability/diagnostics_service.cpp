@@ -256,18 +256,21 @@ foundation::Result<DiagnosticReport> DiagnosticsService::run(
         }
     }();
 
-    std::vector<std::shared_ptr<IDiagnosticExporter>> exporters;
+    std::size_t exporterCount = 0;
     {
         std::unique_lock lock(mutex_);
         const auto found = entries_.find(id);
         if(found != entries_.end()) {
             found->second.latest = report;
         }
-        exporters = exporters_;
+        // The registry is append-only. Freeze only its count with latest publication so a
+        // copied exporter vector cannot turn a published report into an outward exception.
+        // 中文翻译：注册表只追加；随 latest 仅冻结出口数量，避免向量复制把已发布报告变成外抛异常。
+        exporterCount = exporters_.size();
     }
-    // The same registered entry may run again only after its report and exporter snapshot are
+    // The same registered entry may run again only after its report and exporter count are
     // locally published. Export calls themselves remain outside both service and entry locks.
-    // 中文翻译：同一注册项须等待报告与出口快照完成本地发布；出口调用仍在两类锁外执行。
+    // 中文翻译：同一注册项须等待报告与出口数量完成本地发布；出口调用仍在两类锁外执行。
     execution.reset();
 
     const auto retainFailure = [this](foundation::Error failure) noexcept {
@@ -280,7 +283,12 @@ foundation::Result<DiagnosticReport> DiagnosticsService::run(
         } catch(...) {
         }
     };
-    for(const auto& exporter : exporters) {
+    for(std::size_t index = 0; index < exporterCount; ++index) {
+        std::shared_ptr<IDiagnosticExporter> exporter;
+        {
+            std::shared_lock lock(mutex_);
+            exporter = exporters_[index];
+        }
         try {
             auto exported = exporter->exportReport(report);
             if(!exported) {

@@ -46,7 +46,7 @@ Phase 7 建立 Kernel 自有的 Trace、Metrics 与 Diagnostics 语义，并确�
 
 ## Exporter 与持久化边界
 
-C6b11 规定 Trace、Metrics、Diagnostics 的单个 exporter 失败即使无法构造或保留失败诊断，也不得阻止同一快照的后续 exporter；Metrics/Diagnostics 保持已形成事实和成功返回，Trace 保持完成记录与活动释放。失败窗口在资源耗尽时允许漏记，不是可靠审计日志。见 [出口失败资源契约](ST1C6b11-观察出口失败记录资源隔离.md)。exporter 快照复制发生在调用前，其失败语义仍待后续节点。
+C6b11 规定 Trace、Metrics、Diagnostics 的单个 exporter 失败即使无法构造或保留失败诊断，也不得阻止同一快照的后续 exporter；Metrics/Diagnostics 保持已形成事实和成功返回，Trace 保持完成记录与活动释放。失败窗口在资源耗尽时允许漏记，不是可靠审计日志。见 [出口失败资源契约](ST1C6b11-观察出口失败记录资源隔离.md)。C6b12 将完整 exporter 向量复制改为发布时冻结数量、逐项锁内取得共享所有者并锁外调用；迟到/重入追加项不进入本批，已发布事实不再被快照容器分配反转，见 [快照发布契约](ST1C6b12-观察出口快照无分配发布.md)。
 
 C6b7 明确独立 LogObservabilityExporter 也须校验 DTO：未知 kind/status、非有限/负 Counter、空 Span 名称和反向时间均在 write 前拒绝；合法时间差先无符号求差再换算，捕获后端抛异常为 Observability.LogExportFailed，正常返回 Error 保持原样。Spdlog write 提前拒绝未知 LogLevel 和纪元前时间。完整规则与限制见 [日志出口契约](ST1C6b7-日志出口与等级准入.md)，不能据此宣称任意日期格式化或统一资源预算已完成。
 

@@ -2,7 +2,7 @@
 
 ## 当前工作状态：ST1 补齐中
 
-2026-09-04 用户已确认按交叉审计补齐计划。当前状态见 [ST1C 补充执行计划](ST1C-补充审计与剩余执行计划.md)：最新 C6b11 将 Trace/Metrics/Diagnostics exporter 失败记录 OOM 隔离在当前 exporter，保持后续通知、本地事实和公开结果，见 [交付](../阶段交付/2026-09-05-ST1C6b11-观察出口失败记录资源隔离.md)。下一步 exporter 快照复制资源语义；其他 C6b/c/d、C7/C8、ST1D 仍未签核。历史检查点不自动覆盖新增实现，公共头/声明登记不是完整冻结，历史 31/32 不表示只剩一项。
+2026-09-04 用户已确认按交叉审计补齐计划。当前状态见 [ST1C 补充执行计划](ST1C-补充审计与剩余执行计划.md)：最新 C6b12 将 Trace/Metrics/Diagnostics 的 exporter 快照改为发布时冻结数量、逐项取得所有者、锁外调用，避免向量复制分配反转已发布事实，并保留 C6b11 的逐出口失败隔离，见 [交付](../阶段交付/2026-09-05-ST1C6b12-观察出口快照无分配发布.md)。下一步继续其他公共类型/格式；C6b/c/d、C7/C8、ST1D 仍未签核。历史检查点不自动覆盖新增实现，公共头/声明登记不是完整冻结，历史 31/32 不表示只剩一项。
 
 C1a 已修复全部文档 Detached/Removed 后重启丢失 ProjectRevision 的缺陷；旧代码先复现失败，修复后 Debug 286/286、专项 16/16、新增 2 项各 3 次、纯生产及架构检查通过，见 [C1a 交付](../阶段交付/2026-09-04-ST1C1a-项目修订独立恢复.md)。该本地检查点不关闭 C1b/C5 写入端与独占权，也不替代 ST1D 最终签核。
 
@@ -70,7 +70,9 @@ C6b9 本地检查点：真实 Release 红灯确认 `end noexcept` 和 abandoned 
 
 C6b10 本地检查点：受控双线程红灯确认同一 Diagnostics check 可同时进入、最大并发为 2，且较早调用会在较晚调用后覆盖 latest。修复为每注册项独立串行至本地 latest/exporter 快照发布，保留不同 ID 并行和锁外 exporter；同 ID 递归转换为 `Diagnostics.CheckReentered`，见 [交付](../阶段交付/2026-09-05-ST1C6b10-Diagnostics并发与latest顺序.md)。下一步观察 exporter 失败记录资源边界。
 
-C6b11 本地检查点：真实 Release 红灯确认 exporter 返回 Error/抛异常后，其失败记录 OOM 会跳过后续 exporter，并使 Metrics/Diagnostics 异常逸出。修复为三服务逐 exporter 独立、尽力写有界失败窗口；隔离进程新增 3×2×2=12 条一次性/持续分配失败路径，见 [交付](../阶段交付/2026-09-05-ST1C6b11-观察出口失败记录资源隔离.md)。下一步 exporter 快照复制资源语义。
+C6b11 本地检查点：真实 Release 红灯确认 exporter 返回 Error/抛异常后，其失败记录 OOM 会跳过后续 exporter，并使 Metrics/Diagnostics 异常逸出。修复为三服务逐 exporter 独立、尽力写有界失败窗口；隔离进程新增 3×2×2=12 条一次性/持续分配失败路径，见 [交付](../阶段交付/2026-09-05-ST1C6b11-观察出口失败记录资源隔离.md)。完整 exporter 快照复制资源语义已由 C6b12 接续。
+
+C6b12 本地检查点：真实 Release 红灯确认 Trace 完成记录和 Diagnostics latest 已发布后，完整 exporter 向量复制 OOM 会跳过出口，并使 Diagnostics 异常逸出；Metrics 的旧复制点位于聚合提交前，保持无半发布。修复为三服务发布时冻结 exporter 数量、逐项锁内取得共享所有者并锁外调用，见 [交付](../阶段交付/2026-09-05-ST1C6b12-观察出口快照无分配发布.md)。下一步继续其他公共类型/格式，统一预算仍归 C6c/C7。
 
 ## F5C 固定版本结论（历史检查点）
 

@@ -104,7 +104,7 @@ foundation::Result<std::unique_ptr<ITraceSpan>> LocalTraceService::startSpan(
                                 TraceStatus status,
                                 std::optional<foundation::Error> error) {
         std::optional<TraceSpanRecord> completed;
-        std::vector<std::shared_ptr<ITraceExporter>> exporters;
+        std::size_t exporterCount = 0;
         {
             std::lock_guard lock(core->mutex);
             const auto found = core->active.find(spanId);
@@ -120,7 +120,10 @@ foundation::Result<std::unique_ptr<ITraceSpan>> LocalTraceService::startSpan(
                 core->completed.erase(core->completed.begin());
             }
             core->completed.push_back(*completed);
-            exporters = core->exporters;
+            // The exporter registry is append-only. Freeze its count with the retained record;
+            // each shared owner is acquired separately so snapshot publication cannot allocate.
+            // 中文翻译：出口注册表只追加；随完成记录冻结数量，逐项取得共享所有者以避免快照发布分配。
+            exporterCount = core->exporters.size();
         }
 
         const auto retainFailure = [&core](foundation::Error failure) noexcept {
@@ -133,7 +136,12 @@ foundation::Result<std::unique_ptr<ITraceSpan>> LocalTraceService::startSpan(
             } catch(...) {
             }
         };
-        for(const auto& exporter : exporters) {
+        for(std::size_t index = 0; index < exporterCount; ++index) {
+            std::shared_ptr<ITraceExporter> exporter;
+            {
+                std::lock_guard lock(core->mutex);
+                exporter = core->exporters[index];
+            }
             try {
                 auto exported = exporter->exportSpan(*completed);
                 if(!exported) {
@@ -221,8 +229,8 @@ foundation::Result<std::unique_ptr<ITraceSpan>> LocalTraceService::startSpan(
                 completion_(status, std::move(error));
             } catch(...) {
                 // A noexcept handle must still surrender its active identity if diagnostics,
-                // record retention, or exporter snapshot allocation fails.
-                // 中文翻译：即使诊断、记录或出口快照分配失败，noexcept 句柄也必须释放活动身份。
+                // record retention, or another completion resource fails.
+                // 中文翻译：即使诊断、记录或其他完成资源失败，noexcept 句柄也必须释放活动身份。
                 discardActive();
             }
         }
