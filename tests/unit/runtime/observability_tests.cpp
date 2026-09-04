@@ -162,6 +162,47 @@ private:
     std::function<void()> action_;
 };
 
+class ControlledConcurrentCheck final : public IDiagnosticCheck {
+private:
+    DiagnosticId id_;
+    std::promise<void> firstEntered_;
+    std::promise<void> secondEntered_;
+    std::promise<void> release_;
+    std::shared_future<void> releaseFuture_;
+    std::atomic_size_t calls_{0U};
+    std::atomic_size_t active_{0U};
+
+public:
+    explicit ControlledConcurrentCheck(DiagnosticId id)
+        : id_(std::move(id)), releaseFuture_(release_.get_future().share()),
+          firstEntered(firstEntered_.get_future()), secondEntered(secondEntered_.get_future())
+    {
+    }
+
+    Result<DiagnosticReport> run() override
+    {
+        const auto call = calls_.fetch_add(1U) + 1U;
+        const auto active = active_.fetch_add(1U) + 1U;
+        auto maximum = maximumActive.load();
+        while(maximum < active && !maximumActive.compare_exchange_weak(maximum, active)) {}
+        if(call == 1U) {
+            firstEntered_.set_value();
+            releaseFuture_.wait();
+        } else if(call == 2U) {
+            secondEntered_.set_value();
+        }
+        active_.fetch_sub(1U);
+        return Result<DiagnosticReport>::success(
+            {id_, DiagnosticStatus::Healthy, "run." + std::to_string(call), Value{}, {}});
+    }
+
+    void releaseFirst() { release_.set_value(); }
+
+    std::future<void> firstEntered;
+    std::future<void> secondEntered;
+    std::atomic_size_t maximumActive{0U};
+};
+
 } // namespace
 
 TEST_CASE("LogObservabilityExporter rejects invalid direct metric values and kinds", "[observability][c6b7]")
@@ -780,6 +821,73 @@ TEST_CASE("DiagnosticsService runs checks outside locks and converts failures to
     auto missing = diagnostics.run(validId<DiagnosticId>("kernel.missing"));
     REQUIRE_FALSE(missing.hasValue());
     CHECK(std::string(missing.error().code.value()) == "Diagnostics.NotFound");
+}
+
+TEST_CASE("DiagnosticsService serializes one registered check through latest publication", "[observability][c6b10]")
+{
+    DiagnosticsService diagnostics;
+    const auto diagnosticId = validId<DiagnosticId>("kernel.concurrent-check");
+    auto check = std::make_shared<ControlledConcurrentCheck>(diagnosticId);
+    REQUIRE(diagnostics.registerCheck(diagnosticId, check));
+
+    auto first = std::async(std::launch::async, [&] { return diagnostics.run(diagnosticId); });
+    REQUIRE(check->firstEntered.wait_for(std::chrono::seconds{5}) == std::future_status::ready);
+    auto second = std::async(std::launch::async, [&] { return diagnostics.run(diagnosticId); });
+    const auto secondEnteredEarly =
+        check->secondEntered.wait_for(std::chrono::milliseconds{250}) == std::future_status::ready;
+    check->releaseFirst();
+    REQUIRE(first.wait_for(std::chrono::seconds{5}) == std::future_status::ready);
+    REQUIRE(second.wait_for(std::chrono::seconds{5}) == std::future_status::ready);
+    const auto firstResult = first.get();
+    const auto secondResult = second.get();
+    REQUIRE(firstResult);
+    REQUIRE(secondResult);
+
+    CHECK_FALSE(secondEnteredEarly);
+    CHECK(check->maximumActive.load() == 1U);
+    const auto latest = diagnostics.latest();
+    REQUIRE(latest.size() == 1U);
+    CHECK(latest.front().summary == "run.2");
+    CHECK(firstResult.value().observedAt <= secondResult.value().observedAt);
+    CHECK(latest.front().observedAt == secondResult.value().observedAt);
+
+    DiagnosticsService parallelDiagnostics;
+    const auto firstId = validId<DiagnosticId>("kernel.parallel.first");
+    const auto secondId = validId<DiagnosticId>("kernel.parallel.second");
+    auto firstCheck = std::make_shared<ControlledConcurrentCheck>(firstId);
+    auto secondCheck = std::make_shared<ControlledConcurrentCheck>(secondId);
+    REQUIRE(parallelDiagnostics.registerCheck(firstId, firstCheck));
+    REQUIRE(parallelDiagnostics.registerCheck(secondId, secondCheck));
+    auto firstParallel = std::async(std::launch::async, [&] { return parallelDiagnostics.run(firstId); });
+    auto secondParallel = std::async(std::launch::async, [&] { return parallelDiagnostics.run(secondId); });
+    REQUIRE(firstCheck->firstEntered.wait_for(std::chrono::seconds{5}) == std::future_status::ready);
+    REQUIRE(secondCheck->firstEntered.wait_for(std::chrono::seconds{5}) == std::future_status::ready);
+    firstCheck->releaseFirst();
+    secondCheck->releaseFirst();
+    REQUIRE(firstParallel.get());
+    REQUIRE(secondParallel.get());
+    CHECK(parallelDiagnostics.latest().size() == 2U);
+
+    DiagnosticsService reentrantDiagnostics;
+    const auto reentrantId = validId<DiagnosticId>("kernel.reentrant-check");
+    std::atomic_size_t rawCalls{0U};
+    auto reentrant = std::make_shared<LambdaCheck>([&] {
+        ++rawCalls;
+        return reentrantDiagnostics.run(reentrantId);
+    });
+    REQUIRE(reentrantDiagnostics.registerCheck(reentrantId, reentrant));
+    DiagnosticReentryDeadline deadline;
+    const auto reentered = reentrantDiagnostics.run(reentrantId);
+    REQUIRE(reentered);
+    CHECK(rawCalls.load() == 1U);
+    CHECK(reentered.value().status == DiagnosticStatus::Unhealthy);
+    const auto* details = reentered.value().details.getIf<Value::Object>();
+    REQUIRE(details != nullptr);
+    const auto code = details->find("errorCode");
+    REQUIRE(code != details->end());
+    const auto* codeText = code->second.getIf<std::string>();
+    REQUIRE(codeText != nullptr);
+    CHECK(*codeText == "Diagnostics.CheckReentered");
 }
 
 TEST_CASE("LogObservabilityExporter maps spans and metrics to structured log records", "[observability][log]")

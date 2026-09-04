@@ -39,6 +39,7 @@ Phase 7 建立 Kernel 自有的 Trace、Metrics 与 Diagnostics 语义，并确�
 - run 与 runAll 在注册表锁外执行 check，check 可以安全读取 latest 快照。
 - check 返回 Error、抛异常或返回错误 ID 时转换为当前 DiagnosticId 的 Unhealthy 报告，而不是让诊断调用崩溃。
 - C6b6 将未知 status 转为 Unhealthy 报告，details.errorCode 为 Diagnostics.InvalidStatus；合法 Unknown 保留。重复注册拒绝保留锁外 Check 所有者，避免最后一个对象在锁内析构重入。
+- C6b10 将同一 DiagnosticId 注册项串行至本地 latest 与 exporter 快照发布完成；不同 ID 可并行，exporter 调用仍在锁外。同线程递归自己的 ID 转为 Unhealthy + `Diagnostics.CheckReentered`。latest 表示最后完成本地发布，不表示最后开始、API 返回或 exporter 完成。见 [并发顺序契约](ST1C6b10-Diagnostics并发与latest顺序.md)。
 - runAll 按 DiagnosticId 确定性执行；latest 只保存每项最近报告。
 - Diagnostics 报告状态为 Healthy、Degraded、Unhealthy、Unknown，不等同于 AppKernel 生命周期状态，也不能自行执行恢复动作。
 - AppKernel 拥有 DiagnosticsService，并在 Ready 边界冻结 check 注册；具体 check 仍由组合层按实际 Host/Adapter 能力注册，内核不虚构硬件、网络或领域健康状态。

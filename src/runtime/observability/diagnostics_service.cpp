@@ -4,8 +4,10 @@
 
 #include <exception>
 #include <algorithm>
+#include <condition_variable>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 
 namespace lasercnc::observability {
@@ -39,6 +41,67 @@ DiagnosticReport unhealthy(
         std::chrono::system_clock::now()};
 }
 
+class SerializedDiagnosticCheck final : public IDiagnosticCheck {
+public:
+    class Execution final {
+    public:
+        explicit Execution(SerializedDiagnosticCheck& owner) : owner_(&owner) {}
+        Execution(const Execution&) = delete;
+        Execution& operator=(const Execution&) = delete;
+        Execution(Execution&& other) noexcept : owner_(std::exchange(other.owner_, nullptr)) {}
+        Execution& operator=(Execution&&) = delete;
+        ~Execution()
+        {
+            if(owner_ != nullptr) {
+                try { owner_->release(); }
+                catch(...) {}
+            }
+        }
+    private:
+        SerializedDiagnosticCheck* owner_;
+    };
+
+    explicit SerializedDiagnosticCheck(std::shared_ptr<IDiagnosticCheck> check)
+        : check_(std::move(check))
+    {
+    }
+
+    std::optional<Execution> acquire()
+    {
+        std::unique_lock lock(mutex_);
+        const auto caller = std::this_thread::get_id();
+        if(running_ && owner_ == caller) {
+            return std::nullopt;
+        }
+        available_.wait(lock, [this] { return !running_; });
+        running_ = true;
+        owner_ = caller;
+        return Execution{*this};
+    }
+
+    foundation::Result<DiagnosticReport> run() override
+    {
+        return check_->run();
+    }
+
+private:
+    void release()
+    {
+        {
+            std::lock_guard lock(mutex_);
+            running_ = false;
+            owner_ = {};
+        }
+        available_.notify_one();
+    }
+
+    std::shared_ptr<IDiagnosticCheck> check_;
+    std::mutex mutex_;
+    std::condition_variable available_;
+    std::thread::id owner_;
+    bool running_{false};
+};
+
 } // namespace
 
 DiagnosticsService::DiagnosticsService(std::size_t failureCapacity)
@@ -57,6 +120,10 @@ foundation::Result<void> DiagnosticsService::registerCheck(
             "A diagnostic check is required",
             id));
     }
+    // One registered entry executes through local latest publication at a time. Allocate the
+    // wrapper before taking the registry lock so rejection cannot release user ownership there.
+    // 中文翻译：同一注册项串行执行至本地 latest 发布；包装器在注册表锁外分配。
+    auto serialized = std::make_shared<SerializedDiagnosticCheck>(check);
     std::unique_lock lock(mutex_);
     if(frozen_) {
         return foundation::Result<void>::failure(diagnosticError(
@@ -68,7 +135,7 @@ foundation::Result<void> DiagnosticsService::registerCheck(
     const auto [unused, inserted] = entries_.emplace(
         // Keep the parameter owner until after the lock leaves scope, including rejection.
         // 中文翻译：保留参数所有者直到锁离开作用域，拒绝时也不在锁内销毁最后一个检查对象。
-        id, Entry {check, std::nullopt});
+        id, Entry {std::move(serialized), std::nullopt});
     static_cast<void>(unused);
     if(!inserted) {
         return foundation::Result<void>::failure(diagnosticError(
@@ -116,6 +183,7 @@ foundation::Result<DiagnosticReport> DiagnosticsService::run(
     const kernel::DiagnosticId& id)
 {
     std::shared_ptr<IDiagnosticCheck> check;
+    std::shared_ptr<SerializedDiagnosticCheck> serialized;
     {
         std::shared_lock lock(mutex_);
         const auto found = entries_.find(id);
@@ -127,9 +195,17 @@ foundation::Result<DiagnosticReport> DiagnosticsService::run(
                 id));
         }
         check = found->second.check;
+        serialized = std::static_pointer_cast<SerializedDiagnosticCheck>(check);
     }
 
+    auto execution = serialized->acquire();
+
     DiagnosticReport report = [&]() {
+        if(!execution.has_value()) {
+            return unhealthy(id, "Diagnostic check recursively invoked its own registered entry",
+                foundation::Value{foundation::Value::Object{
+                    {"errorCode", foundation::Value{"Diagnostics.CheckReentered"}}}});
+        }
         try {
             auto checked = check->run();
             if(!checked) {
@@ -189,6 +265,10 @@ foundation::Result<DiagnosticReport> DiagnosticsService::run(
         }
         exporters = exporters_;
     }
+    // The same registered entry may run again only after its report and exporter snapshot are
+    // locally published. Export calls themselves remain outside both service and entry locks.
+    // 中文翻译：同一注册项须等待报告与出口快照完成本地发布；出口调用仍在两类锁外执行。
+    execution.reset();
 
     std::vector<foundation::Error> failures;
     for(const auto& exporter : exporters) {
