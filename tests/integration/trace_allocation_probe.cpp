@@ -1,3 +1,5 @@
+#include <lasercnc/observability/diagnostics_service.hpp>
+#include <lasercnc/observability/metrics_service.hpp>
 #include <lasercnc/observability/trace_service.hpp>
 
 #include <cstdio>
@@ -97,6 +99,61 @@ struct CounterExporter final : ITraceExporter {
         return Result<void>::success();
     }
     std::size_t calls{0};
+};
+
+void armNextAllocation(bool remainFailing)
+{
+    allocation_probe::calls = 0;
+    allocation_probe::failAt = 0;
+    allocation_probe::injected = false;
+    allocation_probe::persistent = remainFailing;
+    allocation_probe::armed = true;
+}
+
+struct ArmingFailureExporter final : ITraceExporter, IMetricsExporter, IDiagnosticExporter {
+    ArmingFailureExporter(bool throws, bool persistentFailure)
+        : throws_(throws), persistentFailure_(persistentFailure),
+          failure_(makeError("Probe.ExporterFailed", ErrorCategory::Infrastructure, "expected"))
+    {
+    }
+
+    Result<void> exportSpan(const TraceSpanRecord&) override { return fail(); }
+    Result<void> exportObservation(const MetricObservation&) override { return fail(); }
+    Result<void> exportReport(const DiagnosticReport&) override { return fail(); }
+
+private:
+    Result<void> fail()
+    {
+        if(throws_) {
+            armNextAllocation(persistentFailure_);
+            throw 7;
+        }
+        auto failed = Result<void>::failure(failure_);
+        armNextAllocation(persistentFailure_);
+        return failed;
+    }
+
+    bool throws_;
+    bool persistentFailure_;
+    Error failure_;
+};
+
+struct FollowingExporter final : ITraceExporter, IMetricsExporter, IDiagnosticExporter {
+    Result<void> exportSpan(const TraceSpanRecord&) override { ++traceCalls; return Result<void>::success(); }
+    Result<void> exportObservation(const MetricObservation&) override { ++metricCalls; return Result<void>::success(); }
+    Result<void> exportReport(const DiagnosticReport&) override { ++diagnosticCalls; return Result<void>::success(); }
+    std::size_t traceCalls{0};
+    std::size_t metricCalls{0};
+    std::size_t diagnosticCalls{0};
+};
+
+struct HealthyCheck final : IDiagnosticCheck {
+    explicit HealthyCheck(DiagnosticId id) : id_(std::move(id)) {}
+    Result<DiagnosticReport> run() override
+    {
+        return Result<DiagnosticReport>::success({id_, DiagnosticStatus::Healthy, "healthy", Value{}, {}});
+    }
+    DiagnosticId id_;
 };
 
 TraceSpanStart request()
@@ -220,6 +277,67 @@ bool verifyCompletionPath(TraceStatus status, std::size_t& count, bool abandon =
     ok &= require(observed == count, "stable completion allocation path", count);
     return ok;
 }
+
+bool verifyExporterBookkeeping(bool throws, bool persistentFailure, std::size_t scenario)
+{
+    bool ok = true;
+    {
+        LocalTraceService service;
+        auto failing = std::make_shared<ArmingFailureExporter>(throws, persistentFailure);
+        auto following = std::make_shared<FollowingExporter>();
+        if(!service.addExporter(failing) || !service.addExporter(following)) {
+            throw std::logic_error("Trace exporter setup failed");
+        }
+        auto started = service.startSpan({id<TraceId>("trace.exporter-bookkeeping"),
+            id<SpanId>("span.exporter-bookkeeping"), {}, "exporter-bookkeeping", {}});
+        if(!started) { throw std::logic_error("Trace setup failed"); }
+        started.value()->end(TraceStatus::Succeeded);
+        allocation_probe::armed = false;
+        ok &= require(allocation_probe::injected, "trace bookkeeping injection", scenario);
+        ok &= require(following->traceCalls == 1U, "trace later exporter called", scenario);
+        ok &= require(service.activeSpanCount() == 0U && service.records().size() == 1U,
+            "trace local fact preserved", scenario);
+    }
+    {
+        LocalMetricsService service;
+        auto failing = std::make_shared<ArmingFailureExporter>(throws, persistentFailure);
+        auto following = std::make_shared<FollowingExporter>();
+        if(!service.addExporter(failing) || !service.addExporter(following)) {
+            throw std::logic_error("Metrics exporter setup failed");
+        }
+        std::optional<Result<void>> recorded;
+        bool escaped = false;
+        try { recorded.emplace(service.addCounter(id<MetricName>("metric.exporter-bookkeeping"), 1.0)); }
+        catch(...) { escaped = true; }
+        allocation_probe::armed = false;
+        ok &= require(allocation_probe::injected, "metrics bookkeeping injection", scenario);
+        ok &= require(!escaped && recorded && recorded->hasValue(), "metrics result preserved", scenario);
+        ok &= require(following->metricCalls == 1U, "metrics later exporter called", scenario);
+        const auto snapshot = service.snapshot();
+        ok &= require(snapshot.size() == 1U && snapshot.front().value == 1.0,
+            "metrics local fact preserved", scenario);
+    }
+    {
+        DiagnosticsService service;
+        const auto diagnosticId = id<DiagnosticId>("diagnostic.exporter-bookkeeping");
+        auto failing = std::make_shared<ArmingFailureExporter>(throws, persistentFailure);
+        auto following = std::make_shared<FollowingExporter>();
+        if(!service.registerCheck(diagnosticId, std::make_shared<HealthyCheck>(diagnosticId))
+           || !service.addExporter(failing) || !service.addExporter(following)) {
+            throw std::logic_error("Diagnostics exporter setup failed");
+        }
+        std::optional<Result<DiagnosticReport>> reported;
+        bool escaped = false;
+        try { reported.emplace(service.run(diagnosticId)); }
+        catch(...) { escaped = true; }
+        allocation_probe::armed = false;
+        ok &= require(allocation_probe::injected, "diagnostics bookkeeping injection", scenario);
+        ok &= require(!escaped && reported && reported->hasValue(), "diagnostics result preserved", scenario);
+        ok &= require(following->diagnosticCalls == 1U, "diagnostics later exporter called", scenario);
+        ok &= require(service.latest().size() == 1U, "diagnostics local fact preserved", scenario);
+    }
+    return ok;
+}
 }
 
 int main()
@@ -254,8 +372,11 @@ int main()
         ok &= verifyCompletionPath(TraceStatus::Succeeded, validCompletionCount);
         ok &= verifyCompletionPath(static_cast<TraceStatus>(255U), invalidCompletionCount);
         ok &= verifyCompletionPath(TraceStatus::Failed, abandonedCompletionCount, true);
+        for(std::size_t scenario = 0; scenario < 4U; ++scenario) {
+            ok &= verifyExporterBookkeeping((scenario & 1U) != 0U, (scenario & 2U) != 0U, scenario);
+        }
         if(!ok) { return 3; }
-        std::printf("trace-start-allocation-verified start=%zu completion-valid=%zu completion-invalid=%zu completion-abandoned=%zu retry-and-state=passed\n",
+        std::printf("trace-start-allocation-verified start=%zu completion-valid=%zu completion-invalid=%zu completion-abandoned=%zu exporter-bookkeeping=12/12 retry-and-state=passed\n",
             count, validCompletionCount, invalidCompletionCount, abandonedCompletionCount);
         return 0;
     } catch(const std::exception& error) {

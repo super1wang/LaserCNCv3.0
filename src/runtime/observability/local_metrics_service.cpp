@@ -144,34 +144,40 @@ foundation::Result<void> LocalMetricsService::record(
         else { found->second = next; }
     }
 
-    std::vector<foundation::Error> failures;
-    for(const auto& exporter : exporters) {
+    const auto retainFailure = [this](foundation::Error failure) noexcept {
         try {
-            auto exported = exporter->exportObservation(observation);
-            if(!exported) {
-                failures.push_back(std::move(exported).error());
-            }
-        } catch(const std::exception& exception) {
-            failures.push_back(metricError(
-                "Metrics.ExporterThrew",
-                foundation::ErrorCategory::Internal,
-                exception.what(),
-                name));
-        } catch(...) {
-            failures.push_back(metricError(
-                "Metrics.ExporterThrew",
-                foundation::ErrorCategory::Internal,
-                "A metrics exporter raised an unknown exception",
-                name));
-        }
-    }
-    if(!failures.empty()) {
-        std::lock_guard lock(impl_->mutex);
-        for(auto& failure : failures) {
+            std::lock_guard lock(impl_->mutex);
             if(impl_->failures.size() >= impl_->failureCapacity) {
                 impl_->failures.erase(impl_->failures.begin());
             }
             impl_->failures.push_back(std::move(failure));
+        } catch(...) {
+        }
+    };
+    for(const auto& exporter : exporters) {
+        try {
+            auto exported = exporter->exportObservation(observation);
+            if(!exported) {
+                retainFailure(std::move(exported).error());
+            }
+        } catch(const std::exception& exception) {
+            try {
+                retainFailure(metricError(
+                    "Metrics.ExporterThrew",
+                    foundation::ErrorCategory::Internal,
+                    exception.what(),
+                    name));
+            } catch(...) {
+            }
+        } catch(...) {
+            try {
+                retainFailure(metricError(
+                    "Metrics.ExporterThrew",
+                    foundation::ErrorCategory::Internal,
+                    "A metrics exporter raised an unknown exception",
+                    name));
+            } catch(...) {
+            }
         }
     }
     return foundation::Result<void>::success();

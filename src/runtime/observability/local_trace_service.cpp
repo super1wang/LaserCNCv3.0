@@ -123,34 +123,40 @@ foundation::Result<std::unique_ptr<ITraceSpan>> LocalTraceService::startSpan(
             exporters = core->exporters;
         }
 
-        std::vector<foundation::Error> failures;
-        for(const auto& exporter : exporters) {
+        const auto retainFailure = [&core](foundation::Error failure) noexcept {
             try {
-                auto exported = exporter->exportSpan(*completed);
-                if(!exported) {
-                    failures.push_back(std::move(exported).error());
-                }
-            } catch(const std::exception& exception) {
-                failures.push_back(traceError(
-                    "Trace.ExporterThrew",
-                    foundation::ErrorCategory::Internal,
-                    exception.what(),
-                    spanId));
-            } catch(...) {
-                failures.push_back(traceError(
-                    "Trace.ExporterThrew",
-                    foundation::ErrorCategory::Internal,
-                    "A trace exporter raised an unknown exception",
-                    spanId));
-            }
-        }
-        if(!failures.empty()) {
-            std::lock_guard lock(core->mutex);
-            for(auto& failure : failures) {
+                std::lock_guard lock(core->mutex);
                 if(core->failures.size() >= core->failureCapacity) {
                     core->failures.erase(core->failures.begin());
                 }
                 core->failures.push_back(std::move(failure));
+            } catch(...) {
+            }
+        };
+        for(const auto& exporter : exporters) {
+            try {
+                auto exported = exporter->exportSpan(*completed);
+                if(!exported) {
+                    retainFailure(std::move(exported).error());
+                }
+            } catch(const std::exception& exception) {
+                try {
+                    retainFailure(traceError(
+                        "Trace.ExporterThrew",
+                        foundation::ErrorCategory::Internal,
+                        exception.what(),
+                        spanId));
+                } catch(...) {
+                }
+            } catch(...) {
+                try {
+                    retainFailure(traceError(
+                        "Trace.ExporterThrew",
+                        foundation::ErrorCategory::Internal,
+                        "A trace exporter raised an unknown exception",
+                        spanId));
+                } catch(...) {
+                }
             }
         }
     };

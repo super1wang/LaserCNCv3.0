@@ -46,6 +46,8 @@ Phase 7 建立 Kernel 自有的 Trace、Metrics 与 Diagnostics 语义，并确�
 
 ## Exporter 与持久化边界
 
+C6b11 规定 Trace、Metrics、Diagnostics 的单个 exporter 失败即使无法构造或保留失败诊断，也不得阻止同一快照的后续 exporter；Metrics/Diagnostics 保持已形成事实和成功返回，Trace 保持完成记录与活动释放。失败窗口在资源耗尽时允许漏记，不是可靠审计日志。见 [出口失败资源契约](ST1C6b11-观察出口失败记录资源隔离.md)。exporter 快照复制发生在调用前，其失败语义仍待后续节点。
+
 C6b7 明确独立 LogObservabilityExporter 也须校验 DTO：未知 kind/status、非有限/负 Counter、空 Span 名称和反向时间均在 write 前拒绝；合法时间差先无符号求差再换算，捕获后端抛异常为 Observability.LogExportFailed，正常返回 Error 保持原样。Spdlog write 提前拒绝未知 LogLevel 和纪元前时间。完整规则与限制见 [日志出口契约](ST1C6b7-日志出口与等级准入.md)，不能据此宣称任意日期格式化或统一资源预算已完成。
 
 ITraceExporter 与 IMetricsExporter 是稳定扩展端口。Local 服务始终先保留有界内存事实，再通知 exporter。LogObservabilityExporter 同时实现两个端口，只依赖 ILogService，将完成 Span 写为 `trace.span`，将单次 Metric 写为 `metric.observation`；使用 SpdlogLogService 的 JSONL sink 即可获得机器可读输出。该 exporter 显式在组合期接入，不由 AppKernel 偷偷创建或重复写日志。

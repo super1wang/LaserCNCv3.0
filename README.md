@@ -4,7 +4,7 @@ LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9 及 K10A–K10E 的�
 
 ## 已完成阶段
 
-当前收口按 [ST1C 补充执行计划](docs/内核契约/ST1C-补充审计与剩余执行计划.md) 继续：最新 [C6b10 Diagnostics 并发与 latest 顺序](docs/阶段交付/2026-09-05-ST1C6b10-Diagnostics并发与latest顺序.md) 将同一注册项串行到本地 latest 发布，保留不同 ID 并行和锁外 exporter，并拒绝同 ID 递归自死锁。下一步按 [C6 子节点](docs/内核契约/ST1C6-公共契约与输入预算.md) 补观察 exporter 失败资源边界，再完成其他公共类型/格式、统一预算和终态保留，之后 C7/C8 与 ST1D。整体尚未 Frozen，不扩展上层模块。
+当前收口按 [ST1C 补充执行计划](docs/内核契约/ST1C-补充审计与剩余执行计划.md) 继续：最新 [C6b11 观察出口失败记录资源隔离](docs/阶段交付/2026-09-05-ST1C6b11-观察出口失败记录资源隔离.md) 保证 Trace、Metrics、Diagnostics 在失败诊断自身 OOM 时仍继续后续 exporter，并保持已形成的本地事实与公开结果；失败窗口明确为尽力记录。下一步按 [C6 子节点](docs/内核契约/ST1C6-公共契约与输入预算.md) 审计 exporter 快照复制资源语义，再完成其他公共类型/格式、统一预算和终态保留，之后 C7/C8 与 ST1D。整体尚未 Frozen，不扩展上层模块。
 
 C5a/b 已完成持久化会话端口、SQLite/Windows 独占及强制初始化的本地检查点：C5b Debug 299/299、专项 56/56、新增 5 项各 10 次、纯生产及架构检查通过，见 [C5b 交付](docs/阶段交付/2026-09-04-ST1C5b-初始化独占与活动状态保护.md)。第二 Host 不再改写运行中 claim，隔离后仍保留所有权；C1b 已承接写入端修订检查。C2c 生命周期及 ST1D 最终签核仍未闭合，不宣称 Frozen。
 

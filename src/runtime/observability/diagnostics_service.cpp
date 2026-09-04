@@ -270,34 +270,40 @@ foundation::Result<DiagnosticReport> DiagnosticsService::run(
     // 中文翻译：同一注册项须等待报告与出口快照完成本地发布；出口调用仍在两类锁外执行。
     execution.reset();
 
-    std::vector<foundation::Error> failures;
-    for(const auto& exporter : exporters) {
+    const auto retainFailure = [this](foundation::Error failure) noexcept {
         try {
-            auto exported = exporter->exportReport(report);
-            if(!exported) {
-                failures.push_back(std::move(exported).error());
-            }
-        } catch(const std::exception& exception) {
-            failures.push_back(diagnosticError(
-                "Diagnostics.ExporterThrew",
-                foundation::ErrorCategory::Internal,
-                exception.what(),
-                id));
-        } catch(...) {
-            failures.push_back(diagnosticError(
-                "Diagnostics.ExporterThrew",
-                foundation::ErrorCategory::Internal,
-                "A diagnostic exporter raised an unknown exception",
-                id));
-        }
-    }
-    if(!failures.empty()) {
-        std::unique_lock lock(mutex_);
-        for(auto& failure : failures) {
+            std::unique_lock lock(mutex_);
             if(exporterFailures_.size() >= failureCapacity_) {
                 exporterFailures_.erase(exporterFailures_.begin());
             }
             exporterFailures_.push_back(std::move(failure));
+        } catch(...) {
+        }
+    };
+    for(const auto& exporter : exporters) {
+        try {
+            auto exported = exporter->exportReport(report);
+            if(!exported) {
+                retainFailure(std::move(exported).error());
+            }
+        } catch(const std::exception& exception) {
+            try {
+                retainFailure(diagnosticError(
+                    "Diagnostics.ExporterThrew",
+                    foundation::ErrorCategory::Internal,
+                    exception.what(),
+                    id));
+            } catch(...) {
+            }
+        } catch(...) {
+            try {
+                retainFailure(diagnosticError(
+                    "Diagnostics.ExporterThrew",
+                    foundation::ErrorCategory::Internal,
+                    "A diagnostic exporter raised an unknown exception",
+                    id));
+            } catch(...) {
+            }
         }
     }
     return foundation::Result<DiagnosticReport>::success(std::move(report));
