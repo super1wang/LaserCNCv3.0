@@ -690,6 +690,96 @@ TEST_CASE("AppKernel preserves stopping state after bounded task shutdown timeou
     CHECK(kernel.state() == lasercnc::kernel::AppKernelState::Stopped);
 }
 
+TEST_CASE("Kernel final drain rejects shutdown from task work without sealing admission", "[kernel-final-drain]")
+{
+    AppKernel host;
+    const auto session = validId<SessionId>("session.self-stop");
+    const std::array grants{validId<CapabilityId>("task.self-stop.submit")};
+    REQUIRE(host.capabilities().replace(session, grants));
+    REQUIRE(host.executionServices().configure(std::make_shared<PassValidator>(), std::make_shared<NullLog>()));
+    auto task = request("self-stop", "task.self-stop");
+    REQUIRE(lasercnc::test::registerAsyncCommand(host,
+        lasercnc::test::taskSubmissionDescriptor("command.self-stop", "task.self-stop.submit"),
+        std::make_shared<lasercnc::test::FixedTaskCommandHandler>(task)));
+    std::promise<std::string> observed;
+    auto observation = observed.get_future();
+    REQUIRE(lasercnc::test::registerTask(host, descriptor("task.self-stop"),
+        std::make_shared<LambdaHandler>([&](const TaskRequest&, const TaskContext&) {
+            const auto stopped = host.shutdown(5ms);
+            observed.set_value(stopped ? "unexpected-success" : std::string(stopped.error().code.value()));
+            return Result<Value>::success(Value{});
+        })));
+    auto executor = BsThreadPoolExecutor::create({1U});
+    REQUIRE(executor);
+    REQUIRE(host.configureTaskExecutor(std::move(executor).value()));
+    REQUIRE(host.bootstrap());
+    REQUIRE(host.execution().executeCommand(lasercnc::test::taskSubmissionRequest(
+        "request.self-stop", "command.self-stop", session, "trace.self-stop")));
+    REQUIRE(observation.wait_for(5s) == std::future_status::ready);
+    CHECK(observation.get() == "Task.ShutdownFromExecutionDenied");
+    CHECK(host.state() == AppKernelState::Ready);
+    CHECK(host.projectRuntime().create(validId<ProjectId>("project.after-self-stop")));
+    REQUIRE(host.execution().waitTask(task.taskId, 2s));
+    REQUIRE(host.shutdown(2s));
+}
+
+TEST_CASE("Kernel final drain rejects inline self waits and terminal callback shutdown", "[kernel-final-drain]")
+{
+    class InlineExecutor final : public lasercnc::platform::ITaskExecutor {
+    public:
+        bool stopped{false};
+        Result<void> submit(lasercnc::platform::ExecutorWork work, lasercnc::platform::ExecutorCompletion done) override
+        {
+            if(stopped) { return Result<void>::failure(makeError("Test.Stopped", ErrorCategory::Conflict, "stopped")); }
+            done(work()); return Result<void>::success();
+        }
+        Result<void> waitIdle() override { return Result<void>::success(); }
+        Result<void> shutdown() override { stopped = true; return Result<void>::success(); }
+        void drainForDestruction() noexcept override { stopped = true; }
+        bool isCurrentWorkerThread() const noexcept override { return false; }
+        std::size_t concurrency() const noexcept override { return 1U; }
+    } executor;
+    class CallbackExporter final : public lasercnc::observability::ITraceExporter {
+    public:
+        std::function<void()> callback;
+        Result<void> exportSpan(const lasercnc::observability::TraceSpanRecord&) override
+        { callback(); return Result<void>::success(); }
+    };
+    ResourceManager resources;
+    lasercnc::observability::LocalTraceService traces;
+    lasercnc::observability::LocalMetricsService metrics;
+    Scheduler scheduler{resources, traces, metrics};
+    TaskRegistry registry;
+    ExecutionServices services;
+    DocumentStore documents;
+    TaskRuntime runtime{registry, scheduler, services, documents};
+    REQUIRE(services.configure(std::make_shared<PassValidator>(), std::make_shared<NullLog>()));
+    REQUIRE(scheduler.configureExecutor(executor));
+    unsigned int workChecks = 0U, callbackChecks = 0U;
+    REQUIRE(registry.registerHandler(descriptor("task.inline-drain"), std::make_shared<LambdaHandler>(
+        [&](const TaskRequest& task, const TaskContext&) {
+            auto waited = runtime.wait(task.taskId, 5ms);
+            if(!waited && waited.error().code.value() == "Task.WaitFromExecutionDenied") { ++workChecks; }
+            auto stopped = scheduler.shutdown(5ms);
+            if(!stopped && stopped.error().code.value() == "Task.ShutdownFromExecutionDenied") { ++workChecks; }
+            return Result<Value>::success(Value{});
+        })));
+    auto exporter = std::make_shared<CallbackExporter>();
+    exporter->callback = [&] {
+        auto stopped = scheduler.shutdown(5ms);
+        if(!stopped && stopped.error().code.value() == "Task.ShutdownFromExecutionDenied") { ++callbackChecks; }
+    };
+    REQUIRE(traces.addExporter(exporter));
+    REQUIRE(scheduler.start());
+    runtime.start();
+    REQUIRE(runtime.submit(request("inline-first", "task.inline-drain")));
+    REQUIRE(runtime.submit(request("inline-second", "task.inline-drain")));
+    CHECK(workChecks == 4U);
+    CHECK(callbackChecks == 2U);
+    runtime.stop();
+    REQUIRE(scheduler.shutdown(1s));
+}
+
 TEST_CASE("Asynchronous commands use CommandRuntime to accept one read-only task", "[runtime][command][task]")
 {
     lasercnc::kernel::AppKernel kernel;

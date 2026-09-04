@@ -15,6 +15,7 @@
 namespace lasercnc::persistence {
 class PersistenceService;
 }
+namespace lasercnc::kernel { class AppKernel; }
 
 namespace lasercnc::runtime {
 
@@ -22,6 +23,10 @@ class TaskRuntime;
 
 class Scheduler final {
 public:
+    // Standalone owners serialize assembly/start with admission, stop TaskRuntime, then drain the
+    // executor before destroying Scheduler or its borrowed services. Destruction never joins for them.
+    // 中文翻译：独立所有者串行装配/启动与准入，停止 TaskRuntime 后排空执行器，再销毁调度器及借用服务。
+    // 中文翻译：Scheduler 析构不代替外部所有者 join；仍有任务/回调时终止以拒绝提前释放依赖。
     Scheduler(
         ResourceManager& resources,
         observability::ITraceService& traces,
@@ -58,6 +63,8 @@ public:
     [[nodiscard]] std::vector<foundation::Error> persistenceFailures() const;
 
 private:
+    [[nodiscard]] bool onExecutionThread() const noexcept;
+    void executorDrainedForDestruction() noexcept;
     struct Core;
     struct Outcome;
     std::shared_ptr<Core> core_;
@@ -83,6 +90,7 @@ private:
     void discardPrepared(const kernel::TaskId& taskId) noexcept;
 
     friend class TaskRuntime;
+    friend class kernel::AppKernel;
 };
 
 } // namespace lasercnc::runtime

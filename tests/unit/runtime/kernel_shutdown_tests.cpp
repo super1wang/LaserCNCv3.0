@@ -14,10 +14,18 @@ public:
     unsigned int calls{0U};
     unsigned int failures{0U};
     bool throws{false};
+    bool drained{false};
     std::function<void()> onStop;
+    std::function<void()> onDrain;
     foundation::Result<void> submit(platform::ExecutorWork work, platform::ExecutorCompletion completion) override
-    { completion(work()); return foundation::Result<void>::success(); }
+    {
+        if(drained) { return foundation::Result<void>::failure(foundation::makeError(
+            "Test.ExecutorStopped", foundation::ErrorCategory::Conflict, "stopped")); }
+        completion(work()); return foundation::Result<void>::success();
+    }
     foundation::Result<void> waitIdle() override { return foundation::Result<void>::success(); }
+    void drainForDestruction() noexcept override { drained = true; if(onDrain) { onDrain(); } }
+    bool isCurrentWorkerThread() const noexcept override { return false; }
     foundation::Result<void> shutdown() override
     {
         ++calls;
@@ -27,6 +35,7 @@ public:
             return foundation::Result<void>::failure(foundation::makeError(
                 "Test.ExecutorStopFailed", foundation::ErrorCategory::Infrastructure, "Injected executor stop failure"));
         }
+        drained = true;
         return foundation::Result<void>::success();
     }
     std::size_t concurrency() const noexcept override { return 1U; }
@@ -197,4 +206,86 @@ TEST_CASE("Shutdown acknowledgement empty scheduler seals configuration and hand
     CHECK_FALSE(scheduler.start());
     REQUIRE(scheduler.shutdown(0ms));
     CHECK(executor.calls == 0U);
+}
+
+TEST_CASE("Kernel final drain runs before executor destruction despite persistent stop failure", "[kernel-final-drain]")
+{
+    class FailingExecutor final : public platform::ITaskExecutor {
+    public:
+        explicit FailingExecutor(std::vector<std::string>& order, bool throws) : order_(order), throws_(throws) {}
+        ~FailingExecutor() override { order_.emplace_back("executor-destroyed"); }
+        foundation::Result<void> submit(platform::ExecutorWork work, platform::ExecutorCompletion completion) override
+        { completion(work()); return foundation::Result<void>::success(); }
+        foundation::Result<void> waitIdle() override { return shutdown(); }
+        foundation::Result<void> shutdown() override
+        {
+            if(throws_) { throw std::runtime_error("persistent stop exception"); }
+            return foundation::Result<void>::failure(foundation::makeError(
+                "Test.PersistentStopFailure", foundation::ErrorCategory::Infrastructure, "persistent stop failure"));
+        }
+        void drainForDestruction() noexcept override { order_.emplace_back("drained"); }
+        bool isCurrentWorkerThread() const noexcept override { return false; }
+        std::size_t concurrency() const noexcept override { return 1U; }
+    private:
+        std::vector<std::string>& order_;
+        bool throws_;
+    };
+    for(bool ready : {false, true}) {
+        for(bool throws : {false, true}) {
+            std::vector<std::string> order;
+            {
+                kernel::AppKernel host;
+                REQUIRE(host.configureTaskExecutor(std::make_unique<FailingExecutor>(order, throws)));
+                if(ready) { REQUIRE(host.bootstrap()); }
+            }
+            CHECK(order == std::vector<std::string>{"drained", "executor-destroyed"});
+        }
+    }
+}
+
+TEST_CASE("Kernel final drain covers failed bootstrap failed module stop and configuring states", "[kernel-final-drain]")
+{
+    class Module final : public kernel::IModule {
+    public:
+        bool failStart{false}, failStop{false};
+        std::function<void()> stopping;
+        const kernel::ModuleDescriptor& descriptor() const noexcept override { return descriptor_; }
+        foundation::Result<void> start(kernel::AppKernel&) override { return outcome(failStart); }
+        foundation::Result<void> stop(kernel::AppKernel&) override { stopping(); return outcome(failStop); }
+    private:
+        static foundation::Result<void> outcome(bool fail)
+        {
+            if(fail) { return foundation::Result<void>::failure(foundation::makeError(
+                "Test.ModuleLifecycleFailure", foundation::ErrorCategory::Infrastructure, "expected module failure")); }
+            return foundation::Result<void>::success();
+        }
+        kernel::ModuleDescriptor descriptor_{id<kernel::ModuleId>("module.final-drain"), "Final drain", {1U, 0U, 0U}};
+    };
+    for(int scenario = 0; scenario != 5; ++scenario) {
+        CAPTURE(scenario);
+        unsigned int drains = 0U, stops = 0U;
+        bool drainBeforeStop = false;
+        {
+            kernel::AppKernel host;
+            auto executor = std::make_unique<ScriptedStopExecutor>();
+            executor->onDrain = [&] { ++drains; };
+            if(scenario == 4) { executor->failures = 100U; }
+            REQUIRE(host.configureTaskExecutor(std::move(executor)));
+            auto module = std::make_unique<Module>();
+            module->failStart = scenario == 2;
+            module->failStop = scenario == 3;
+            module->stopping = [&] { ++stops; drainBeforeStop = drains == 1U; };
+            REQUIRE(host.addModule(std::move(module)));
+            if(scenario != 0) {
+                auto started = host.bootstrap();
+                CHECK(started.hasValue() == (scenario != 2));
+            }
+            if(scenario == 3 || scenario == 4) { CHECK_FALSE(host.shutdown(0ms)); }
+            if(scenario == 2 || scenario == 3) { CHECK(host.state() == kernel::AppKernelState::Failed); }
+        }
+        CHECK(drains == 1U);
+        if(scenario == 0) { CHECK(stops == 0U); }
+        if(scenario == 1 || scenario == 4) { CHECK(stops == 1U); CHECK(drainBeforeStop); }
+        if(scenario == 3) { CHECK(stops == 1U); }
+    }
 }

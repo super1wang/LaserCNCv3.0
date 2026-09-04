@@ -92,7 +92,21 @@ BsThreadPoolExecutor::BsThreadPoolExecutor(std::unique_ptr<Impl> implementation)
 
 BsThreadPoolExecutor::~BsThreadPoolExecutor()
 {
-    static_cast<void>(shutdown());
+    drainForDestruction();
+}
+
+void BsThreadPoolExecutor::drainForDestruction() noexcept
+{
+    try {
+        if(isCurrentWorkerThread() || !shutdown()) { std::terminate(); }
+    } catch(...) {
+        std::terminate();
+    }
+}
+
+bool BsThreadPoolExecutor::isCurrentWorkerThread() const noexcept
+{
+    return implementation_->calledFromOwnWorker();
 }
 
 foundation::Result<std::unique_ptr<BsThreadPoolExecutor>> BsThreadPoolExecutor::create(

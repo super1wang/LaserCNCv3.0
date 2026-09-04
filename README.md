@@ -26,6 +26,8 @@ C2b3 本地检查点通过：Project/Document 原子目录快照及 epoch/作用
 
 C2c1 本地检查点通过：停止确认/失败重试已修复，Debug 368/368、专项 8/8、停止相关 10 项各 10 次和纯生产/架构通过，见 [C2c1 交付](docs/阶段交付/2026-09-04-ST1C2c1-停止确认与失败重试.md)。下一步 C2c2 的生命周期线程、非协作任务析构依赖和持久化独占释放，见 [C2c 契约](docs/内核契约/ST1C2c-停止确认与析构依赖.md)；不将停止调用成功推导为任意析构路径安全，整体未冻结。
 
+C2c2 后续检查点通过：最终排空与依赖保留、工作线程停止/销毁约束及所有权释放已验证，Debug 373/373、专项 15/15、15 项各 10 次、纯生产/架构和定向 ASan 进程矩阵 3 轮通过，见 [C2c2 交付](docs/阶段交付/2026-09-04-ST1C2c2-最终排空与析构依赖.md)。当前形成 C2 生命周期正确性大节点，下一步 C3 存储键；C4/C6–C8/ST1D 仍待完成，未宣称整体冻结或设备准入。
+
 - Phase 1：Foundation（`StrongId`、`Value`、`Result`、`Error`、`Schema`）
 - Phase 2：Application Composition（`AppKernel`、`ServiceRegistry`、`ModuleRuntime`）
 - Phase 3：Infrastructure Adapters（日志、JSON、TOML、SQLite、线程池）

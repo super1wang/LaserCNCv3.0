@@ -16,11 +16,14 @@ namespace {
 
 class InlineExecutor final : public platform::ITaskExecutor {
 public:
+    bool stopped{false};
+    void drainForDestruction() noexcept override { stopped = true; }
+    bool isCurrentWorkerThread() const noexcept override { return false; }
     [[nodiscard]] foundation::Result<void> submit(
         platform::ExecutorWork work,
         platform::ExecutorCompletion completion) override
     {
-        if(!work || !completion) {
+        if(stopped || !work || !completion) {
             return foundation::Result<void>::failure(foundation::makeError(
                 "Test.InvalidExecutorRequest",
                 foundation::ErrorCategory::Validation,
@@ -37,6 +40,7 @@ public:
 
     [[nodiscard]] foundation::Result<void> shutdown() override
     {
+        drainForDestruction();
         return foundation::Result<void>::success();
     }
 

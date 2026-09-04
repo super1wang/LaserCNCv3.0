@@ -43,6 +43,8 @@
 
 已在初始化事务之前强制调用会话准入，覆盖独立 PersistenceService 和 AppKernel 启动链。旧代码红灯证据 `build/st1c5b-red-tests.log`：新增 3 项全部失败，第二 Kernel 能启动并将第一 Kernel 的 pending claim 改成 abandoned，导致正在执行的命令提交失败。修复后同一 3 项通过；最终 Debug 299/299、专项 56/56、新增 5 项各 10 次（包含 60 个子进程）、纯生产及架构通过。日志与摘要见 [C5b 交付](../阶段交付/2026-09-04-ST1C5b-初始化独占与活动状态保护.md)。本地检查点不替代 C2c 生命周期、支持矩阵与 ST1D 最终签核。
 
+C2c2 补充了真实析构联动证据：短停止超时和最终 drain 期间，同进程/跨进程第二 Host 均拒绝；任务、观察及持久终态结束后释放 Host，原进程尚存活时另一进程可以接管。Debug 进程矩阵 10 轮及定向 ASan 3 轮均逐份核对六个子检查；见 [C2c2 交付](../阶段交付/2026-09-04-ST1C2c2-最终排空与析构依赖.md)。该证据不扩展 NTFS 本机以外支持矩阵，也不证明硬件断电耐久性。
+
 只读 `sessionStatus()` 区分 NotRequested（尚未申请）、Unconfirmed（尝试后未获成功证明）、Acquired（已经成功准入）。`ready` 单独表示服务可用；隔离后 ready=false 不意味着文件所有权已经释放。`lastAdmission` 是最近一次成功核验的配置副本，不把缓存展示成故障后的实时健康值。重复 initialize 会重新核验策略，但不再次执行 abandoned/task/effect 恢复；策略漂移后隔离，不允许恢复 PRAGMA 后重新启用旧服务。
 
 Benchmark 改为成功准入后采集 journal mode、synchronous、foreign keys、page size 和 cache size。种子准备经正常 close/open 生成快照，Journal 恢复计时开始前销毁前任持久服务；旧性能基线不能代表新耐久策略和初始化流程，正式新基线仍由 C7/ST1D 产生。

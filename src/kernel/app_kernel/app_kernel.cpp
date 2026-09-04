@@ -5,6 +5,7 @@
 #include <lasercnc/runtime/asset_validation.hpp>
 
 #include <algorithm>
+#include <exception>
 #include <map>
 #include <set>
 #include <string>
@@ -148,9 +149,38 @@ AppKernel::AppKernel()
 
 AppKernel::~AppKernel()
 {
-    if(state_ == AppKernelState::Ready || state_ == AppKernelState::Stopping) {
-        static_cast<void>(shutdown());
+    LifecycleCall lifecycle(lifecycleCall_);
+    if(!lifecycle.acquired() || scheduler_.onExecutionThread()
+       || !admission_->closeIfIdle() || transactions_.activeTransactionCount() != 0U) {
+        std::terminate();
     }
+    state_ = AppKernelState::Stopping;
+    stopRuntimes();
+    // Keep all runtimes, observers, modules and persistence alive through the final barrier.
+    // 中文翻译：最终屏障结束前保留所有运行时、观察器、模块与持久化依赖。
+    try { static_cast<void>(scheduler_.shutdown(std::chrono::milliseconds::zero())); }
+    catch(...) { /* Final drain remains mandatory. 中文翻译：最终排空仍必须执行。 */ }
+    if(taskExecutor_ != nullptr) {
+        taskExecutor_->drainForDestruction();
+        taskExecutor_.reset();
+    }
+    scheduler_.executorDrainedForDestruction();
+    try {
+        state_ = modules_.shutdown(*this) ? AppKernelState::Stopped : AppKernelState::Failed;
+    } catch(...) {
+        state_ = AppKernelState::Failed;
+    }
+}
+
+void AppKernel::stopRuntimes()
+{
+    projectRuntime_.stop();
+    documentRuntime_.stop();
+    scripts_.stop();
+    workflows_.stop();
+    commands_.stop();
+    queries_.stop();
+    tasks_.stop();
 }
 
 ExecutionGateway& AppKernel::execution() noexcept
@@ -654,6 +684,11 @@ foundation::Result<void> AppKernel::bootstrap()
 
 foundation::Result<void> AppKernel::shutdown(std::chrono::milliseconds taskTimeout)
 {
+    if(scheduler_.onExecutionThread()) {
+        return foundation::Result<void>::failure(foundation::makeError(
+            "Task.ShutdownFromExecutionDenied", foundation::ErrorCategory::Conflict,
+            "A task callback or owned worker cannot synchronously shut down its application kernel"));
+    }
     if(taskTimeout < std::chrono::milliseconds::zero()) {
         return foundation::Result<void>::failure(foundation::makeError(
             "Task.InvalidShutdownTimeout", foundation::ErrorCategory::Validation,
@@ -710,13 +745,7 @@ foundation::Result<void> AppKernel::shutdown(std::chrono::milliseconds taskTimeo
             "The application kernel cannot stop while admitted public calls are active"));
     }
     state_ = AppKernelState::Stopping;
-    projectRuntime_.stop();
-    documentRuntime_.stop();
-    scripts_.stop();
-    workflows_.stop();
-    commands_.stop();
-    queries_.stop();
-    tasks_.stop();
+    stopRuntimes();
     if(taskExecutor_ != nullptr) {
         auto tasksStopped = scheduler_.shutdown(taskTimeout);
         if(!tasksStopped) {

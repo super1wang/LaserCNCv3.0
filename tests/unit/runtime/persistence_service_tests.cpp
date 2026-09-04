@@ -2099,8 +2099,12 @@ TEST_CASE("Executor admission faults finish accepted tasks and do not strand sch
 {
     class FaultExecutor final : public lasercnc::platform::ITaskExecutor {
     public:
+        bool stopped{false};
+        void drainForDestruction() noexcept override { stopped = true; }
+        bool isCurrentWorkerThread() const noexcept override { return false; }
         Result<void> submit(lasercnc::platform::ExecutorWork work, lasercnc::platform::ExecutorCompletion done) override
         {
+            if(stopped) { return Result<void>::failure(makeError("Test.Stopped", ErrorCategory::Conflict, "stopped")); }
             ++calls;
             if(fail) {
                 fail = false;
@@ -2111,7 +2115,7 @@ TEST_CASE("Executor admission faults finish accepted tasks and do not strand sch
             return Result<void>::success();
         }
         Result<void> waitIdle() override { return Result<void>::success(); }
-        Result<void> shutdown() override { return Result<void>::success(); }
+        Result<void> shutdown() override { drainForDestruction(); return Result<void>::success(); }
         std::size_t concurrency() const noexcept override { return 1U; }
         bool fail{true};
         bool throws{false};

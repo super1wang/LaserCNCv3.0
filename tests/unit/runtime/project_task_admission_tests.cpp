@@ -78,6 +78,9 @@ public:
 
 class ManualExecutor final : public lasercnc::platform::ITaskExecutor {
 public:
+    ~ManualExecutor() override { drainForDestruction(); }
+    void drainForDestruction() noexcept override { stopped_ = true; runAll(); }
+    bool isCurrentWorkerThread() const noexcept override { return false; }
     Result<void> submit(
         lasercnc::platform::ExecutorWork work,
         lasercnc::platform::ExecutorCompletion completion) override

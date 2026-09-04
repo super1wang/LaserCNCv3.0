@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
+#include <exception>
 #include <map>
 #include <mutex>
 #include <set>
@@ -108,6 +109,23 @@ struct Scheduler::Outcome final {
 };
 
 struct Scheduler::Core final {
+    struct ExecutionScope final {
+        explicit ExecutionScope(Core* ownerCore) noexcept : owner(ownerCore), previous(current)
+        { owner->callbacks.fetch_add(1U); current = this; }
+        ~ExecutionScope() { current = previous; owner->callbacks.fetch_sub(1U); }
+        ExecutionScope(const ExecutionScope&) = delete;
+        ExecutionScope& operator=(const ExecutionScope&) = delete;
+        static bool contains(const Core* candidate) noexcept
+        {
+            for(auto* scope = current; scope != nullptr; scope = scope->previous) {
+                if(scope->owner == candidate) { return true; }
+            }
+            return false;
+        }
+        Core* owner;
+        const ExecutionScope* previous;
+        inline static thread_local const ExecutionScope* current{nullptr};
+    };
     struct Record final {
         TaskDescriptor descriptor;
         std::shared_ptr<ITaskHandler> handler;
@@ -172,6 +190,7 @@ struct Scheduler::Core final {
     bool stopRequested{false};
     bool executorStopped{false};
     std::atomic_flag shutdownCall = ATOMIC_FLAG_INIT;
+    std::atomic_size_t callbacks{0U};
 };
 
 Scheduler::Scheduler(
@@ -191,7 +210,33 @@ Scheduler::Scheduler(
 {
 }
 
-Scheduler::~Scheduler() = default;
+Scheduler::~Scheduler()
+{
+    // Standalone owners must drain before destroying the borrowed dependency graph.
+    // 中文翻译：独立组件所有者必须先排空，再销毁被借用的依赖图。
+    executorDrainedForDestruction();
+}
+
+bool Scheduler::onExecutionThread() const noexcept
+{
+    if(Core::ExecutionScope::contains(core_.get())) { return true; }
+    std::lock_guard lock(core_->mutex);
+    return core_->executor != nullptr && core_->executor->isCurrentWorkerThread();
+}
+
+void Scheduler::executorDrainedForDestruction() noexcept
+{
+    std::lock_guard lock(core_->mutex);
+    if(core_->callbacks.load() != 0U || core_->runningCount != 0U || core_->dispatching
+       || std::any_of(core_->records.begin(), core_->records.end(), [](const auto& entry) {
+           return !isTerminal(entry.second.state) || !entry.second.completionReady;
+       })) { std::terminate(); }
+    core_->executor = nullptr;
+    core_->stopRequested = true;
+    core_->executorStopped = true;
+    core_->started = false;
+    core_->accepting = false;
+}
 
 foundation::Result<void> Scheduler::configureExecutor(platform::ITaskExecutor& executor)
 {
@@ -416,6 +461,11 @@ foundation::Result<TaskSnapshot> Scheduler::wait(
     const kernel::TaskId& taskId,
     std::chrono::milliseconds timeout) const
 {
+    if(onExecutionThread()) {
+        return foundation::Result<TaskSnapshot>::failure(taskError(
+            "Task.WaitFromExecutionDenied", foundation::ErrorCategory::Conflict,
+            "A scheduler callback or owned worker cannot synchronously wait for tasks", taskId));
+    }
     if(timeout < std::chrono::milliseconds::zero()) {
         return foundation::Result<TaskSnapshot>::failure(taskError(
             "Task.InvalidWaitTimeout",
@@ -454,6 +504,11 @@ foundation::Result<TaskSnapshot> Scheduler::wait(
 
 foundation::Result<void> Scheduler::shutdown(std::chrono::milliseconds timeout)
 {
+    if(onExecutionThread()) {
+        return foundation::Result<void>::failure(schedulerError(
+            "Task.ShutdownFromExecutionDenied", foundation::ErrorCategory::Conflict,
+            "A scheduler callback or owned worker cannot synchronously shut down its scheduler"));
+    }
     if(timeout < std::chrono::milliseconds::zero()) {
         return foundation::Result<void>::failure(schedulerError(
             "Task.InvalidShutdownTimeout",
@@ -582,6 +637,7 @@ std::vector<foundation::Error> Scheduler::persistenceFailures() const
 
 void Scheduler::pump(const std::shared_ptr<Core>& core)
 {
+    Core::ExecutionScope pumpExecution(core.get());
     {
         std::lock_guard lock(core->mutex);
         if(!core->started || core->stopRequested || core->dispatching) {
@@ -770,7 +826,8 @@ void Scheduler::pump(const std::shared_ptr<Core>& core)
         auto submitted = [&]() -> foundation::Result<void> {
             try {
                 return core->executor->submit(
-                    [handler = std::move(handler), taskRequest, context, outcome]() mutable {
+                    [core, handler = std::move(handler), taskRequest, context, outcome]() mutable {
+                        Core::ExecutionScope workExecution(core.get());
                         auto result = handler->execute(taskRequest, context);
                         std::lock_guard lock(outcome->mutex);
                         if(result) {
@@ -801,6 +858,7 @@ void Scheduler::finish(
     foundation::Result<void> executionResult,
     const std::shared_ptr<Outcome>& outcome)
 {
+    Core::ExecutionScope execution(core.get());
     std::function<bool()> sourceIsStale;
     std::optional<TaskSnapshot> terminal;
     {
@@ -886,6 +944,7 @@ void Scheduler::persistTerminal(
     const std::shared_ptr<Core>& core,
     const TaskSnapshot& snapshot) noexcept
 {
+    Core::ExecutionScope execution(core.get());
     std::optional<foundation::Error> failure;
     if(core->persistence != nullptr && core->persistence->configured()) {
         try {

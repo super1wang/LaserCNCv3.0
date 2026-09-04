@@ -49,6 +49,11 @@ enum class AppKernelState {
 
 class AppKernel final {
 public:
+    // The Host owner serializes configuration/bootstrap and coordinates object lifetime.
+    // Destruction permits internal task drain, but no concurrent external calls/borrowed handles.
+    // It may wait indefinitely; destruction from a task callback or active lifecycle call terminates.
+    // 中文翻译：Host 所有者串行协调配置/启动与对象寿命；析构允许内部任务排空，禁止外部并发调用/借用。
+    // 中文翻译：析构可能无期限等待；从任务回调或生命周期调用尚在进行时销毁将终止进程。
     AppKernel();
     ~AppKernel();
 
@@ -111,6 +116,7 @@ public:
     [[nodiscard]] AppKernelState state() const noexcept;
 
 private:
+    void stopRuntimes();
     [[nodiscard]] foundation::Result<void> restoreState();
 
     std::unique_ptr<ExecutionAdmission> admission_;

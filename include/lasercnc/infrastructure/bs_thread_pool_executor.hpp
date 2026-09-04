@@ -28,6 +28,8 @@ public:
         platform::ExecutorCompletion completion) override;
     [[nodiscard]] foundation::Result<void> waitIdle() override;
     [[nodiscard]] foundation::Result<void> shutdown() override;
+    void drainForDestruction() noexcept override;
+    [[nodiscard]] bool isCurrentWorkerThread() const noexcept override;
     [[nodiscard]] std::size_t concurrency() const noexcept override;
 
 private:

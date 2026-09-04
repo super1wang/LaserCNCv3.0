@@ -157,14 +157,18 @@ public:
 
 class InlineTaskExecutor final : public ITaskExecutor {
 public:
+    bool stopped{false};
+    void drainForDestruction() noexcept override { stopped = true; }
+    bool isCurrentWorkerThread() const noexcept override { return false; }
     Result<void> submit(ExecutorWork work, ExecutorCompletion completion) override
     {
+        if(stopped) { return Result<void>::failure(makeError("Test.Stopped", ErrorCategory::Conflict, "stopped")); }
         completion(work());
         return Result<void>::success();
     }
 
     Result<void> waitIdle() override { return Result<void>::success(); }
-    Result<void> shutdown() override { return Result<void>::success(); }
+    Result<void> shutdown() override { drainForDestruction(); return Result<void>::success(); }
     std::size_t concurrency() const noexcept override { return 1U; }
 };
 

@@ -64,6 +64,19 @@ endif()
 # 中文翻译：基准程序仅用于测试，不是产品命令行宿主。
 if(WIN32)
     find_program(LCNC_WINDOWS_POWERSHELL NAMES powershell.exe REQUIRED)
+    add_executable(lasercnc_kernel_drain_probe integration/kernel_drain_probe.cpp)
+    target_link_libraries(lasercnc_kernel_drain_probe PRIVATE LaserCNC::Infrastructure)
+    target_include_directories(lasercnc_kernel_drain_probe PRIVATE "${PROJECT_SOURCE_DIR}/tests/support")
+    target_compile_features(lasercnc_kernel_drain_probe PRIVATE cxx_std_20)
+    set_target_properties(lasercnc_kernel_drain_probe PROPERTIES CXX_EXTENSIONS OFF)
+    lcnc_enable_warnings(lasercnc_kernel_drain_probe)
+    add_test(NAME integration.kernel_final_drain_process
+        COMMAND "${CMAKE_COMMAND}"
+            "-DLCNC_EXECUTABLE=${LCNC_WINDOWS_POWERSHELL}"
+            "-DLCNC_ARGUMENTS=-NoProfile;-ExecutionPolicy;Bypass;-File;${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_kernel_drain.ps1;-Executable;$<TARGET_FILE:lasercnc_kernel_drain_probe>;-EvidenceRoot;${CMAKE_CURRENT_BINARY_DIR}/final-drain-process-runs"
+            "-DLCNC_EXPECTED_OUTPUT=kernel-final-drain-process-verified" "-DLCNC_TIMEOUT=80"
+            -P "${PROJECT_SOURCE_DIR}/cmake/RunVerifiedProgram.cmake")
+    set_tests_properties(integration.kernel_final_drain_process PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
     add_executable(lasercnc_persistence_session_probe integration/kernel_persistence_session_probe.cpp)
     target_link_libraries(lasercnc_persistence_session_probe PRIVATE LaserCNC::Infrastructure)
     target_compile_features(lasercnc_persistence_session_probe PRIVATE cxx_std_20)
