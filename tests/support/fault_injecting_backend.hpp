@@ -4,6 +4,7 @@
 #include <lasercnc/platform/persistence_backend.hpp>
 
 #include <memory>
+#include <functional>
 #include <stdexcept>
 #include <string>
 
@@ -83,10 +84,12 @@ public:
     bool failRollback{false};
     bool throwRollback{false};
     unsigned int rollbackHits{0U};
+    std::function<void(BackendPoint, std::string_view)> beforeOperation;
 
 private:
     foundation::Result<void> check(BackendPoint point, std::string_view sql = {})
     {
+        if(beforeOperation) { beforeOperation(point, sql); }
         if(remaining_ != 0U && point == point_ && sql.find(fragment_) != std::string_view::npos
            && --remaining_ == 0U) {
             ++hits;

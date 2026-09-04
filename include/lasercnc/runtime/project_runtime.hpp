@@ -12,7 +12,7 @@
 #include <optional>
 #include <vector>
 
-namespace lasercnc::kernel { class AppKernel; }
+namespace lasercnc::kernel { class AppKernel; class ExecutionAdmission; }
 namespace lasercnc::persistence {
 class PersistenceService;
 struct ProjectCatalogRecord;
@@ -56,6 +56,7 @@ private:
     friend class kernel::AppKernel;
     friend class DocumentRuntime;
     friend struct ProjectActivityLease::Token;
+    kernel::ExecutionAdmission* admission_{nullptr};
     struct Entry final {
         ProjectLifecycleState state{ProjectLifecycleState::Closed};
         std::size_t activities{0U};

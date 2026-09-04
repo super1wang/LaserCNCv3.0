@@ -31,9 +31,12 @@
 #include <lasercnc/state/document_store.hpp>
 
 #include <chrono>
+#include <atomic>
 #include <memory>
 
 namespace lasercnc::kernel {
+
+class ExecutionAdmission;
 
 enum class AppKernelState {
     Configuring,
@@ -110,6 +113,7 @@ public:
 private:
     [[nodiscard]] foundation::Result<void> restoreState();
 
+    std::unique_ptr<ExecutionAdmission> admission_;
     ServiceRegistry services_;
     state::DocumentStore documents_;
     state::ObjectTypeRegistry objectTypes_;
@@ -142,7 +146,8 @@ private:
     runtime::WorkflowRuntime workflows_;
     runtime::ScriptRuntime scripts_;
     ExecutionGateway executionGateway_;
-    AppKernelState state_{AppKernelState::Configuring};
+    std::atomic<AppKernelState> state_{AppKernelState::Configuring};
+    std::atomic_flag lifecycleCall_ = ATOMIC_FLAG_INIT;
 };
 
 } // namespace lasercnc::kernel

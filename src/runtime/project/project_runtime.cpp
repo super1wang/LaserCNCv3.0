@@ -1,4 +1,5 @@
 #include <lasercnc/runtime/project_runtime.hpp>
+#include "../../kernel/execution_admission.hpp"
 
 #include <lasercnc/persistence/persistence_service.hpp>
 #include <lasercnc/runtime/document_runtime.hpp>
@@ -91,6 +92,8 @@ foundation::Result<ProjectLifecycleSnapshot> ProjectRuntime::finishOpen(const ke
 
 foundation::Result<ProjectLifecycleSnapshot> ProjectRuntime::create(kernel::ProjectId id)
 {
+    auto admitted = kernel::ExecutionAdmission::acquire(admission_, "Project.RuntimeNotAccepting");
+    if(!admitted) { return foundation::Result<ProjectLifecycleSnapshot>::failure(std::move(admitted).error()); }
     {
         std::lock_guard lock(mutex_);
         if(!accepting()) { return foundation::Result<ProjectLifecycleSnapshot>::failure(projectError("Project.RuntimeNotAccepting", id)); }
@@ -102,6 +105,8 @@ foundation::Result<ProjectLifecycleSnapshot> ProjectRuntime::create(kernel::Proj
 
 foundation::Result<ProjectLifecycleSnapshot> ProjectRuntime::open(const kernel::ProjectId& id)
 {
+    auto admitted = kernel::ExecutionAdmission::acquire(admission_, "Project.RuntimeNotAccepting");
+    if(!admitted) { return foundation::Result<ProjectLifecycleSnapshot>::failure(std::move(admitted).error()); }
     {
         std::lock_guard lock(mutex_);
         if(!accepting()) { return foundation::Result<ProjectLifecycleSnapshot>::failure(projectError("Project.RuntimeNotAccepting", id)); }
@@ -117,6 +122,8 @@ foundation::Result<ProjectLifecycleSnapshot> ProjectRuntime::open(const kernel::
 
 foundation::Result<ProjectLifecycleSnapshot> ProjectRuntime::close(const kernel::ProjectId& id)
 {
+    auto admitted = kernel::ExecutionAdmission::acquire(admission_, "Project.RuntimeNotAccepting");
+    if(!admitted) { return foundation::Result<ProjectLifecycleSnapshot>::failure(std::move(admitted).error()); }
     {
         std::lock_guard lock(mutex_);
         if(!accepting()) { return foundation::Result<ProjectLifecycleSnapshot>::failure(projectError("Project.RuntimeNotAccepting", id)); }

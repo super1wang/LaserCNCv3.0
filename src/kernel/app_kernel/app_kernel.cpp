@@ -1,4 +1,5 @@
 #include <lasercnc/kernel/app_kernel.hpp>
+#include "../execution_admission.hpp"
 
 #include <lasercnc/foundation/error.hpp>
 #include <lasercnc/runtime/asset_validation.hpp>
@@ -37,7 +38,8 @@ private:
 } // namespace
 
 AppKernel::AppKernel()
-    : projectRuntime_(persistence_),
+    : admission_(std::make_unique<ExecutionAdmission>()),
+      projectRuntime_(persistence_),
       documentRuntime_(documents_, persistence_, &objectTypes_),
       history_(documents_),
       transactions_(documents_, &persistence_, &documentRuntime_, &history_, &objectTypes_),
@@ -105,6 +107,7 @@ AppKernel::AppKernel()
           32U,
           &documentRuntime_),
       executionGateway_(
+          *admission_,
           modules_,
           commandRegistry_,
           queryRegistry_,
@@ -118,6 +121,8 @@ AppKernel::AppKernel()
           workflows_,
           scripts_)
 {
+    projectRuntime_.admission_ = admission_.get();
+    documentRuntime_.admission_ = admission_.get();
     projectRuntime_.documents_ = &documentRuntime_;
     documentRuntime_.projects_ = &projectRuntime_;
     documentRuntime_.configureCloseBlockers(
@@ -458,6 +463,12 @@ foundation::Result<void> AppKernel::restoreState()
 
 foundation::Result<void> AppKernel::bootstrap()
 {
+    LifecycleCall lifecycle(lifecycleCall_);
+    if(!lifecycle.acquired()) {
+        return foundation::Result<void>::failure(foundation::makeError(
+            "Kernel.LifecycleInProgress", foundation::ErrorCategory::Conflict,
+            "Another application lifecycle call is in progress"));
+    }
     if(state_ != AppKernelState::Configuring) {
         return foundation::Result<void>::failure(foundation::makeError(
             "Kernel.AppKernelAlreadyBootstrapped",
@@ -616,11 +627,18 @@ foundation::Result<void> AppKernel::bootstrap()
     workflows_.start();
     scripts_.start();
     state_ = AppKernelState::Ready;
+    admission_->open();
     return foundation::Result<void>::success();
 }
 
 foundation::Result<void> AppKernel::shutdown(std::chrono::milliseconds taskTimeout)
 {
+    LifecycleCall lifecycle(lifecycleCall_);
+    if(!lifecycle.acquired()) {
+        return foundation::Result<void>::failure(foundation::makeError(
+            "Kernel.LifecycleInProgress", foundation::ErrorCategory::Conflict,
+            "Another application lifecycle call is in progress"));
+    }
     if(state_ == AppKernelState::Stopped) {
         return foundation::Result<void>::success();
     }
@@ -660,6 +678,11 @@ foundation::Result<void> AppKernel::shutdown(std::chrono::milliseconds taskTimeo
             }}));
     }
 
+    if(!admission_->closeIfIdle()) {
+        return foundation::Result<void>::failure(foundation::makeError(
+            "Kernel.ActiveExecutions", foundation::ErrorCategory::Conflict,
+            "The application kernel cannot stop while admitted public calls are active"));
+    }
     const bool wasConfiguring = state_ == AppKernelState::Configuring;
     state_ = AppKernelState::Stopping;
     projectRuntime_.stop();

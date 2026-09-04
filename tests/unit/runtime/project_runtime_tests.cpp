@@ -75,6 +75,48 @@ TEST_CASE("ProjectRuntime owns empty project identity and lifecycle without pers
     CHECK(std::string(projectLifecycleStateName(static_cast<ProjectLifecycleState>(255))) == "unknown");
 }
 
+TEST_CASE("Kernel admission covers lifecycle persistence until the public operation returns", "[project-runtime][lifecycle][kernel-admission]")
+{
+    for(unsigned int scenario = 0U; scenario < 8U; ++scenario) {
+        DYNAMIC_SECTION("scenario=" << scenario) {
+            AppKernel kernel;
+            auto* backend = configure(kernel, freshRoot());
+            const auto project = id<ProjectId>("project.admission");
+            const auto document = id<DocumentId>("document.admission");
+            REQUIRE(kernel.bootstrap());
+            if(scenario != 0U) { REQUIRE(kernel.projectRuntime().create(project)); }
+            if(scenario == 1U) { REQUIRE(kernel.projectRuntime().close(project)); }
+            if(scenario >= 5U) { REQUIRE(kernel.documentRuntime().create(project, document)); }
+            if(scenario == 5U || scenario == 7U) { REQUIRE(kernel.documentRuntime().close(document)); }
+            bool probed = false;
+            std::optional<Result<void>> stopped;
+            backend->beforeOperation = [&](BackendPoint, std::string_view) {
+                if(!probed) {
+                    probed = true;
+                    stopped.emplace(kernel.shutdown());
+                }
+            };
+            switch(scenario) {
+            case 0U: REQUIRE(kernel.projectRuntime().create(project)); break;
+            case 1U: REQUIRE(kernel.projectRuntime().open(project)); break;
+            case 2U: REQUIRE(kernel.projectRuntime().close(project)); break;
+            case 3U: REQUIRE(kernel.documentRuntime().create(project, document)); break;
+            case 4U: REQUIRE(kernel.documentRuntime().attach({project, document, {}, {}})); break;
+            case 5U: REQUIRE(kernel.documentRuntime().open(document)); break;
+            case 6U: REQUIRE(kernel.documentRuntime().close(document)); break;
+            case 7U: REQUIRE(kernel.documentRuntime().remove(document)); break;
+            }
+            backend->beforeOperation = {};
+            REQUIRE(probed);
+            REQUIRE(stopped.has_value());
+            CHECK_FALSE(stopped->hasValue());
+            if(!stopped->hasValue()) { CHECK(std::string(stopped->error().code.value()) == "Kernel.ActiveExecutions"); }
+            CHECK(kernel.state() == AppKernelState::Ready);
+            REQUIRE(kernel.shutdown());
+        }
+    }
+}
+
 TEST_CASE("ProjectRuntime gates document membership and closes only its owned children", "[project-runtime][lifecycle]")
 {
     AppKernel kernel;

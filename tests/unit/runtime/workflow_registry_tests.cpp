@@ -60,6 +60,27 @@ public:
     }
 };
 
+class AdmissionValidator final : public ISchemaValidator {
+public:
+    Result<void> validate(const Schema& target, const Value& value) const override
+    {
+        if(beforeValidation) { auto callback = std::exchange(beforeValidation, {}); callback(); }
+        return RootKindValidator{}.validate(target, value);
+    }
+    mutable std::function<void()> beforeValidation;
+};
+
+class AdmissionTraceExporter final : public ITraceExporter {
+public:
+    Result<void> exportSpan(const TraceSpanRecord& span) override
+    {
+        if(span.name == name && beforeExport) { auto callback = std::exchange(beforeExport, {}); callback(); }
+        return Result<void>::success();
+    }
+    std::string name;
+    std::function<void()> beforeExport;
+};
+
 class NullLogService final : public ILogService {
 public:
     Result<void> write(const LogRecord&) override
@@ -191,6 +212,7 @@ public:
         lasercnc::platform::ExecutorWork work,
         lasercnc::platform::ExecutorCompletion completion) override
     {
+        if(beforeSubmit) { auto callback = std::exchange(beforeSubmit, {}); callback(); }
         if(stopped_) {
             return Result<void>::failure(makeError(
                 "Test.ExecutorStopped", ErrorCategory::Conflict, "Executor stopped"));
@@ -198,6 +220,8 @@ public:
         queue_.emplace_back(std::move(work), std::move(completion));
         return Result<void>::success();
     }
+
+    std::function<void()> beforeSubmit;
 
     Result<void> waitIdle() override
     {
@@ -400,13 +424,13 @@ WorkflowDefinition workflowDefinition(std::vector<WorkflowStep> steps)
         Value {Value::Object {}}};
 }
 
-void configureServices(AppKernel& kernel)
+void configureServices(AppKernel& kernel, std::shared_ptr<ISchemaValidator> validator = std::make_shared<RootKindValidator>())
 {
     REQUIRE(lasercnc::test::registerObjectType(kernel,
         lasercnc::test::valueObjectType("workflow.test.object")).hasValue());
     REQUIRE(kernel.executionServices()
                 .configure(
-                    std::make_shared<RootKindValidator>(),
+                    std::move(validator),
                     std::make_shared<NullLogService>())
                 .hasValue());
 }
@@ -427,11 +451,11 @@ WorkflowRequest workflowRequest(const char* id)
 }
 
 struct WorkflowRuntimeFixture final {
-    WorkflowRuntimeFixture()
+    explicit WorkflowRuntimeFixture(std::shared_ptr<ISchemaValidator> validator = std::make_shared<RootKindValidator>())
         : command(std::make_shared<StatefulCommandHandler>()),
           query(std::make_shared<EchoQueryHandler>())
     {
-        configureServices(kernel);
+        configureServices(kernel, std::move(validator));
         const auto request = workflowRequest("workflow.fixture");
         REQUIRE(kernel.addDocument(request.projectId, request.documentId).hasValue());
         REQUIRE(kernel.capabilities()
@@ -532,6 +556,67 @@ ScriptRequest scriptRequest(const char* id, const char* script)
 }
 
 } // namespace
+
+TEST_CASE("Kernel admission covers workflow and script instance acceptance and publication", "[workflow][script][kernel-admission]")
+{
+    for(const bool script : {false, true}) {
+        auto validator = std::make_shared<AdmissionValidator>();
+        WorkflowRuntimeFixture fixture(validator);
+        auto exporter = std::make_shared<AdmissionTraceExporter>();
+        exporter->name = script ? "script.advance" : "workflow.advance";
+        REQUIRE(fixture.kernel.traces().addExporter(exporter));
+        REQUIRE(lasercnc::test::registerScript(fixture.kernel,
+            scriptDefinition("script.admission", {scriptAssign("node.assign", "value", Value{"accepted"})})));
+        fixture.bootstrap(workflowDefinition({barrierStep("step.barrier", {})}));
+        std::optional<Result<void>> acceptingStop;
+        std::optional<Result<void>> publishingStop;
+        validator->beforeValidation = [&]() { acceptingStop.emplace(fixture.kernel.shutdown()); };
+        exporter->beforeExport = [&]() { publishingStop.emplace(fixture.kernel.shutdown()); };
+        const auto workflow = workflowRequest("workflow.admission");
+        const auto scripted = scriptRequest("script.admission", "script.admission");
+        if(script) {
+            REQUIRE(fixture.kernel.execution().executeScript(scripted));
+            REQUIRE(fixture.kernel.execution().advanceScript(scripted.executionId));
+        } else {
+            REQUIRE(fixture.kernel.execution().startWorkflow(workflow));
+            REQUIRE(fixture.kernel.execution().advanceWorkflow(workflow.workflowId));
+        }
+        for(const auto* result : {&acceptingStop, &publishingStop}) {
+            REQUIRE(result->has_value());
+            CHECK_FALSE(result->value().hasValue());
+            if(!result->value()) { CHECK(std::string(result->value().error().code.value()) == "Kernel.ActiveExecutions"); }
+        }
+        CHECK(fixture.kernel.state() == AppKernelState::Ready);
+        REQUIRE(fixture.kernel.shutdown());
+        CHECK_FALSE(fixture.kernel.execution().startWorkflow(workflow));
+        CHECK_FALSE(fixture.kernel.execution().advanceWorkflow(workflow.workflowId));
+        CHECK_FALSE(fixture.kernel.execution().cancelWorkflow(workflow.workflowId));
+        CHECK_FALSE(fixture.kernel.execution().executeScript(scripted));
+        CHECK_FALSE(fixture.kernel.execution().advanceScript(scripted.executionId));
+        CHECK_FALSE(fixture.kernel.execution().cancelScript(scripted.executionId));
+        if(script) { REQUIRE(fixture.kernel.execution().script(scripted.executionId)); }
+        else { REQUIRE(fixture.kernel.execution().workflow(workflow.workflowId)); }
+    }
+}
+
+TEST_CASE("Kernel admission hands asynchronous submission to the scheduler before release", "[workflow][task][kernel-admission]")
+{
+    WorkflowRuntimeFixture fixture;
+    auto& executor = fixture.enableAsync();
+    fixture.bootstrap(workflowDefinition({commandStep("step.async", "command.async")}));
+    std::optional<Result<void>> duringSubmit;
+    executor.beforeSubmit = [&]() { duringSubmit.emplace(fixture.kernel.shutdown()); };
+    auto request = workflowRequest("workflow.admission-task");
+    REQUIRE(fixture.kernel.execution().startWorkflow(request));
+    REQUIRE(fixture.kernel.execution().advanceWorkflow(request.workflowId));
+    REQUIRE(duringSubmit.has_value());
+    CHECK_FALSE(duringSubmit->hasValue());
+    CHECK(fixture.kernel.state() == AppKernelState::Ready);
+    REQUIRE(executor.queued() == 1U);
+    executor.runAll();
+    CHECK(executor.queued() == 0U);
+    REQUIRE(fixture.kernel.shutdown());
+}
 
 TEST_CASE("WorkflowRegistry validates stable acyclic definitions", "[workflow][registry]")
 {

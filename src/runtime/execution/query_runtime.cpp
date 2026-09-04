@@ -330,12 +330,18 @@ QueryRuntime::~QueryRuntime() = default;
 
 foundation::Result<QueryResponse> QueryRuntime::execute(const QueryRequest& request)
 {
+    return executeObserved(request, false);
+}
+
+foundation::Result<QueryResponse> QueryRuntime::executeObserved(
+    const QueryRequest& request, bool kernelRejected)
+{
     const auto startedAt = std::chrono::steady_clock::now();
     std::unique_ptr<observability::ITraceSpan> span;
     startQuerySpan(impl_->traces, request, span);
 
     auto observedResult = [&]() -> foundation::Result<QueryResponse> {
-        if(!impl_->accepting.load(std::memory_order_acquire)) {
+        if(kernelRejected || !impl_->accepting.load(std::memory_order_acquire)) {
             return foundation::Result<QueryResponse>::failure(queryError(
                 "Query.RuntimeNotReady",
                 foundation::ErrorCategory::Conflict,

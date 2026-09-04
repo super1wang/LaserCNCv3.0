@@ -27,6 +27,7 @@ class WorkflowRuntime;
 namespace lasercnc::kernel {
 
 class AppKernel;
+class ExecutionAdmission;
 
 struct ExecutionCatalog final {
     std::vector<ModuleSnapshot> modules;
@@ -79,6 +80,7 @@ private:
     friend class AppKernel;
 
     ExecutionGateway(
+        ExecutionAdmission& admission,
         const ModuleRuntime& modules,
         const runtime::CommandRegistry& commandRegistry,
         const runtime::QueryRegistry& queryRegistry,
@@ -92,6 +94,7 @@ private:
         runtime::WorkflowRuntime& workflows,
         runtime::ScriptRuntime& scripts) noexcept;
 
+    ExecutionAdmission& admission_;
     const ModuleRuntime& modules_;
     const runtime::CommandRegistry& commandRegistry_;
     const runtime::QueryRegistry& queryRegistry_;

@@ -906,13 +906,19 @@ CommandRuntime::~CommandRuntime() = default;
 
 foundation::Result<CommandResponse> CommandRuntime::execute(const CommandRequest& request)
 {
+    return executeObserved(request, false);
+}
+
+foundation::Result<CommandResponse> CommandRuntime::executeObserved(
+    const CommandRequest& request, bool kernelRejected)
+{
     const auto startedAt = std::chrono::steady_clock::now();
     std::optional<kernel::SpanId> activeSpanId;
     std::unique_ptr<observability::ITraceSpan> span;
     startCommandSpan(impl_->traces, request, activeSpanId, span);
 
     auto observedResult = [&]() -> foundation::Result<CommandResponse> {
-        if(!impl_->accepting.load(std::memory_order_acquire)) {
+        if(kernelRejected || !impl_->accepting.load(std::memory_order_acquire)) {
             return foundation::Result<CommandResponse>::failure(commandError(
                 "Command.RuntimeNotReady",
                 foundation::ErrorCategory::Conflict,

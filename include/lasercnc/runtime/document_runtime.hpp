@@ -19,6 +19,7 @@
 
 namespace lasercnc::kernel {
 class AppKernel;
+class ExecutionAdmission;
 }
 
 namespace lasercnc::persistence {
@@ -163,6 +164,7 @@ private:
     void start() noexcept;
     void stop() noexcept;
 
+    kernel::ExecutionAdmission* admission_{nullptr};
     state::DocumentStore& documents_;
     persistence::PersistenceService& persistence_;
     const state::ObjectTypeRegistry* objectTypes_;

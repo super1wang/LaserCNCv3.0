@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | C1a | ProjectRevision 恢复独立于 Open 文档集合；非零修订、全部 Detached/Removed、重启新文档提交、再次恢复；多项目与 Open/Detached 混合 | 本地检查点通过：Debug 286/286、专项 16/16、新增 2 项各 3 次、纯生产与架构通过 |
 | C1b | Journal 写入端拒绝过期修订，事务内一致性检查与 C5 独占权协同；失败不发布内存/History/Event，拒绝后仍可恢复 | 本地检查点通过：Debug 308/308、专项 14/14、新增 9 项与扩展故障矩阵各 10 次、纯生产/架构/文档通过；事务内修订及首笔 Catalog/Snapshot 归属检查已实现，见 [C1b 交付](../阶段交付/2026-09-04-ST1C1b-Journal写入修订一致性.md)；下一步 C2 |
-| C2a | Kernel 统一准入与 shutdown 线性化；所有 scope、Project/Document 生命周期、Task 提交、Workflow/Script start/advance 的检查后计数前窗口 | 未开始 |
+| C2a | Kernel 统一准入与 shutdown 线性化；所有 scope、Project/Document 生命周期、Task 提交、Workflow/Script start/advance 的检查后计数前窗口 | 本地检查点通过：Debug 314/314、专项 7/7、7 项各 10 次、纯生产/架构/文档通过；见 [C2a 交付](../阶段交付/2026-09-04-ST1C2a-整体准入与停止线性化.md)。下一步 C2b，不替代 C2c drain/析构和 ST1D |
 | C2b | Project-only 直接租约、长期活动桥接、legacy 恢复；关闭控制操作不被自身普通执行租约阻塞，open 不要求目标已经 Open；目录版本失效语义 | 未开始 |
 | C2c | Host 生命周期线程模型、析构/drain/超时依赖保留；明确执行器销毁保证，非协作任务不能因停止超时被当成已结束 | 未开始 |
 | C3 | DocumentId 与 Snapshot 存储键解耦；Unicode、路径/保留字符、长度边界、大小写、时钟回拨、进程重启唯一性 | 未开始 |

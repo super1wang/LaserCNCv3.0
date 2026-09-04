@@ -99,6 +99,29 @@ public:
     }
 };
 
+class ShutdownTraceExporter final : public ITraceExporter {
+public:
+    explicit ShutdownTraceExporter(AppKernel& kernel) : kernel_(kernel) {}
+    Result<void> exportSpan(const TraceSpanRecord&) override
+    {
+        if(!stopped.has_value()) { stopped.emplace(kernel_.shutdown()); }
+        return Result<void>::success();
+    }
+    std::optional<Result<void>> stopped;
+private:
+    AppKernel& kernel_;
+};
+
+class AdmissionStopModule final : public IModule {
+public:
+    explicit AdmissionStopModule(std::function<Result<void>(AppKernel&)> callback) : callback_(std::move(callback)) {}
+    const ModuleDescriptor& descriptor() const noexcept override { return descriptor_; }
+    Result<void> stop(AppKernel& kernel) override { return callback_(kernel); }
+private:
+    ModuleDescriptor descriptor_{validId<ModuleId>("kernel.admission.stop"), "Admission stop probe", {1U, 0U, 0U}};
+    std::function<Result<void>(AppKernel&)> callback_;
+};
+
 class FailingMetricsExporter final : public IMetricsExporter {
 public:
     Result<void> exportObservation(const MetricObservation&) override
@@ -981,6 +1004,115 @@ TEST_CASE("AppKernel refuses shutdown while a query execution is active", "[kern
     release.set_value();
     REQUIRE(running.get().hasValue());
     REQUIRE(fixture.kernel.shutdown().hasValue());
+}
+
+TEST_CASE("Kernel admission retains all query scopes through trace publication", "[kernel][runtime][kernel-admission]")
+{
+    for(const auto scope : {ExecutionScope::Global, ExecutionScope::Session, ExecutionScope::Project, ExecutionScope::Document}) {
+        RuntimeFixture fixture;
+        auto exporter = std::make_shared<ShutdownTraceExporter>(fixture.kernel);
+        REQUIRE(fixture.kernel.traces().addExporter(exporter));
+        auto handler = std::make_shared<ScopeQueryHandler>();
+        REQUIRE(lasercnc::test::registerQuery(fixture.kernel, queryDescriptor("kernel.scope.admission", scope), handler));
+        REQUIRE(fixture.kernel.bootstrap());
+        auto request = queryRequest(fixture.project, fixture.document, fixture.session, "unused");
+        request.query = validId<QueryName>("kernel.scope.admission");
+        if(scope != ExecutionScope::Document) { request.context.documentId.reset(); }
+        if(scope == ExecutionScope::Global || scope == ExecutionScope::Session) { request.context.projectId.reset(); }
+        REQUIRE(fixture.kernel.execution().executeQuery(request));
+        CHECK(handler->calls == 1U);
+        REQUIRE(exporter->stopped.has_value());
+        CHECK_FALSE(exporter->stopped->hasValue());
+        if(!exporter->stopped->hasValue()) { CHECK(std::string(exporter->stopped->error().code.value()) == "Kernel.ActiveExecutions"); }
+        CHECK(fixture.kernel.state() == AppKernelState::Ready);
+        REQUIRE(fixture.kernel.shutdown());
+    }
+}
+
+TEST_CASE("Kernel admission retains all command scopes through trace publication", "[kernel][runtime][kernel-admission]")
+{
+    for(const auto scope : {ExecutionScope::Global, ExecutionScope::Session, ExecutionScope::Project, ExecutionScope::Document}) {
+        RuntimeFixture fixture;
+        auto exporter = std::make_shared<ShutdownTraceExporter>(fixture.kernel);
+        REQUIRE(fixture.kernel.traces().addExporter(exporter));
+        auto handler = std::make_shared<ScopeCommandHandler>();
+        auto descriptor = commandDescriptor("kernel.scope.admission");
+        descriptor.sideEffect = SideEffectLevel::ReadOnly;
+        descriptor.idempotent = false;
+        descriptor.scope = scope;
+        REQUIRE(lasercnc::test::registerReadOnlyCommand(fixture.kernel, descriptor, handler));
+        REQUIRE(fixture.kernel.bootstrap());
+        auto request = commandRequest("request.admission", fixture.project, fixture.document, fixture.session,
+            "kernel.scope.admission", "unused");
+        if(scope != ExecutionScope::Document) { request.context.documentId.reset(); }
+        if(scope == ExecutionScope::Global || scope == ExecutionScope::Session) { request.context.projectId.reset(); }
+        REQUIRE(fixture.kernel.execution().executeCommand(request));
+        CHECK(handler->calls == 1U);
+        REQUIRE(exporter->stopped.has_value());
+        CHECK_FALSE(exporter->stopped->hasValue());
+        if(!exporter->stopped->hasValue()) { CHECK(std::string(exporter->stopped->error().code.value()) == "Kernel.ActiveExecutions"); }
+        CHECK(fixture.kernel.state() == AppKernelState::Ready);
+        REQUIRE(fixture.kernel.shutdown());
+    }
+}
+
+TEST_CASE("Kernel admission closes before module stop and rejects concurrent lifecycle calls", "[kernel][runtime][kernel-admission]")
+{
+    RuntimeFixture fixture;
+    auto handler = std::make_shared<ScopeQueryHandler>();
+    REQUIRE(lasercnc::test::registerQuery(fixture.kernel, queryDescriptor("kernel.scope.stop", ExecutionScope::Global), handler));
+    std::promise<void> entered;
+    auto enteredFuture = entered.get_future();
+    std::promise<void> release;
+    auto releaseFuture = release.get_future().share();
+    std::optional<Result<void>> reentered;
+    unsigned int stops = 0U;
+    REQUIRE(fixture.kernel.addModule(std::make_unique<AdmissionStopModule>([&](AppKernel& kernel) {
+        ++stops;
+        reentered.emplace(kernel.shutdown());
+        entered.set_value();
+        releaseFuture.wait();
+        return Result<void>::success();
+    })));
+    REQUIRE(fixture.kernel.bootstrap());
+    auto stopping = std::async(std::launch::async, [&]() { return fixture.kernel.shutdown(); });
+    // Always release the worker before REQUIRE, including a broken stop implementation.
+    // 中文翻译：包括停止实现出错在内，任何致命断言之前都必须释放工作线程。
+    const bool reached = enteredFuture.wait_for(std::chrono::seconds(10)) == std::future_status::ready;
+    bool secondDenied = false;
+    bool requestsDenied = false;
+    if(reached) {
+        auto second = fixture.kernel.shutdown();
+        secondDenied = !second && second.error().code.value() == "Kernel.LifecycleInProgress";
+        auto request = queryRequest(fixture.project, fixture.document, fixture.session, "unused");
+        request.query = validId<QueryName>("kernel.scope.stop");
+        request.context.projectId.reset();
+        request.context.documentId.reset();
+        auto rejected = fixture.kernel.execution().executeQuery(request);
+        requestsDenied = !rejected && rejected.error().code.value() == "Query.RuntimeNotReady"
+            && !fixture.kernel.projectRuntime().create(validId<ProjectId>("project.after-stop"))
+            && !fixture.kernel.documentRuntime().create(fixture.project, validId<DocumentId>("document.after-stop"))
+            && !fixture.kernel.documentRuntime().attach({fixture.project, validId<DocumentId>("document.attach-stop"), {}, {}})
+            && !fixture.kernel.documentRuntime().open(fixture.document)
+            && !fixture.kernel.documentRuntime().close(fixture.document)
+            && !fixture.kernel.documentRuntime().detach(fixture.document)
+            && !fixture.kernel.documentRuntime().remove(fixture.document)
+            && !fixture.kernel.projectRuntime().open(fixture.project)
+            && !fixture.kernel.projectRuntime().close(fixture.project);
+    }
+    release.set_value();
+    auto stopped = stopping.get();
+    REQUIRE(reached);
+    CHECK(secondDenied);
+    CHECK(requestsDenied);
+    REQUIRE(reentered.has_value());
+    CHECK_FALSE(reentered->hasValue());
+    if(!*reentered) { CHECK(std::string(reentered->error().code.value()) == "Kernel.LifecycleInProgress"); }
+    CHECK(handler->calls == 0U);
+    CHECK(stops == 1U);
+    REQUIRE(stopped);
+    CHECK(fixture.kernel.state() == AppKernelState::Stopped);
+    REQUIRE(fixture.kernel.shutdown());
 }
 
 TEST_CASE("DocumentRuntime blocks close while a document query is active",

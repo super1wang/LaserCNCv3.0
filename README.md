@@ -8,7 +8,9 @@ LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9 及 K10A–K10E 的�
 
 C5a/b 已完成持久化会话端口、SQLite/Windows 独占及强制初始化的本地检查点：C5b Debug 299/299、专项 56/56、新增 5 项各 10 次、纯生产及架构检查通过，见 [C5b 交付](docs/阶段交付/2026-09-04-ST1C5b-初始化独占与活动状态保护.md)。第二 Host 不再改写运行中 claim，隔离后仍保留所有权；C1b 已承接写入端修订检查。C2c 生命周期及 ST1D 最终签核仍未闭合，不宣称 Frozen。
 
-C1b 已实现 Journal 写事务内的修订、持久头和首笔文档归属准入：Debug 308/308、专项 14/14、新增 9 项与扩展故障矩阵各 10 次通过，见 [C1b 交付](docs/阶段交付/2026-09-04-ST1C1b-Journal写入修订一致性.md)。失败不发布状态、History、事件或成功回执；下一步 C2 全局准入、Project-only 活动和生命周期收口。
+C1b 已实现 Journal 写事务内的修订、持久头和首笔文档归属准入：Debug 308/308、专项 14/14、新增 9 项与扩展故障矩阵各 10 次通过，见 [C1b 交付](docs/阶段交付/2026-09-04-ST1C1b-Journal写入修订一致性.md)。失败不发布状态、History、事件或成功回执；C2 继续整体准入、Project-only 活动和生命周期收口。
+
+C2a 已实现完整执行与生命周期写入口的共享准入，以及 shutdown 空闲检查与关闭准入的原子协调；保留被拒绝 Command/Query 的 trace/metrics。Debug 314/314、专项 7/7、7 项各 10 次通过，见 [C2a 交付](docs/阶段交付/2026-09-04-ST1C2a-整体准入与停止线性化.md)。后续继续 C2b 项目活动与 C2c drain/析构，不以本节点代替整体冻结。
 
 - Phase 1：Foundation（`StrongId`、`Value`、`Result`、`Error`、`Schema`）
 - Phase 2：Application Composition（`AppKernel`、`ServiceRegistry`、`ModuleRuntime`）

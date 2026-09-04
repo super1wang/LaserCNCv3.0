@@ -1,4 +1,5 @@
 #include <lasercnc/kernel/execution_gateway.hpp>
+#include "../execution_admission.hpp"
 
 #include <lasercnc/runtime/command_registry.hpp>
 #include <lasercnc/runtime/command_runtime.hpp>
@@ -16,6 +17,7 @@
 namespace lasercnc::kernel {
 
 ExecutionGateway::ExecutionGateway(
+    ExecutionAdmission& admission,
     const ModuleRuntime& modules,
     const runtime::CommandRegistry& commandRegistry,
     const runtime::QueryRegistry& queryRegistry,
@@ -28,7 +30,8 @@ ExecutionGateway::ExecutionGateway(
     runtime::TaskRuntime& tasks,
     runtime::WorkflowRuntime& workflows,
     runtime::ScriptRuntime& scripts) noexcept
-    : modules_(modules),
+    : admission_(admission),
+      modules_(modules),
       commandRegistry_(commandRegistry),
       queryRegistry_(queryRegistry),
       taskRegistry_(taskRegistry),
@@ -46,30 +49,42 @@ ExecutionGateway::ExecutionGateway(
 foundation::Result<runtime::CommandResponse> ExecutionGateway::executeCommand(
     runtime::CommandRequest request)
 {
+    auto admitted = ExecutionAdmission::acquire(&admission_, "Command.RuntimeNotReady");
+    // Preserve rejected-request diagnostics without entering resolution or execution.
+    // 中文翻译：保留拒绝请求的观测，不允许进入解析、活动登记或执行路径。
+    if(!admitted) { return commands_.executeObserved(request, true); }
     return commands_.execute(std::move(request));
 }
 
 foundation::Result<runtime::QueryResponse> ExecutionGateway::executeQuery(
     runtime::QueryRequest request)
 {
+    auto admitted = ExecutionAdmission::acquire(&admission_, "Query.RuntimeNotReady");
+    if(!admitted) { return queries_.executeObserved(request, true); }
     return queries_.execute(std::move(request));
 }
 
 foundation::Result<runtime::WorkflowSnapshot> ExecutionGateway::startWorkflow(
     runtime::WorkflowRequest request)
 {
+    auto admitted = ExecutionAdmission::acquire(&admission_, "Workflow.RuntimeNotAccepting");
+    if(!admitted) { return foundation::Result<runtime::WorkflowSnapshot>::failure(std::move(admitted).error()); }
     return workflows_.startWorkflow(std::move(request));
 }
 
 foundation::Result<runtime::WorkflowSnapshot> ExecutionGateway::advanceWorkflow(
     const WorkflowId& workflowId)
 {
+    auto admitted = ExecutionAdmission::acquire(&admission_, "Workflow.RuntimeNotAccepting");
+    if(!admitted) { return foundation::Result<runtime::WorkflowSnapshot>::failure(std::move(admitted).error()); }
     return workflows_.advance(workflowId);
 }
 
 foundation::Result<runtime::WorkflowSnapshot> ExecutionGateway::cancelWorkflow(
     const WorkflowId& workflowId)
 {
+    auto admitted = ExecutionAdmission::acquire(&admission_, "Workflow.RuntimeNotAccepting");
+    if(!admitted) { return foundation::Result<runtime::WorkflowSnapshot>::failure(std::move(admitted).error()); }
     return workflows_.cancel(workflowId);
 }
 
@@ -82,18 +97,24 @@ foundation::Result<runtime::WorkflowSnapshot> ExecutionGateway::workflow(
 foundation::Result<runtime::ScriptSnapshot> ExecutionGateway::executeScript(
     runtime::ScriptRequest request)
 {
+    auto admitted = ExecutionAdmission::acquire(&admission_, "Script.RuntimeNotAccepting");
+    if(!admitted) { return foundation::Result<runtime::ScriptSnapshot>::failure(std::move(admitted).error()); }
     return scripts_.startScript(std::move(request));
 }
 
 foundation::Result<runtime::ScriptSnapshot> ExecutionGateway::advanceScript(
     const ScriptExecutionId& executionId)
 {
+    auto admitted = ExecutionAdmission::acquire(&admission_, "Script.RuntimeNotAccepting");
+    if(!admitted) { return foundation::Result<runtime::ScriptSnapshot>::failure(std::move(admitted).error()); }
     return scripts_.advance(executionId);
 }
 
 foundation::Result<runtime::ScriptSnapshot> ExecutionGateway::cancelScript(
     const ScriptExecutionId& executionId)
 {
+    auto admitted = ExecutionAdmission::acquire(&admission_, "Script.RuntimeNotAccepting");
+    if(!admitted) { return foundation::Result<runtime::ScriptSnapshot>::failure(std::move(admitted).error()); }
     return scripts_.cancel(executionId);
 }
 

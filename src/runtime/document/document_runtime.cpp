@@ -1,4 +1,5 @@
 #include <lasercnc/runtime/document_runtime.hpp>
+#include "../../kernel/execution_admission.hpp"
 
 #include <lasercnc/foundation/error.hpp>
 #include <lasercnc/persistence/persistence_service.hpp>
@@ -101,6 +102,8 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::create(
     kernel::ProjectId projectId,
     kernel::DocumentId documentId)
 {
+    auto admitted = kernel::ExecutionAdmission::acquire(admission_, "Document.RuntimeNotAccepting");
+    if(!admitted) { return foundation::Result<DocumentLifecycleSnapshot>::failure(std::move(admitted).error()); }
     if(!accepting()) {
         return foundation::Result<DocumentLifecycleSnapshot>::failure(
             documentRuntimeError(
@@ -186,6 +189,8 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::create(
 foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::attach(
     state::DocumentImage image)
 {
+    auto kernelAdmission = kernel::ExecutionAdmission::acquire(admission_, "Document.RuntimeNotAccepting");
+    if(!kernelAdmission) { return foundation::Result<DocumentLifecycleSnapshot>::failure(std::move(kernelAdmission).error()); }
     if(!accepting()) {
         return foundation::Result<DocumentLifecycleSnapshot>::failure(
             documentRuntimeError(
@@ -284,6 +289,8 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::attach(
 foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::open(
     const kernel::DocumentId& documentId)
 {
+    auto admitted = kernel::ExecutionAdmission::acquire(admission_, "Document.RuntimeNotAccepting");
+    if(!admitted) { return foundation::Result<DocumentLifecycleSnapshot>::failure(std::move(admitted).error()); }
     if(!accepting()) {
         return foundation::Result<DocumentLifecycleSnapshot>::failure(
             documentRuntimeError(
@@ -377,6 +384,8 @@ foundation::Result<state::Document> DocumentRuntime::snapshot(
 foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::close(
     const kernel::DocumentId& documentId)
 {
+    auto admitted = kernel::ExecutionAdmission::acquire(admission_, "Document.RuntimeNotAccepting");
+    if(!admitted) { return foundation::Result<DocumentLifecycleSnapshot>::failure(std::move(admitted).error()); }
     auto projectActivity = acquireProject(documentId);
     if(!projectActivity) {
         return foundation::Result<DocumentLifecycleSnapshot>::failure(std::move(projectActivity).error());
@@ -387,6 +396,8 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::close(
 foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::detach(
     const kernel::DocumentId& documentId)
 {
+    auto admitted = kernel::ExecutionAdmission::acquire(admission_, "Document.RuntimeNotAccepting");
+    if(!admitted) { return foundation::Result<DocumentLifecycleSnapshot>::failure(std::move(admitted).error()); }
     if(persistence_.configured()) {
         return foundation::Result<DocumentLifecycleSnapshot>::failure(
             documentRuntimeError(
@@ -611,6 +622,8 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::detachImpl(
 foundation::Result<void> DocumentRuntime::remove(
     const kernel::DocumentId& documentId)
 {
+    auto admitted = kernel::ExecutionAdmission::acquire(admission_, "Document.RuntimeNotAccepting");
+    if(!admitted) { return foundation::Result<void>::failure(std::move(admitted).error()); }
     auto projectActivity = acquireProject(documentId);
     if(!projectActivity) { return foundation::Result<void>::failure(std::move(projectActivity).error()); }
     if(!accepting()) {

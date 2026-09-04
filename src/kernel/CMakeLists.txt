@@ -4,6 +4,7 @@ add_library(LaserCNC::Kernel ALIAS lasercnc_kernel)
 target_sources(
     lasercnc_kernel
     PRIVATE
+        execution_admission.hpp
         app_kernel/app_kernel.cpp
         execution_gateway/execution_gateway.cpp
         module_runtime/module.cpp

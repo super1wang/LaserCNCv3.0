@@ -8,6 +8,7 @@
 
 namespace lasercnc::kernel {
 class AppKernel;
+class ExecutionGateway;
 }
 
 namespace lasercnc::messaging {
@@ -69,11 +70,14 @@ public:
 
 private:
     friend class kernel::AppKernel;
+    friend class kernel::ExecutionGateway;
 
     class Impl;
 
     void start() noexcept;
     void stop() noexcept;
+    [[nodiscard]] foundation::Result<CommandResponse> executeObserved(
+        const CommandRequest& request, bool kernelRejected);
 
     std::unique_ptr<Impl> impl_;
 };
