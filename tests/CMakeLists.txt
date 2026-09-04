@@ -159,6 +159,7 @@ add_executable(
     unit/runtime/project_task_admission_tests.cpp
     unit/runtime/project_runtime_tests.cpp
     unit/runtime/lifecycle_catalog_tests.cpp
+    unit/runtime/kernel_shutdown_tests.cpp
     unit/runtime/history_runtime_tests.cpp
     unit/runtime/asset_state_tests.cpp
     unit/runtime/kernel_concurrency_tests.cpp

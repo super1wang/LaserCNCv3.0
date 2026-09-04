@@ -20,6 +20,9 @@ public:
         ExecutorWork work,
         ExecutorCompletion completion) = 0;
     [[nodiscard]] virtual foundation::Result<void> waitIdle() = 0;
+    // Success acknowledges admission closure and completion of retained work/callbacks.
+    // Failure or exception is not an acknowledgement; a later shutdown may retry.
+    // 中文翻译：成功确认入口关闭且已保留工作/回调全部完成；失败或异常不代表确认，后续可重试。
     [[nodiscard]] virtual foundation::Result<void> shutdown() = 0;
     [[nodiscard]] virtual std::size_t concurrency() const noexcept = 0;
 };

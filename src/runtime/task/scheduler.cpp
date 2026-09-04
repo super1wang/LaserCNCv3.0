@@ -3,6 +3,8 @@
 #include <lasercnc/foundation/error.hpp>
 #include <lasercnc/persistence/persistence_service.hpp>
 
+#include "../../kernel/execution_admission.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -167,6 +169,9 @@ struct Scheduler::Core final {
     bool started{false};
     bool accepting{false};
     bool dispatching{false};
+    bool stopRequested{false};
+    bool executorStopped{false};
+    std::atomic_flag shutdownCall = ATOMIC_FLAG_INIT;
 };
 
 Scheduler::Scheduler(
@@ -191,7 +196,7 @@ Scheduler::~Scheduler() = default;
 foundation::Result<void> Scheduler::configureExecutor(platform::ITaskExecutor& executor)
 {
     std::lock_guard lock(core_->mutex);
-    if(core_->started || core_->configured) {
+    if(core_->started || core_->configured || core_->stopRequested) {
         return foundation::Result<void>::failure(schedulerError(
             "Task.ExecutorAlreadyConfigured",
             foundation::ErrorCategory::Conflict,
@@ -218,7 +223,7 @@ foundation::Result<void> Scheduler::start()
                 foundation::ErrorCategory::Conflict,
                 "The scheduler requires an executor before start"));
         }
-        if(core_->started) {
+        if(core_->started || core_->stopRequested) {
             return foundation::Result<void>::failure(schedulerError(
                 "Task.SchedulerAlreadyStarted",
                 foundation::ErrorCategory::Conflict,
@@ -455,13 +460,24 @@ foundation::Result<void> Scheduler::shutdown(std::chrono::milliseconds timeout)
             foundation::ErrorCategory::Validation,
             "Scheduler shutdown timeout cannot be negative"));
     }
-    const auto end = std::chrono::steady_clock::now() + timeout;
+    kernel::LifecycleCall shutdownCall(core_->shutdownCall);
+    if(!shutdownCall.acquired()) {
+        return foundation::Result<void>::failure(schedulerError(
+            "Task.ShutdownInProgress", foundation::ErrorCategory::Conflict,
+            "Another scheduler shutdown call is in progress"));
+    }
+    const auto now = std::chrono::steady_clock::now();
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::time_point::max() - now);
+    const auto end = timeout >= remaining ? std::chrono::steady_clock::time_point::max()
+                                          : now + timeout;
     std::vector<TaskSnapshot> terminal;
     {
         std::lock_guard lock(core_->mutex);
-        if(!core_->started) {
+        if(core_->executorStopped) {
             return foundation::Result<void>::success();
         }
+        core_->stopRequested = true;
         core_->accepting = false;
         for(auto& [taskId, record] : core_->records) {
             if(isTerminal(record.state)) {
@@ -488,16 +504,35 @@ foundation::Result<void> Scheduler::shutdown(std::chrono::milliseconds timeout)
     }
 
     std::unique_lock lock(core_->mutex);
-    if(!core_->changed.wait_until(lock, end, [core = core_]() { return core->runningCount == 0U; })) {
+    if(!core_->changed.wait_until(lock, end, [core = core_]() {
+        return core->runningCount == 0U && !core->dispatching
+            && std::all_of(core->records.begin(), core->records.end(), [](const auto& entry) {
+                return isTerminal(entry.second.state) && entry.second.completionReady;
+            });
+    })) {
         return foundation::Result<void>::failure(schedulerError(
             "Task.ShutdownTimeout",
             foundation::ErrorCategory::Timeout,
             "Running tasks did not cooperatively stop before the shutdown deadline"));
     }
-    core_->started = false;
     auto* executor = core_->executor;
     lock.unlock();
-    return executor->shutdown();
+    // A stop request is not a drain acknowledgement; failures must remain retryable.
+    // 中文翻译：停止请求不等于排空确认，失败后必须仍能重试执行器停止。
+    try {
+        if(executor != nullptr) {
+            auto stopped = executor->shutdown();
+            if(!stopped) { return stopped; }
+        }
+    } catch(...) {
+        return foundation::Result<void>::failure(schedulerError(
+            "Task.ExecutorShutdownFailed", foundation::ErrorCategory::Infrastructure,
+            "The executor raised an exception without acknowledging shutdown"));
+    }
+    lock.lock();
+    core_->executorStopped = true;
+    core_->started = false;
+    return foundation::Result<void>::success();
 }
 
 std::size_t Scheduler::activeTaskCount() const
@@ -549,7 +584,7 @@ void Scheduler::pump(const std::shared_ptr<Core>& core)
 {
     {
         std::lock_guard lock(core->mutex);
-        if(!core->started || core->dispatching) {
+        if(!core->started || core->stopRequested || core->dispatching) {
             return;
         }
         core->dispatching = true;

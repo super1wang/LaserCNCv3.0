@@ -44,6 +44,9 @@ public:
     [[nodiscard]] foundation::Result<TaskSnapshot> wait(
         const kernel::TaskId& taskId,
         std::chrono::milliseconds timeout) const;
+    // Seals admission permanently; success requires terminal publication and executor acknowledgement.
+    // Timeout bounds the scheduler drain wait, not arbitrary executor/callback implementations.
+    // 中文翻译：永久封闭准入；成功须终态发布及执行器确认。超时约束调度器排空等待，不强制中断外部实现。
     [[nodiscard]] foundation::Result<void> shutdown(std::chrono::milliseconds timeout);
     // Includes terminal tasks until observation and persistence completion are published.
     // 中文翻译：终态任务在观察和持久化完成发布之前仍计入活动数量。

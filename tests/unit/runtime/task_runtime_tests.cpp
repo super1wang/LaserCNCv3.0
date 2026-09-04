@@ -541,6 +541,47 @@ TEST_CASE("Scheduler bounded shutdown reports non-cooperative work", "[runtime][
     CHECK(fixture.scheduler.shutdown(2s).hasValue());
 }
 
+TEST_CASE("Shutdown acknowledgement waits for terminal observation publication", "[kernel-shutdown][task]")
+{
+    class BlockingExporter final : public lasercnc::observability::ITraceExporter {
+    public:
+        std::promise<void> entered;
+        std::promise<void> released;
+        std::shared_future<void> release{released.get_future().share()};
+        std::atomic_bool expired{false};
+        Result<void> exportSpan(const lasercnc::observability::TraceSpanRecord&) override
+        {
+            entered.set_value();
+            expired.store(release.wait_for(5s) != std::future_status::ready);
+            return Result<void>::success();
+        }
+    };
+    RuntimeFixture fixture(1U);
+    auto exporter = std::make_shared<BlockingExporter>();
+    auto entered = exporter->entered.get_future();
+    REQUIRE(fixture.traces.addExporter(exporter));
+    REQUIRE(fixture.registry.registerHandler(descriptor("task.terminal-drain"),
+        std::make_shared<LambdaHandler>([](const TaskRequest&, const TaskContext&) {
+            return Result<Value>::success(Value{});
+        })));
+    fixture.start();
+    const auto task = request("terminal-drain", "task.terminal-drain");
+    REQUIRE(fixture.runtime.submit(task));
+    const auto seen = entered.wait_for(5s);
+    fixture.runtime.stop();
+    const auto active = fixture.scheduler.activeTaskCount();
+    auto stopped = fixture.scheduler.shutdown(5ms);
+    exporter->released.set_value();
+    REQUIRE(seen == std::future_status::ready);
+    CHECK(active == 1U);
+    CHECK_FALSE(stopped);
+    if(!stopped) { CHECK(std::string(stopped.error().code.value()) == "Task.ShutdownTimeout"); }
+    REQUIRE(fixture.scheduler.shutdown(2s));
+    CHECK_FALSE(exporter->expired.load());
+    CHECK(fixture.scheduler.activeTaskCount() == 0U);
+    CHECK(fixture.runtime.wait(task.taskId, 0ms));
+}
+
 TEST_CASE("AppKernel owns freezes and stops the task stack", "[kernel][runtime][task]")
 {
     lasercnc::kernel::AppKernel kernel;

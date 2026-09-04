@@ -654,6 +654,11 @@ foundation::Result<void> AppKernel::bootstrap()
 
 foundation::Result<void> AppKernel::shutdown(std::chrono::milliseconds taskTimeout)
 {
+    if(taskTimeout < std::chrono::milliseconds::zero()) {
+        return foundation::Result<void>::failure(foundation::makeError(
+            "Task.InvalidShutdownTimeout", foundation::ErrorCategory::Validation,
+            "Scheduler shutdown timeout cannot be negative"));
+    }
     LifecycleCall lifecycle(lifecycleCall_);
     if(!lifecycle.acquired()) {
         return foundation::Result<void>::failure(foundation::makeError(
@@ -704,7 +709,6 @@ foundation::Result<void> AppKernel::shutdown(std::chrono::milliseconds taskTimeo
             "Kernel.ActiveExecutions", foundation::ErrorCategory::Conflict,
             "The application kernel cannot stop while admitted public calls are active"));
     }
-    const bool wasConfiguring = state_ == AppKernelState::Configuring;
     state_ = AppKernelState::Stopping;
     projectRuntime_.stop();
     documentRuntime_.stop();
@@ -714,8 +718,7 @@ foundation::Result<void> AppKernel::shutdown(std::chrono::milliseconds taskTimeo
     queries_.stop();
     tasks_.stop();
     if(taskExecutor_ != nullptr) {
-        auto tasksStopped = wasConfiguring ? taskExecutor_->shutdown()
-                                           : scheduler_.shutdown(taskTimeout);
+        auto tasksStopped = scheduler_.shutdown(taskTimeout);
         if(!tasksStopped) {
             return tasksStopped;
         }
