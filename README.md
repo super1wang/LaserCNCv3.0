@@ -22,6 +22,8 @@ C2b2c 已形成受治理固定生命周期命令及创建身份/墓碑保护的�
 
 C2b2d 本地检查点通过：历史 Task/Effect 项目根已接入认证、一次性迁移与后续缺根拒绝；最终 Debug 347/347、专项 8/8、新增 8 项各 10 次和纯生产/架构通过，见 [C2b2d 交付](docs/阶段交付/2026-09-04-ST1C2b2d-历史执行项目根认证.md)。以上为按节点保留的历史进展，当前下一步为 C2b3 目录版本与失效，再推进 C2c 和后续冻结节点；仍仅覆盖内核，整体未冻结。
 
+C2b3 本地检查点通过：Project/Document 原子目录快照及 epoch/作用域/修订失效已实现，最终 Debug 360/360、专项 13/13、13 项各 10 次和纯生产/架构通过，见 [C2b3 交付](docs/阶段交付/2026-09-04-ST1C2b3-目录版本与失效.md)。其中包含同库三进程重启，目录令牌不代表权限、活动租约或业务修订。当前下一步 C2c，C3/C4/C6–C8 及 ST1D 仍完整保留，整体未冻结。
+
 - Phase 1：Foundation（`StrongId`、`Value`、`Result`、`Error`、`Schema`）
 - Phase 2：Application Composition（`AppKernel`、`ServiceRegistry`、`ModuleRuntime`）
 - Phase 3：Infrastructure Adapters（日志、JSON、TOML、SQLite、线程池）

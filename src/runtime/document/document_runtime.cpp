@@ -1,4 +1,5 @@
 #include <lasercnc/runtime/document_runtime.hpp>
+#include "../catalog/catalog_clock.hpp"
 #include "../../kernel/execution_admission.hpp"
 
 #include <lasercnc/foundation/error.hpp>
@@ -93,10 +94,13 @@ DocumentRuntime::DocumentRuntime(
     state::DocumentStore& documents,
     persistence::PersistenceService& persistence,
     const state::ObjectTypeRegistry* objectTypes,
-    const platform::IAssetStore* assetStore) noexcept
-    : documents_(documents), persistence_(persistence), objectTypes_(objectTypes), assetStore_(assetStore)
+    const platform::IAssetStore* assetStore)
+    : documents_(documents), persistence_(persistence), objectTypes_(objectTypes), assetStore_(assetStore),
+      catalog_(std::make_unique<detail::CatalogClock>())
 {
 }
+
+DocumentRuntime::~DocumentRuntime() = default;
 
 foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::create(
     kernel::ProjectId projectId,
@@ -134,6 +138,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::create(
                     "Creating a document requires an unused runtime identity",
                     documentId));
         }
+        catalog_->touch(projectId);
         entries_.insert_or_assign(
             documentId,
             Entry {projectId, DocumentLifecycleState::Opening, {}, std::nullopt});
@@ -144,6 +149,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::create(
         auto catalog = persistence_.documentCatalog();
         if(!catalog) {
             std::lock_guard lock(mutex_);
+            catalog_->touch(projectId);
             entries_.erase(documentId);
             return foundation::Result<DocumentLifecycleSnapshot>::failure(std::move(catalog).error());
         }
@@ -151,6 +157,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::create(
             [&](const auto& record) { return record.documentId == documentId; });
         if(existing != catalog.value().end()) {
             std::lock_guard lock(mutex_);
+            catalog_->touch(projectId);
             entries_.erase(documentId);
             return foundation::Result<DocumentLifecycleSnapshot>::failure(documentRuntimeError(
                 "Document.IdentityAlreadyExists", foundation::ErrorCategory::Conflict,
@@ -163,6 +170,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::create(
         if(!persisted) {
             std::lock_guard lock(mutex_);
             auto& entry = entries_.at(documentId);
+            catalog_->touch(entry.projectId);
             entry.state = DocumentLifecycleState::Failed;
             entry.error = persisted.error();
             return foundation::Result<DocumentLifecycleSnapshot>::failure(
@@ -173,6 +181,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::create(
     if(!added) {
         std::lock_guard lock(mutex_);
         auto& entry = entries_.at(documentId);
+        catalog_->touch(entry.projectId);
         entry.state = DocumentLifecycleState::Failed;
         entry.error = added.error();
         return foundation::Result<DocumentLifecycleSnapshot>::failure(
@@ -186,6 +195,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::create(
         if(!persisted) {
             std::lock_guard lock(mutex_);
             auto& entry = entries_.at(documentId);
+            catalog_->touch(entry.projectId);
             entry.state = DocumentLifecycleState::Failed;
             entry.error = persisted.error();
             return foundation::Result<DocumentLifecycleSnapshot>::failure(
@@ -194,6 +204,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::create(
     }
     std::lock_guard lock(mutex_);
     auto& entry = entries_.at(documentId);
+    catalog_->touch(entry.projectId);
     entry.state = DocumentLifecycleState::Open;
     entry.error.reset();
     return foundation::Result<DocumentLifecycleSnapshot>::success(
@@ -250,6 +261,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::attach(
                     "The document identity is already bound to another project",
                     documentId));
         }
+        catalog_->touch(projectId);
         entries_.insert_or_assign(
             documentId,
             Entry {projectId, DocumentLifecycleState::Opening, {}, std::nullopt});
@@ -262,6 +274,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::attach(
         if(!persisted) {
             std::lock_guard lock(mutex_);
             auto& entry = entries_.at(documentId);
+            catalog_->touch(entry.projectId);
             entry.state = DocumentLifecycleState::Failed;
             entry.error = persisted.error();
             return foundation::Result<DocumentLifecycleSnapshot>::failure(
@@ -273,6 +286,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::attach(
     if(!restored) {
         std::lock_guard lock(mutex_);
         auto& entry = entries_.at(documentId);
+        catalog_->touch(entry.projectId);
         entry.state = DocumentLifecycleState::Failed;
         entry.error = restored.error();
         return foundation::Result<DocumentLifecycleSnapshot>::failure(
@@ -286,6 +300,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::attach(
         if(!persisted) {
             std::lock_guard lock(mutex_);
             auto& entry = entries_.at(documentId);
+            catalog_->touch(entry.projectId);
             entry.state = DocumentLifecycleState::Failed;
             entry.error = persisted.error();
             return foundation::Result<DocumentLifecycleSnapshot>::failure(
@@ -294,6 +309,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::attach(
     }
     std::lock_guard lock(mutex_);
     auto& entry = entries_.at(documentId);
+    catalog_->touch(entry.projectId);
     entry.state = DocumentLifecycleState::Open;
     entry.error.reset();
     return foundation::Result<DocumentLifecycleSnapshot>::success(
@@ -487,6 +503,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::detachImpl(
                     {{"activeOperationCount",
                       foundation::Value {std::to_string(activities)}}}));
         }
+        catalog_->touch(found->second.projectId);
         found->second.state = DocumentLifecycleState::Closing;
         found->second.error.reset();
         blockers = blockers_;
@@ -509,6 +526,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::detachImpl(
             {{"reason", foundation::Value {exception.what()}}});
         std::lock_guard lock(mutex_);
         auto& entry = entries_.at(documentId);
+        catalog_->touch(entry.projectId);
         entry.state = DocumentLifecycleState::Failed;
         entry.error = error;
         return foundation::Result<DocumentLifecycleSnapshot>::failure(std::move(error));
@@ -520,6 +538,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::detachImpl(
             documentId);
         std::lock_guard lock(mutex_);
         auto& entry = entries_.at(documentId);
+        catalog_->touch(entry.projectId);
         entry.state = DocumentLifecycleState::Failed;
         entry.error = error;
         return foundation::Result<DocumentLifecycleSnapshot>::failure(std::move(error));
@@ -529,6 +548,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::detachImpl(
     if(blockerCount != 0U) {
         std::lock_guard lock(mutex_);
         auto& entry = entries_.at(documentId);
+        catalog_->touch(entry.projectId);
         entry.state = DocumentLifecycleState::Open;
         return foundation::Result<DocumentLifecycleSnapshot>::failure(
             documentRuntimeError(
@@ -552,6 +572,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::detachImpl(
         if(!persisted) {
             std::lock_guard lock(mutex_);
             auto& entry = entries_.at(documentId);
+            catalog_->touch(entry.projectId);
             entry.state = DocumentLifecycleState::Failed;
             entry.error = persisted.error();
             return foundation::Result<DocumentLifecycleSnapshot>::failure(std::move(persisted).error());
@@ -560,6 +581,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::detachImpl(
         if(!document) {
             std::lock_guard lock(mutex_);
             auto& entry = entries_.at(documentId);
+            catalog_->touch(entry.projectId);
             entry.state = DocumentLifecycleState::Failed;
             entry.error = document.error();
             return foundation::Result<DocumentLifecycleSnapshot>::failure(
@@ -582,6 +604,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::detachImpl(
                 persistence::DocumentPersistenceState::Failed));
             std::lock_guard lock(mutex_);
             auto& entry = entries_.at(documentId);
+            catalog_->touch(entry.projectId);
             entry.state = DocumentLifecycleState::Failed;
             entry.error = captured.error();
             return foundation::Result<DocumentLifecycleSnapshot>::failure(
@@ -594,6 +617,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::detachImpl(
         if(!persistedDetached) {
             std::lock_guard lock(mutex_);
             auto& entry = entries_.at(documentId);
+            catalog_->touch(entry.projectId);
             entry.state = DocumentLifecycleState::Failed;
             entry.error = persistedDetached.error();
             return foundation::Result<DocumentLifecycleSnapshot>::failure(
@@ -611,11 +635,13 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::detachImpl(
                 documentId,
                 persistence::DocumentPersistenceState::Failed));
         }
+        catalog_->touch(entry.projectId);
         entry.state = DocumentLifecycleState::Failed;
         entry.error = detached.error();
         return foundation::Result<DocumentLifecycleSnapshot>::failure(
             std::move(detached).error());
     }
+    catalog_->touch(entry.projectId);
     entry.state = DocumentLifecycleState::Detached;
     entry.error.reset();
     return foundation::Result<DocumentLifecycleSnapshot>::success(
@@ -671,6 +697,7 @@ foundation::Result<void> DocumentRuntime::removeImpl(
             return removed;
         }
     }
+    catalog_->touch(found->second.projectId);
     entries_.erase(found);
     return foundation::Result<void>::success();
 }
@@ -703,6 +730,20 @@ std::vector<DocumentLifecycleSnapshot> DocumentRuntime::list() const
     return result;
 }
 
+foundation::Result<DocumentCatalogSnapshot> DocumentRuntime::catalog(std::optional<kernel::ProjectId> projectId) const
+{
+    std::lock_guard lock(mutex_);
+    auto version = catalog_->version(projectId);
+    if(!version) { return foundation::Result<DocumentCatalogSnapshot>::failure(std::move(version).error()); }
+    DocumentCatalogSnapshot result{std::move(version).value(), {}};
+    for(const auto& [id, entry] : entries_) {
+        if(!projectId || entry.projectId == *projectId) {
+            result.entries.push_back({entry.projectId, id, entry.state, entry.error});
+        }
+    }
+    return foundation::Result<DocumentCatalogSnapshot>::success(std::move(result));
+}
+
 bool DocumentRuntime::accepting() const noexcept
 {
     return accepting_.load(std::memory_order_acquire);
@@ -725,6 +766,7 @@ foundation::Result<void> DocumentRuntime::configureDocument(
                 "The document lifecycle identity is already configured",
                 documentId));
         }
+        catalog_->touch(projectId);
         entries_.emplace(
             documentId,
             Entry {projectId, DocumentLifecycleState::Opening, {}, std::nullopt});
@@ -733,10 +775,12 @@ foundation::Result<void> DocumentRuntime::configureDocument(
     std::lock_guard lock(mutex_);
     auto& entry = entries_.at(documentId);
     if(!added) {
+        catalog_->touch(entry.projectId);
         entry.state = DocumentLifecycleState::Failed;
         entry.error = added.error();
         return added;
     }
+    catalog_->touch(entry.projectId);
     entry.state = DocumentLifecycleState::Open;
     entry.error.reset();
     return foundation::Result<void>::success();
@@ -760,6 +804,7 @@ foundation::Result<void> DocumentRuntime::adoptRecovered(
             image.documentId,
             Entry {image.projectId, DocumentLifecycleState::Open, {}, std::nullopt});
     }
+    for(const auto& image : images) { catalog_->touch(image.projectId); }
     entries_.swap(next);
     return foundation::Result<void>::success();
 }
@@ -828,6 +873,9 @@ foundation::Result<void> DocumentRuntime::adoptCatalog(
         next.insert_or_assign(
             record.documentId,
             Entry {record.projectId, state, {}, std::move(error)});
+    }
+    for(const auto& record : records) {
+        if(record.state != persistence::DocumentPersistenceState::Removed) { catalog_->touch(record.projectId); }
     }
     entries_.swap(next);
     return foundation::Result<void>::success();

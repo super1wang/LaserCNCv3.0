@@ -240,6 +240,51 @@ TEST_CASE("Project only task acceptance rollback and terminal persistence retain
     }
 }
 
+TEST_CASE("Lifecycle catalog long task close rollback invalidates observable transitional states", "[lifecycle-catalog][task]")
+{
+    using namespace lasercnc::infrastructure;
+    using namespace lasercnc::test;
+    for(bool documentScope : {false, true}) {
+        AppKernel kernel;
+        REQUIRE(kernel.executionServices().configure(std::make_shared<JsonconsAdapter>(), std::make_shared<NullLogService>()));
+        auto owned = std::make_unique<ManualExecutor>();
+        auto& executor = *owned;
+        REQUIRE(kernel.configureTaskExecutor(std::move(owned)));
+        REQUIRE(registerTask(kernel, taskDescriptor("task.workflow.echo"), std::make_shared<EchoTaskHandler>()));
+        const auto session = validId<SessionId>("session.catalog-task");
+        const auto project = validId<ProjectId>("project.catalog-task");
+        const auto document = validId<DocumentId>("document.catalog-task");
+        REQUIRE(kernel.capabilities().replace(session, std::array{validId<CapabilityId>("document.write")}));
+        if(documentScope) { REQUIRE(kernel.addDocument(project, document)); }
+        else { REQUIRE(kernel.addProject(project)); }
+        auto submission = asyncCommandDescriptor("command.catalog-task");
+        submission.scope = documentScope ? ExecutionScope::Document : ExecutionScope::Project;
+        REQUIRE(registerAsyncCommand(kernel, submission, std::make_shared<AsyncPlanHandler>()));
+        REQUIRE(kernel.bootstrap());
+        auto request = CommandRequest{validId<RequestId>("request.catalog-task"),
+            {session, project, documentScope ? std::optional<DocumentId>{document} : std::nullopt},
+            submission.name, submission.version, Value{Value::Object{}}, std::nullopt,
+            validId<CorrelationId>("correlation.catalog-task"), validId<TraceId>("trace.catalog-task")};
+        REQUIRE(kernel.execution().executeCommand(request));
+        const auto pv = kernel.projectRuntime().catalog(project).value().version;
+        const auto dv = kernel.documentRuntime().catalog(project).value().version;
+        CHECK_FALSE(kernel.projectRuntime().close(project));
+        const auto current = kernel.projectRuntime().catalog(project).value();
+        CHECK(current.version != pv);
+        CHECK(current.entries.front().state == ProjectLifecycleState::Open);
+        CHECK(kernel.documentRuntime().catalog(project).value().version == dv);
+        if(documentScope) {
+            CHECK_FALSE(kernel.documentRuntime().close(document));
+            const auto child = kernel.documentRuntime().catalog(project).value();
+            CHECK(child.version != dv);
+            CHECK(child.entries.front().state == DocumentLifecycleState::Open);
+        }
+        executor.runAll();
+        REQUIRE(kernel.projectRuntime().close(project));
+        REQUIRE(kernel.shutdown());
+    }
+}
+
 TEST_CASE("Lifecycle commands cannot close a project while its long task is pending or publishing", "[task][project-admission][lifecycle-control]")
 {
     using namespace lasercnc::infrastructure;

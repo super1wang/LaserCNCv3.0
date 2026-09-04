@@ -7,6 +7,7 @@ target_sources(
         history/history_runtime.cpp
         document/document_runtime.cpp
         project/project_runtime.cpp
+        catalog/catalog_clock.cpp
         execution/capability_service.cpp
         execution/execution_services.cpp
         execution/execution_contract.cpp
@@ -55,6 +56,7 @@ target_sources(
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/history_runtime.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/document_runtime.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/project_runtime.hpp"
+            "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/lifecycle_catalog.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/capability_service.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/execution_services.hpp"
             "${PROJECT_SOURCE_DIR}/include/lasercnc/runtime/execution_contract.hpp"

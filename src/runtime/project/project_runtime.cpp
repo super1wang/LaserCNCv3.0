@@ -1,4 +1,5 @@
 #include <lasercnc/runtime/project_runtime.hpp>
+#include "../catalog/catalog_clock.hpp"
 #include "../../kernel/execution_admission.hpp"
 
 #include <lasercnc/persistence/persistence_service.hpp>
@@ -41,8 +42,9 @@ const char* projectLifecycleStateName(ProjectLifecycleState state) noexcept
     return "unknown";
 }
 
-ProjectRuntime::ProjectRuntime(persistence::PersistenceService& persistence) noexcept
-    : persistence_(persistence) {}
+ProjectRuntime::ProjectRuntime(persistence::PersistenceService& persistence)
+    : persistence_(persistence), catalog_(std::make_unique<detail::CatalogClock>()) {}
+ProjectRuntime::~ProjectRuntime() = default;
 
 foundation::Result<void> ProjectRuntime::persist(const kernel::ProjectId& id, ProjectLifecycleState state)
 {
@@ -72,6 +74,7 @@ foundation::Result<ProjectLifecycleSnapshot> ProjectRuntime::fail(const kernel::
     }
     std::lock_guard lock(mutex_);
     auto& entry = entries_.at(id);
+    catalog_->touch(id);
     entry.state = ProjectLifecycleState::Failed;
     entry.error = error;
     return foundation::Result<ProjectLifecycleSnapshot>::failure(std::move(error));
@@ -85,6 +88,7 @@ foundation::Result<ProjectLifecycleSnapshot> ProjectRuntime::finishOpen(const ke
     if(!saved) { return fail(id, std::move(saved).error()); }
     std::lock_guard lock(mutex_);
     auto& entry = entries_.at(id);
+    catalog_->touch(id);
     entry.state = ProjectLifecycleState::Open;
     entry.error.reset();
     return foundation::Result<ProjectLifecycleSnapshot>::success({id, entry.state, entry.activities, entry.error});
@@ -98,6 +102,7 @@ foundation::Result<ProjectLifecycleSnapshot> ProjectRuntime::create(kernel::Proj
         std::lock_guard lock(mutex_);
         if(!accepting()) { return foundation::Result<ProjectLifecycleSnapshot>::failure(projectError("Project.RuntimeNotAccepting", id)); }
         if(entries_.contains(id)) { return foundation::Result<ProjectLifecycleSnapshot>::failure(projectError("Project.AlreadyExists", id)); }
+        catalog_->touch(id);
         entries_.emplace(id, Entry{ProjectLifecycleState::Opening, 0U, std::nullopt});
     }
     return finishOpen(id);
@@ -115,6 +120,7 @@ foundation::Result<ProjectLifecycleSnapshot> ProjectRuntime::open(const kernel::
         if(found->second.state != ProjectLifecycleState::Closed) {
             return foundation::Result<ProjectLifecycleSnapshot>::failure(projectError("Project.NotClosed", id));
         }
+        catalog_->touch(id);
         found->second.state = ProjectLifecycleState::Opening;
     }
     return finishOpen(id);
@@ -131,6 +137,7 @@ foundation::Result<ProjectLifecycleSnapshot> ProjectRuntime::close(const kernel:
         if(found == entries_.end()) { return foundation::Result<ProjectLifecycleSnapshot>::failure(projectError("Project.NotFound", id)); }
         if(found->second.state != ProjectLifecycleState::Open) { return foundation::Result<ProjectLifecycleSnapshot>::failure(projectError("Project.NotOpen", id)); }
         if(found->second.activities != 0U) { return foundation::Result<ProjectLifecycleSnapshot>::failure(projectError("Project.CloseBlocked", id)); }
+        catalog_->touch(id);
         found->second.state = ProjectLifecycleState::Closing;
     }
     if(documents_ == nullptr) { return fail(id, projectError("Project.DocumentRuntimeMissing", id)); }
@@ -150,6 +157,7 @@ foundation::Result<ProjectLifecycleSnapshot> ProjectRuntime::close(const kernel:
             return fail(id, std::move(preflight).error());
         }
         std::lock_guard lock(mutex_);
+        catalog_->touch(id);
         entries_.at(id).state = ProjectLifecycleState::Open;
         return foundation::Result<ProjectLifecycleSnapshot>::failure(std::move(preflight).error());
     }
@@ -163,6 +171,7 @@ foundation::Result<ProjectLifecycleSnapshot> ProjectRuntime::close(const kernel:
     if(!saved) { return fail(id, std::move(saved).error()); }
     std::lock_guard lock(mutex_);
     auto& entry = entries_.at(id);
+    catalog_->touch(id);
     entry.state = ProjectLifecycleState::Closed;
     entry.error.reset();
     return foundation::Result<ProjectLifecycleSnapshot>::success({id, entry.state, entry.activities, entry.error});
@@ -186,10 +195,25 @@ std::vector<ProjectLifecycleSnapshot> ProjectRuntime::list() const
     return result;
 }
 
+foundation::Result<ProjectCatalogSnapshot> ProjectRuntime::catalog(std::optional<kernel::ProjectId> projectId) const
+{
+    std::lock_guard lock(mutex_);
+    auto version = catalog_->version(projectId);
+    if(!version) { return foundation::Result<ProjectCatalogSnapshot>::failure(std::move(version).error()); }
+    ProjectCatalogSnapshot result{std::move(version).value(), {}};
+    for(const auto& [id, entry] : entries_) {
+        if(!projectId || id == *projectId) { result.entries.push_back({id, entry.state, entry.error}); }
+    }
+    return foundation::Result<ProjectCatalogSnapshot>::success(std::move(result));
+}
+
 foundation::Result<void> ProjectRuntime::configureProject(const kernel::ProjectId& id)
 {
     std::lock_guard lock(mutex_);
-    entries_.try_emplace(id, Entry{ProjectLifecycleState::Open, 0U, std::nullopt});
+    if(!entries_.contains(id)) {
+        catalog_->touch(id);
+        entries_.emplace(id, Entry{ProjectLifecycleState::Open, 0U, std::nullopt});
+    }
     return foundation::Result<void>::success();
 }
 
@@ -215,6 +239,7 @@ foundation::Result<void> ProjectRuntime::adoptCatalog(const std::vector<persiste
         }
         next.insert_or_assign(record.projectId, Entry{state, 0U, std::move(error)});
     }
+    for(const auto& record : records) { catalog_->touch(record.projectId); }
     entries_.swap(next);
     return foundation::Result<void>::success();
 }

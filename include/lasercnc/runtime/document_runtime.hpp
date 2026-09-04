@@ -66,6 +66,17 @@ struct DocumentLifecycleSnapshot final {
     std::optional<foundation::Error> error;
 };
 
+struct DocumentCatalogEntry final {
+    kernel::ProjectId projectId;
+    kernel::DocumentId documentId;
+    DocumentLifecycleState state;
+    std::optional<foundation::Error> error;
+};
+struct DocumentCatalogSnapshot final {
+    CatalogVersion version;
+    std::vector<DocumentCatalogEntry> entries;
+};
+
 class DocumentActivityLease final {
 public:
     DocumentActivityLease() = default;
@@ -87,7 +98,8 @@ public:
         state::DocumentStore& documents,
         persistence::PersistenceService& persistence,
         const state::ObjectTypeRegistry* objectTypes = nullptr,
-        const platform::IAssetStore* assetStore = nullptr) noexcept;
+        const platform::IAssetStore* assetStore = nullptr);
+    ~DocumentRuntime();
 
     [[nodiscard]] foundation::Result<DocumentLifecycleSnapshot> create(
         kernel::ProjectId projectId,
@@ -107,6 +119,8 @@ public:
     [[nodiscard]] foundation::Result<DocumentLifecycleSnapshot> lifecycle(
         const kernel::DocumentId& documentId) const;
     [[nodiscard]] std::vector<DocumentLifecycleSnapshot> list() const;
+    [[nodiscard]] foundation::Result<DocumentCatalogSnapshot> catalog(
+        std::optional<kernel::ProjectId> projectId = std::nullopt) const;
     [[nodiscard]] bool accepting() const noexcept;
 
 private:
@@ -178,6 +192,7 @@ private:
     ProjectRuntime* projects_{nullptr};
     mutable std::mutex mutex_;
     mutable std::map<kernel::DocumentId, Entry> entries_;
+    std::unique_ptr<detail::CatalogClock> catalog_;
     CloseBlockers blockers_;
     std::atomic_bool accepting_{false};
 };

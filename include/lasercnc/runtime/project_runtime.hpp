@@ -2,6 +2,7 @@
 
 #include <lasercnc/foundation/result.hpp>
 #include <lasercnc/kernel/identifiers.hpp>
+#include <lasercnc/runtime/lifecycle_catalog.hpp>
 
 #include <atomic>
 #include <cstddef>
@@ -34,6 +35,16 @@ struct ProjectLifecycleSnapshot final {
     std::optional<foundation::Error> error;
 };
 
+struct ProjectCatalogEntry final {
+    kernel::ProjectId projectId;
+    ProjectLifecycleState state;
+    std::optional<foundation::Error> error;
+};
+struct ProjectCatalogSnapshot final {
+    CatalogVersion version;
+    std::vector<ProjectCatalogEntry> entries;
+};
+
 class ProjectActivityLease final {
 public:
     ProjectActivityLease() = default;
@@ -47,12 +58,15 @@ private:
 
 class ProjectRuntime final {
 public:
-    explicit ProjectRuntime(persistence::PersistenceService& persistence) noexcept;
+    explicit ProjectRuntime(persistence::PersistenceService& persistence);
+    ~ProjectRuntime();
     [[nodiscard]] foundation::Result<ProjectLifecycleSnapshot> create(kernel::ProjectId projectId);
     [[nodiscard]] foundation::Result<ProjectLifecycleSnapshot> open(const kernel::ProjectId& projectId);
     [[nodiscard]] foundation::Result<ProjectLifecycleSnapshot> close(const kernel::ProjectId& projectId);
     [[nodiscard]] foundation::Result<ProjectLifecycleSnapshot> lifecycle(const kernel::ProjectId& projectId) const;
     [[nodiscard]] std::vector<ProjectLifecycleSnapshot> list() const;
+    [[nodiscard]] foundation::Result<ProjectCatalogSnapshot> catalog(
+        std::optional<kernel::ProjectId> projectId = std::nullopt) const;
     [[nodiscard]] bool accepting() const noexcept;
 
 private:
@@ -82,6 +96,7 @@ private:
     std::function<std::size_t(const kernel::ProjectId&)> taskBlocker_;
     mutable std::mutex mutex_;
     mutable std::map<kernel::ProjectId, Entry> entries_;
+    std::unique_ptr<detail::CatalogClock> catalog_;
     std::atomic_bool accepting_{false};
 };
 

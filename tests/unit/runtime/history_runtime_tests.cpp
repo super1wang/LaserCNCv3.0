@@ -468,6 +468,35 @@ void checkProjectDocumentRevision(const AppKernel& kernel, const DocumentId& doc
 }
 }
 
+TEST_CASE("Lifecycle catalog invalidation is separate from nonzero business revisions", "[lifecycle-catalog][project-revision]")
+{
+    // A real Gateway commit must not invalidate lifecycle-only directory contents.
+    // 中文翻译：真实 Gateway 提交不得使仅包含生命周期的目录内容失效。
+    const auto root = projectRevisionRoot();
+    const auto project = validId<ProjectId>("project.catalog-business");
+    const auto document = validId<DocumentId>("document.catalog-business");
+    const auto session = validId<SessionId>("session.catalog-business");
+    AppKernel kernel;
+    configureProjectRevisionPersistence(kernel, root);
+    configureRuntime(kernel, project, document, session, true);
+    REQUIRE(kernel.bootstrap());
+    const auto pv = kernel.projectRuntime().catalog(project).value().version;
+    const auto dv = kernel.documentRuntime().catalog(project).value().version;
+    REQUIRE(kernel.execution().executeCommand(request("request.catalog-business", "kernel.history.create",
+        project, document, session, "object.catalog-business")));
+    checkProjectDocumentRevision(kernel, document, 1U, 1U);
+    CHECK(kernel.projectRuntime().catalog(project).value().version == pv);
+    CHECK(kernel.documentRuntime().catalog(project).value().version == dv);
+    const auto revisions = kernel.documents().snapshot(document).value().revisions();
+    REQUIRE(kernel.projectRuntime().close(project));
+    REQUIRE(kernel.projectRuntime().open(project));
+    REQUIRE(kernel.documentRuntime().open(document));
+    CHECK(kernel.projectRuntime().catalog(project).value().version != pv);
+    CHECK(kernel.documentRuntime().catalog(project).value().version != dv);
+    CHECK(kernel.documents().snapshot(document).value().revisions() == revisions);
+    REQUIRE(kernel.shutdown());
+}
+
 TEST_CASE("Project revision survives restart with no loaded children and a subsequent commit", "[project-revision][recovery]")
 {
     bool closeProject = false;

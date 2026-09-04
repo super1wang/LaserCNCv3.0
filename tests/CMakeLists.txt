@@ -20,6 +20,19 @@ lcnc_enable_warnings(lasercnc_foundation_tests)
 include(Catch)
 catch_discover_tests(lasercnc_foundation_tests)
 
+# Test-only process probe; no product command-line contract is introduced.
+# 中文翻译：仅供测试的进程探针，不新增产品命令行契约。
+add_executable(lasercnc_lifecycle_catalog_probe integration/lifecycle_catalog_probe.cpp)
+target_link_libraries(lasercnc_lifecycle_catalog_probe PRIVATE LaserCNC::Infrastructure)
+target_compile_features(lasercnc_lifecycle_catalog_probe PRIVATE cxx_std_20)
+set_target_properties(lasercnc_lifecycle_catalog_probe PROPERTIES CXX_EXTENSIONS OFF)
+lcnc_enable_warnings(lasercnc_lifecycle_catalog_probe)
+add_test(NAME integration.lifecycle_catalog_epoch_restart
+    COMMAND "${CMAKE_COMMAND}" "-DPROBE=$<TARGET_FILE:lasercnc_lifecycle_catalog_probe>"
+        "-DEVIDENCE_ROOT=${CMAKE_CURRENT_BINARY_DIR}/lifecycle-catalog-process-runs"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_lifecycle_catalog_epoch.cmake")
+set_tests_properties(integration.lifecycle_catalog_epoch_restart PROPERTIES TIMEOUT 70)
+
 add_test(NAME architecture.asan_configuration_guards
     COMMAND "${CMAKE_COMMAND}" "-DSOURCE_ROOT=${PROJECT_SOURCE_DIR}"
         "-DEVIDENCE_ROOT=${CMAKE_CURRENT_BINARY_DIR}/asan-config-probes"
@@ -145,6 +158,7 @@ add_executable(
     unit/runtime/project_persistence_tests.cpp
     unit/runtime/project_task_admission_tests.cpp
     unit/runtime/project_runtime_tests.cpp
+    unit/runtime/lifecycle_catalog_tests.cpp
     unit/runtime/history_runtime_tests.cpp
     unit/runtime/asset_state_tests.cpp
     unit/runtime/kernel_concurrency_tests.cpp
