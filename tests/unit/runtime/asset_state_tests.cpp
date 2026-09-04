@@ -16,7 +16,10 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iterator>
+#include <map>
 #include <memory>
+#include <optional>
 #include <string>
 
 using namespace lasercnc::foundation;
@@ -30,19 +33,24 @@ namespace {
 
 class TemporaryRoot final {
 public:
-    TemporaryRoot()
+    explicit TemporaryRoot(bool retain = false) : retain_(retain)
     {
         static std::atomic_ullong sequence{0U};
-        path = std::filesystem::temp_directory_path() / ("lasercnc-asset-state-"
+        const auto base = retain ? std::filesystem::path{LCNC_STRESS_TEST_ROOT} / "offline-backup"
+                                 : std::filesystem::temp_directory_path();
+        path = base / ("lasercnc-asset-state-"
             + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())
             + '-' + std::to_string(sequence.fetch_add(1U)));
     }
     ~TemporaryRoot()
     {
+        if(retain_) { return; }
         std::error_code ignored;
         std::filesystem::remove_all(path, ignored);
     }
     std::filesystem::path path;
+private:
+    bool retain_;
 };
 
 std::span<const std::byte> bytes(std::string_view value)
@@ -150,7 +158,160 @@ void damageAsset(const TemporaryRoot& root, const AssetRef& reference)
     REQUIRE(file.good());
 }
 
+std::map<std::string, std::string> bundleDigests(const TemporaryRoot& root)
+{
+    std::map<std::string, std::string> result;
+    for(const auto& entry : std::filesystem::recursive_directory_iterator(root.path)) {
+        REQUIRE_FALSE(entry.is_symlink());
+        if(!entry.is_regular_file()) { continue; }
+        std::ifstream input(entry.path(), std::ios::binary);
+        REQUIRE(input.good());
+        const std::string content{std::istreambuf_iterator<char>{input}, std::istreambuf_iterator<char>{}};
+        REQUIRE_FALSE(input.bad());
+        const auto digest = Sha256HashService{}.digest(bytes(content));
+        REQUIRE(digest);
+        result.emplace(std::filesystem::relative(entry.path(), root.path).generic_string(),
+            std::string(digest.value().value()));
+    }
+    return result;
+}
+
+void copyClosedBundle(const TemporaryRoot& source, const TemporaryRoot& destination)
+{
+    // Only callers that have destroyed every source Host may copy this clean fixture.
+    // 中文翻译：只有已销毁所有源 Host 的调用方才能复制这个干净夹具，不能用于热备份。
+    REQUIRE_FALSE(std::filesystem::exists(source.path / "state.db-journal"));
+    REQUIRE_FALSE(std::filesystem::exists(source.path / "state.db-wal"));
+    REQUIRE_FALSE(std::filesystem::exists(destination.path));
+    std::filesystem::copy(source.path, destination.path, std::filesystem::copy_options::recursive);
+    REQUIRE(bundleDigests(source) == bundleDigests(destination));
+}
+
 } // namespace
+
+TEST_CASE("Offline storage bundles restore matching generations and reject missing referenced files", "[asset][recovery][backup][c5]")
+{
+    for(unsigned int variant = 0U; variant < 6U; ++variant) {
+        DYNAMIC_SECTION("variant=" << variant) {
+            TemporaryRoot source{true};
+            TemporaryRoot older{true};
+            TemporaryRoot newer{true};
+            TemporaryRoot restored{true};
+            INFO("source=" << source.path.string());
+            INFO("older=" << older.path.string());
+            INFO("newer=" << newer.path.string());
+            INFO("restored=" << restored.path.string());
+            std::optional<AssetRef> first;
+            std::optional<AssetRef> second;
+            std::optional<Document> oldImage;
+            std::optional<Document> newImage;
+            {
+                auto store = createStore(source);
+                first = publish(*store, "offline generation one");
+                AppKernel kernel;
+                auto handler = std::make_shared<AssetHandler>();
+                handler->assets = {*first};
+                configure(kernel, source, store, handler, true);
+                REQUIRE(kernel.bootstrap());
+                REQUIRE(kernel.execution().executeCommand(request("request.offline.seed")));
+                oldImage = kernel.documents().snapshot(document).value();
+                REQUIRE(kernel.documentRuntime().close(document));
+                REQUIRE(kernel.documentRuntime().open(document));
+                REQUIRE(kernel.shutdown());
+            }
+            copyClosedBundle(source, older);
+            const auto oldDigests = bundleDigests(older);
+            {
+                auto store = createStore(source);
+                second = publish(*store, "offline generation two");
+                AppKernel kernel;
+                auto handler = std::make_shared<AssetHandler>();
+                handler->assets = {*second};
+                configure(kernel, source, store, handler, false);
+                REQUIRE(kernel.bootstrap());
+                REQUIRE(kernel.execution().executeCommand(request("request.offline.replace", "test.asset.replace")));
+                newImage = kernel.documents().snapshot(document).value();
+                REQUIRE(kernel.documentRuntime().close(document));
+                REQUIRE(kernel.documentRuntime().open(document));
+                REQUIRE(kernel.shutdown());
+            }
+            copyClosedBundle(source, newer);
+            const auto newDigests = bundleDigests(newer);
+            REQUIRE(oldDigests != newDigests);
+            const bool oldGeneration = variant == 0U || variant == 2U;
+            const bool rejected = variant >= 3U;
+            if(variant <= 1U) { copyClosedBundle(oldGeneration ? older : newer, restored); }
+            else {
+                REQUIRE(std::filesystem::create_directory(restored.path));
+                const auto& databaseSource = oldGeneration ? older : newer;
+                REQUIRE(std::filesystem::copy_file(databaseSource.path / "state.db", restored.path / "state.db"));
+                const auto& snapshotSource = variant == 3U ? older : newer;
+                const auto& assetSource = variant == 4U ? older : newer;
+                std::filesystem::copy(snapshotSource.path / "snapshots", restored.path / "snapshots",
+                    std::filesystem::copy_options::recursive);
+                std::filesystem::copy(assetSource.path / "assets", restored.path / "assets",
+                    std::filesystem::copy_options::recursive);
+                if(variant == 5U) {
+                    // Remove only this copied historical asset to model an incomplete archive.
+                    // 中文翻译：只移除这个恢复副本中的历史资产，模拟归档遗漏；源与两份归档均保留。
+                    REQUIRE(std::filesystem::remove(lasercnc::test::snapshotStoragePath(
+                        restored.path / "assets", first->id.value())));
+                }
+            }
+            const auto candidateDigests = bundleDigests(restored);
+            std::optional<Document> accepted = oldGeneration ? oldImage : newImage;
+            for(unsigned int restart = 0U; restart < 2U; ++restart) {
+                auto store = createStore(restored);
+                AppKernel kernel;
+                auto handler = std::make_shared<AssetHandler>();
+                configure(kernel, restored, store, handler, false);
+                const auto boot = kernel.bootstrap();
+                if(rejected) {
+                    REQUIRE_FALSE(boot);
+                    const char* outer = variant == 3U ? "Persistence.KernelRecoveryFailed"
+                        : variant == 4U ? "ObjectType.RecoveryAdmissionFailed" : "ObjectType.HistoryAdmissionFailed";
+                    CHECK(std::string(boot.error().code.value()) == outer);
+                    REQUIRE(boot.error().cause);
+                    CHECK(std::string(boot.error().cause->code.value()) ==
+                        (variant == 3U ? "Snapshot.NotFound" : "Asset.StateAdmissionFailed"));
+                    if(variant != 3U) {
+                        const auto* detail = boot.error().cause->details.getIf<Value::Object>();
+                        REQUIRE(detail);
+                        CHECK(detail->at("assetId") == Value{std::string((variant == 4U ? second : first)->id.value())});
+                    }
+                    CHECK(kernel.state() == AppKernelState::Failed);
+                    CHECK_FALSE(kernel.documents().contains(document));
+                    CHECK_FALSE(kernel.documentRuntime().accepting());
+                    CHECK_FALSE(kernel.execution().executeCommand(request("request.offline.denied")));
+                    CHECK(handler->calls == 0U);
+                } else {
+                    REQUIRE(boot);
+                    const auto image = kernel.documents().snapshot(document).value();
+                    CHECK(image.objects().all() == accepted->objects().all());
+                    CHECK(image.revisions() == accepted->revisions());
+                    CHECK(handler->calls == 0U);
+                    CHECK(objectAssets(kernel) == std::vector<AssetRef>{oldGeneration ? *first : *second});
+                    CHECK(kernel.history().snapshot(document).value().cursor ==
+                        (oldGeneration ? HistoryCursor{1U, 1U} : HistoryCursor{2U, 2U}));
+                    if(restart == 0U) {
+                        REQUIRE(kernel.execution().executeCommand(request("request.offline.undo", "edit.undo")));
+                        if(oldGeneration) { CHECK(kernel.documents().snapshot(document).value().objects().empty()); }
+                        else { CHECK(objectAssets(kernel) == std::vector<AssetRef>{*first}); }
+                        REQUIRE(kernel.execution().executeCommand(request("request.offline.redo", "edit.redo")));
+                        CHECK(objectAssets(kernel) == std::vector<AssetRef>{oldGeneration ? *first : *second});
+                        accepted = kernel.documents().snapshot(document).value();
+                    }
+                    CHECK(handler->calls == 0U);
+                    REQUIRE(kernel.shutdown());
+                }
+            }
+            if(rejected) { CHECK(bundleDigests(restored) == candidateDigests); }
+            CHECK(bundleDigests(older) == oldDigests);
+            CHECK(bundleDigests(newer) == newDigests);
+            CHECK(bundleDigests(source) == newDigests);
+        }
+    }
+}
 
 TEST_CASE("Asset references survive transactions snapshots idempotency and history restart", "[asset][state][recovery]")
 {

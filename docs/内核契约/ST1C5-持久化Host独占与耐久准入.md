@@ -4,7 +4,7 @@
 
 承接 C1a `9da759e`。C5 的完整目标是：任何 schema 初始化、abandoned claim 恢复、任务/副作用中断归类之前，必须取得数据库单活动 Host 所有权；第二 Host 不能改写第一 Host 的材料。正常运行和失败隔离期间保留所有权，不能把一次 SQL 事务锁误当作 Host 生命周期锁。
 
-分两步实施，但不缩减最终目标：C5a 交付必需端口与 SQLite/Windows 适配器、组件和跨进程证据；C5b 接入 PersistenceService/AppKernel 初始化链、只读诊断及活动 claim 不受第二 Host 影响的回归。**C5a 单独通过不等于 AppKernel 已强制独占，也不关闭 C5 审计项。**
+最初分 C5a/b 两步实施：C5a 交付必需端口与 SQLite/Windows 适配器、组件和跨进程证据；C5b 接入 PersistenceService/AppKernel 初始化链、只读诊断及活动 claim 不受第二 Host 影响的回归。后续 [C5c 支持矩阵与离线恢复](ST1C5c-存储支持矩阵与离线恢复.md) 已形成本机本地检查点（Debug 35/35、定向 ASan 35 项各 3 次及纯生产/架构通过），区分真实验证与未验证环境，下一步 C6；最终支持范围与三配置仍由 ST1D 签核。**C5a 单独通过不等于 AppKernel 已强制独占，也不关闭 C5 审计项。**
 
 ## C5a 端口与适配器
 
