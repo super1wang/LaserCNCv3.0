@@ -1,4 +1,5 @@
 #include "object_record_codec.hpp"
+#include "journal_revision_validation.hpp"
 
 #include <lasercnc/persistence/persistence_service.hpp>
 
@@ -755,22 +756,8 @@ bool localRevisionsEqual(
 
 foundation::Result<void> validateRevisionTransition(const DecodedJournal& journal)
 {
-    for(const auto scope : revisionScopes) {
-        const auto before = journal.record.revisionsBefore.at(scope).value();
-        const auto after = journal.record.revisionsAfter.at(scope).value();
-        if(after != before && (before == std::numeric_limits<std::uint64_t>::max()
-                               || after != before + 1U)) {
-            return foundation::Result<void>::failure(recoveryError(
-                "Persistence.JournalRevisionTransitionInvalid",
-                foundation::ErrorCategory::Infrastructure,
-                "A journal revision transition is neither stable nor a single increment",
-                {{"sequence", foundation::Value {
-                    std::to_string(journal.record.sequence)}},
-                 {"scope", foundation::Value {
-                    std::string(state::revisionScopeName(scope))}}}));
-        }
-    }
-    return foundation::Result<void>::success();
+    return detail::validateJournalRevisionTransition(journal.record.revisionsBefore,
+        journal.record.revisionsAfter, !journal.changes.empty());
 }
 
 foundation::Result<void> applyChanges(

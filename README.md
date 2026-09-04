@@ -4,9 +4,11 @@ LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9 及 K10A–K10E 的�
 
 ## 已完成阶段
 
-当前收口按 [ST1C 补充执行计划](docs/内核契约/ST1C-补充审计与剩余执行计划.md) 继续：C1a 非零 ProjectRevision 独立恢复已通过本地检查点（Debug 286/286、专项 16/16、新增 2 项各 3 次、纯生产通过），见 [C1a 交付](docs/阶段交付/2026-09-04-ST1C1a-项目修订独立恢复.md)。下一步 C5 单 Host/耐久配置、C1b 写入端修订检查，再按计划闭合整体准入、存储键、可信装载及冻结契约；历史门禁成绩不表示剩余新发现已解决。
+当前收口按 [ST1C 补充执行计划](docs/内核契约/ST1C-补充审计与剩余执行计划.md) 继续：C1a 非零 ProjectRevision 独立恢复已通过本地检查点（Debug 286/286、专项 16/16、新增 2 项各 3 次、纯生产通过），见 [C1a 交付](docs/阶段交付/2026-09-04-ST1C1a-项目修订独立恢复.md)。C5 与 C1b 已推进如下；后续按计划闭合整体准入、存储键、可信装载及冻结契约，历史门禁成绩不表示剩余新发现已解决。
 
-C5a/b 已完成持久化会话端口、SQLite/Windows 独占及强制初始化的本地检查点：C5b Debug 299/299、专项 56/56、新增 5 项各 10 次、纯生产及架构检查通过，见 [C5b 交付](docs/阶段交付/2026-09-04-ST1C5b-初始化独占与活动状态保护.md)。第二 Host 不再改写运行中 claim，隔离后仍保留所有权；下一步 C1b 写入端修订检查。C2c 生命周期及 ST1D 最终签核仍未闭合，不宣称 Frozen。
+C5a/b 已完成持久化会话端口、SQLite/Windows 独占及强制初始化的本地检查点：C5b Debug 299/299、专项 56/56、新增 5 项各 10 次、纯生产及架构检查通过，见 [C5b 交付](docs/阶段交付/2026-09-04-ST1C5b-初始化独占与活动状态保护.md)。第二 Host 不再改写运行中 claim，隔离后仍保留所有权；C1b 已承接写入端修订检查。C2c 生命周期及 ST1D 最终签核仍未闭合，不宣称 Frozen。
+
+C1b 已实现 Journal 写事务内的修订、持久头和首笔文档归属准入：Debug 308/308、专项 14/14、新增 9 项与扩展故障矩阵各 10 次通过，见 [C1b 交付](docs/阶段交付/2026-09-04-ST1C1b-Journal写入修订一致性.md)。失败不发布状态、History、事件或成功回执；下一步 C2 全局准入、Project-only 活动和生命周期收口。
 
 - Phase 1：Foundation（`StrongId`、`Value`、`Result`、`Error`、`Schema`）
 - Phase 2：Application Composition（`AppKernel`、`ServiceRegistry`、`ModuleRuntime`）

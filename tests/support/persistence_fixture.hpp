@@ -45,9 +45,37 @@ inline void injectJournalFixture(const std::filesystem::path& database,
     const runtime::TransactionCommit& commit)
 {
     auto encoded = openPersistenceFixture(":memory:");
-    auto appended = encoded->append(commit);
+    // Encode a valid template, then explicitly forge the requested revision metadata for negative tests.
+    // 中文翻译：先编码合法模板，再明确伪造负向测试所需修订；不绕过正式写入准入。
+    auto templateCommit = commit;
+    templateCommit.revisionsBefore = {};
+    templateCommit.revisionsAfter = {state::Revision{1U}, state::Revision{1U}, {}, {}, {}, {}};
+    auto appended = encoded->append(templateCommit);
     if(!appended) { throw std::runtime_error(appended.error().message); }
-    const auto& record = appended.value();
+    auto record = std::move(appended).value();
+    infrastructure::JsonconsAdapter serializer;
+    auto decoded = serializer.deserialize(record.payload);
+    if(!decoded) { throw std::runtime_error(decoded.error().message); }
+    const auto revisionsValue = [](const state::RevisionSet& revisions) {
+        foundation::Value::Object value;
+        for(const auto scope : {state::RevisionScope::Project, state::RevisionScope::Document,
+                state::RevisionScope::Geometry, state::RevisionScope::Cam,
+                state::RevisionScope::MachineContext, state::RevisionScope::Environment}) {
+            value.emplace(state::revisionScopeName(scope), foundation::Value{std::to_string(revisions.at(scope).value())});
+        }
+        return foundation::Value{std::move(value)};
+    };
+    auto& payload = *decoded.value().getIf<foundation::Value::Object>();
+    payload.insert_or_assign("revisionsBefore", revisionsValue(commit.revisionsBefore));
+    payload.insert_or_assign("revisionsAfter", revisionsValue(commit.revisionsAfter));
+    auto serialized = serializer.serialize(decoded.value());
+    if(!serialized) { throw std::runtime_error(serialized.error().message); }
+    record.payload = std::move(serialized).value();
+    auto digest = infrastructure::Sha256HashService{}.digest(std::as_bytes(std::span{record.payload.data(), record.payload.size()}));
+    if(!digest) { throw std::runtime_error(digest.error().message); }
+    record.digest = std::move(digest).value();
+    record.revisionsBefore = commit.revisionsBefore;
+    record.revisionsAfter = commit.revisionsAfter;
     std::vector<foundation::Value> parameters{
         foundation::Value{std::string(record.transactionId.value())},
         foundation::Value{std::string(record.projectId.value())},

@@ -23,6 +23,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -1024,6 +1025,316 @@ TEST_CASE("Persistence preserves object schema versions across journal snapshot 
     }
     removeDatabase(path);
     removeSnapshotDirectory(snapshotDirectory);
+}
+
+TEST_CASE("Journal write admission rejects stale project and document revisions without a durable change", "[persistence][journal][revision-admission]")
+{
+    for(const bool otherDocument : {false, true}) {
+        DYNAMIC_SECTION("otherDocument=" << otherDocument) {
+            const auto root = std::filesystem::path{LCNC_STRESS_TEST_ROOT} / "journal-revisions" / uniqueDatabasePath().stem();
+            std::filesystem::create_directories(root);
+            const auto path = root / "state.db";
+            PersistenceService service;
+            configureService(service, path);
+            const RevisionSet one{Revision{1U}, Revision{1U}, {}, {}, {}, {}};
+            auto first = commit("tx.revision.first", {}, one, "seed");
+            first.changes.clear();
+            REQUIRE(service.append(first));
+            auto observer = SqlitePersistenceBackend::open({path});
+            REQUIRE(observer);
+            const auto before = observer.value()->query("SELECT * FROM state_journal").value();
+            auto stale = commit("tx.revision.stale",
+                otherDocument ? RevisionSet{} : RevisionSet{Revision{1U}, {}, {}, {}, {}, {}},
+                otherDocument ? one : RevisionSet{Revision{2U}, Revision{1U}, {}, {}, {}, {}}, "stale");
+            stale.changes.clear();
+            if(otherDocument) { stale.documentId = validId<DocumentId>("document.other"); }
+            const auto rejected = service.append(stale);
+            REQUIRE_FALSE(rejected);
+            CHECK(std::string(rejected.error().code.value()) == "Persistence.JournalRevisionConflict");
+            CHECK(observer.value()->query("SELECT * FROM state_journal").value() == before);
+            REQUIRE(observer.value()->beginTransaction());
+            REQUIRE(observer.value()->rollbackTransaction());
+            CHECK(service.ready());
+            auto next = stale;
+            next.transactionId = validId<TransactionId>("tx.revision.next");
+            next.revisionsBefore = otherDocument ? RevisionSet{Revision{1U}, {}, {}, {}, {}, {}} : one;
+            next.revisionsAfter = {Revision{2U}, Revision{otherDocument ? 1U : 2U}, {}, {}, {}, {}};
+            REQUIRE(service.append(next));
+            REQUIRE(service.recover());
+            const auto replay = service.append(first);
+            REQUIRE(replay);
+            CHECK(replay.value().sequence == 1U);
+            CHECK(service.journalAfter(first.documentId, 0U).value().size() == (otherDocument ? 1U : 2U));
+            auto peer = first;
+            peer.transactionId = validId<TransactionId>("tx.revision.peer");
+            peer.projectId = validId<ProjectId>("project.peer");
+            peer.documentId = validId<DocumentId>("document.peer");
+            REQUIRE(service.append(peer));
+            REQUIRE(service.append(first));
+            REQUIRE(service.recover());
+        }
+    }
+}
+
+TEST_CASE("Journal write admission rejects invalid revision transitions before storing them", "[persistence][journal][revision-admission]")
+{
+    for(unsigned int scenario = 0U; scenario < 6U; ++scenario) {
+        DYNAMIC_SECTION("scenario=" << scenario) {
+            PersistenceService service;
+            configureService(service, ":memory:");
+            const RevisionSet one{Revision{1U}, Revision{1U}, {}, {}, {}, {}};
+            auto first = commit("tx.transition.first", {}, one, "seed");
+            first.changes.clear();
+            REQUIRE(service.append(first));
+            auto invalid = commit("tx.transition.invalid", one,
+                {Revision{2U}, Revision{2U}, {}, {}, {}, {}}, "invalid");
+            if(scenario == 0U) { invalid.revisionsAfter = {Revision{3U}, Revision{2U}, {}, {}, {}, {}}; }
+            if(scenario == 1U) { invalid.revisionsAfter = {Revision{}, Revision{2U}, {}, {}, {}, {}}; }
+            if(scenario == 2U) { invalid.revisionsAfter = {Revision{2U}, Revision{1U}, {}, {}, {}, {}}; }
+            if(scenario == 3U) { invalid.revisionsAfter = {Revision{2U}, Revision{2U}, Revision{2U}, {}, {}, {}}; }
+            if(scenario == 4U) { invalid.revisionsAfter = {Revision{1U}, Revision{2U}, {}, {}, {}, {}}; }
+            if(scenario == 5U) {
+                invalid.revisionsBefore = {Revision{std::numeric_limits<std::uint64_t>::max()}, Revision{1U}, {}, {}, {}, {}};
+                invalid.revisionsAfter = {Revision{}, Revision{2U}, {}, {}, {}, {}};
+            }
+            const auto rejected = service.append(invalid);
+            REQUIRE_FALSE(rejected);
+            CHECK(std::string(rejected.error().code.value()) == "Persistence.JournalRevisionTransitionInvalid");
+            REQUIRE(service.journalAfter(first.documentId, 0U).value().size() == 1U);
+            REQUIRE(service.recover());
+            invalid.revisionsBefore = one;
+            invalid.revisionsAfter = {Revision{2U}, Revision{2U}, {}, {}, {}, {}};
+            REQUIRE(service.append(invalid));
+            REQUIRE(service.recover());
+        }
+    }
+}
+
+TEST_CASE("Journal write admission authenticates an existing revision chain before extending it", "[persistence][journal][revision-admission]")
+{
+    const auto root = std::filesystem::path{LCNC_STRESS_TEST_ROOT} / "journal-proof" / uniqueDatabasePath().stem();
+    std::filesystem::create_directories(root);
+    const auto path = root / "state.db";
+    const RevisionSet one{Revision{1U}, Revision{1U}, {}, {}, {}, {}};
+    const RevisionSet two{Revision{2U}, Revision{2U}, {}, {}, {}, {}};
+    auto first = commit("tx.proof.first", {}, one, "seed");
+    first.changes.clear();
+    auto second = commit("tx.proof.second", one, two, "second");
+    second.changes.clear();
+    {
+        PersistenceService seed;
+        configureService(seed, path);
+        REQUIRE(seed.append(first));
+        REQUIRE(seed.append(second));
+    }
+    auto observer = SqlitePersistenceBackend::open({path});
+    REQUIRE(observer);
+    const auto original = observer.value()->query("SELECT * FROM state_journal ORDER BY sequence").value();
+    REQUIRE(observer.value()->execute("UPDATE state_journal SET payload='corrupt' WHERE sequence=1"));
+    const auto corrupt = observer.value()->query("SELECT * FROM state_journal ORDER BY sequence").value();
+    PersistenceService service;
+    configureService(service, path);
+    auto next = commit("tx.proof.next", two, {Revision{3U}, Revision{3U}, {}, {}, {}, {}}, "next");
+    const auto rejected = service.append(next);
+    REQUIRE_FALSE(rejected);
+    CHECK(std::string(rejected.error().code.value()) == "Persistence.JournalDigestMismatch");
+    CHECK(observer.value()->query("SELECT * FROM state_journal ORDER BY sequence").value() == corrupt);
+    const std::array restore{original.front().at("payload")};
+    REQUIRE(observer.value()->execute("UPDATE state_journal SET payload=? WHERE sequence=1", restore));
+    REQUIRE(service.append(next));
+    REQUIRE(service.recover());
+}
+
+TEST_CASE("Journal write admission validates every document local revision scope", "[persistence][journal][revision-admission]")
+{
+    const std::array staleScopes{
+        RevisionSet{Revision{1U}, Revision{1U}, Revision{1U}, {}, {}, {}},
+        RevisionSet{Revision{1U}, Revision{1U}, {}, Revision{1U}, {}, {}},
+        RevisionSet{Revision{1U}, Revision{1U}, {}, {}, Revision{1U}, {}},
+        RevisionSet{Revision{1U}, Revision{1U}, {}, {}, {}, Revision{1U}}};
+    for(const auto& stale : staleScopes) {
+        PersistenceService service;
+        configureService(service, ":memory:");
+        const RevisionSet one{Revision{1U}, Revision{1U}, {}, {}, {}, {}};
+        auto seed = commit("tx.scope.seed", {}, one, "seed");
+        seed.changes.clear();
+        REQUIRE(service.append(seed));
+        auto next = commit("tx.scope.next", stale, RevisionManager::advance(stale,
+            std::array{RevisionScope::Project, RevisionScope::Document}).value(), "next");
+        const auto rejected = service.append(next);
+        REQUIRE_FALSE(rejected);
+        CHECK(std::string(rejected.error().code.value()) == "Persistence.JournalRevisionConflict");
+        CHECK(service.journalAfter(seed.documentId, 0U).value().size() == 1U);
+        next.revisionsBefore = one;
+        REQUIRE(service.append(next));
+        REQUIRE(service.recover());
+    }
+}
+
+TEST_CASE("Journal write admission reauthenticates live heads and rejects document reassignment", "[persistence][journal][revision-admission]")
+{
+    const auto root = std::filesystem::path{LCNC_STRESS_TEST_ROOT} / "journal-heads" / uniqueDatabasePath().stem();
+    std::filesystem::create_directories(root);
+    const auto path = root / "state.db";
+    PersistenceService service;
+    configureService(service, path);
+    const RevisionSet one{Revision{1U}, Revision{1U}, {}, {}, {}, {}};
+    auto seed = commit("tx.head.seed", {}, one, "seed");
+    seed.changes.clear();
+    REQUIRE(service.append(seed));
+    auto observer = SqlitePersistenceBackend::open({path});
+    REQUIRE(observer);
+    REQUIRE(observer.value()->execute("UPDATE state_journal SET project_revision_after='9'"));
+    auto next = commit("tx.head.next", one, {Revision{2U}, Revision{2U}, {}, {}, {}, {}}, "next");
+    const auto invalidHead = service.append(next);
+    REQUIRE_FALSE(invalidHead);
+    CHECK(std::string(invalidHead.error().code.value()) == "Persistence.JournalMetadataMismatch");
+    REQUIRE(observer.value()->execute("UPDATE state_journal SET project_revision_after='1'"));
+    auto reassigned = next;
+    reassigned.projectId = validId<ProjectId>("project.reassigned");
+    reassigned.revisionsBefore = {Revision{}, Revision{1U}, {}, {}, {}, {}};
+    reassigned.revisionsAfter = {Revision{1U}, Revision{2U}, {}, {}, {}, {}};
+    const auto ownership = service.append(reassigned);
+    REQUIRE_FALSE(ownership);
+    CHECK(std::string(ownership.error().code.value()) == "Persistence.DocumentOwnershipChanged");
+    REQUIRE(service.append(next));
+    REQUIRE(service.recover());
+}
+
+TEST_CASE("Journal write admission refuses authenticated but discontinuous existing chains", "[persistence][journal][revision-admission]")
+{
+    for(unsigned int scenario = 0U; scenario < 4U; ++scenario) {
+        DYNAMIC_SECTION("scenario=" << scenario) {
+            const auto root = std::filesystem::path{LCNC_STRESS_TEST_ROOT} / "journal-invalid-chain" / uniqueDatabasePath().stem();
+            std::filesystem::create_directories(root);
+            const auto path = root / "state.db";
+            { auto empty = lasercnc::test::openPersistenceFixture(path); }
+            const RevisionSet one{Revision{1U}, Revision{1U}, {}, {}, {}, {}};
+            auto injected = commit("tx.chain.first", {}, one, "first");
+            injected.changes.clear();
+            if(scenario == 0U) {
+                injected.revisionsBefore = {Revision{1U}, {}, {}, {}, {}, {}};
+                injected.revisionsAfter = {Revision{2U}, Revision{1U}, {}, {}, {}, {}};
+            } else if(scenario == 1U) {
+                injected.revisionsBefore = {Revision{}, Revision{1U}, {}, {}, {}, {}};
+                injected.revisionsAfter = {Revision{1U}, Revision{2U}, {}, {}, {}, {}};
+            }
+            lasercnc::test::injectJournalFixture(path, injected);
+            if(scenario >= 2U) {
+                injected.transactionId = validId<TransactionId>("tx.chain.second");
+                injected.revisionsBefore = one;
+                injected.revisionsAfter = {Revision{2U}, Revision{2U}, {}, {}, {}, {}};
+                if(scenario == 3U) {
+                    injected.projectId = validId<ProjectId>("project.changed-owner");
+                    injected.revisionsBefore = {Revision{}, Revision{1U}, {}, {}, {}, {}};
+                    injected.revisionsAfter = {Revision{1U}, Revision{2U}, {}, {}, {}, {}};
+                }
+                lasercnc::test::injectJournalFixture(path, injected);
+            }
+            auto observer = SqlitePersistenceBackend::open({path});
+            REQUIRE(observer);
+            if(scenario == 2U) { REQUIRE(observer.value()->execute("DELETE FROM state_journal WHERE sequence=1")); }
+            const auto before = observer.value()->query("SELECT * FROM state_journal ORDER BY sequence").value();
+            PersistenceService service;
+            configureService(service, path);
+            auto next = commit("tx.chain.next", {}, one, "next");
+            const auto rejected = service.append(next);
+            REQUIRE_FALSE(rejected);
+            constexpr std::array expected{"Persistence.ProjectRevisionChainBroken", "Persistence.DocumentRevisionChainBroken",
+                "Persistence.JournalSequenceGap", "Persistence.DocumentOwnershipChanged"};
+            CHECK(std::string(rejected.error().code.value()) == expected[scenario]);
+            CHECK(observer.value()->query("SELECT * FROM state_journal ORDER BY sequence").value() == before);
+        }
+    }
+}
+
+TEST_CASE("Journal write admission read faults roll back or quarantine without releasing ownership", "[persistence][journal][revision-admission][fault-matrix]")
+{
+    const auto fragment = GENERATE("FROM state_journal ORDER BY sequence", "FROM document_catalog WHERE document_id=",
+        "FROM snapshot_index WHERE document_id=");
+    INFO("query=" << fragment);
+    for(const bool throws : {false, true}) {
+        for(const bool rollbackFails : {false, true}) {
+            DYNAMIC_SECTION("throws=" << throws << " rollbackFails=" << rollbackFails) {
+                const auto root = std::filesystem::path{LCNC_STRESS_TEST_ROOT} / "journal-read-fault" / uniqueDatabasePath().stem();
+                std::filesystem::create_directories(root);
+                const auto path = root / "state.db";
+                auto sqlite = SqlitePersistenceBackend::open({path});
+                REQUIRE(sqlite);
+                auto backend = std::make_unique<lasercnc::test::FaultInjectingBackend>(std::move(sqlite).value());
+                auto* control = backend.get();
+                PersistenceService service;
+                REQUIRE(service.configure(std::move(backend), std::make_shared<JsonconsAdapter>(), std::make_shared<Sha256HashService>()));
+                REQUIRE(service.initialize());
+                control->arm(lasercnc::test::BackendPoint::Query, fragment, 1U, throws);
+                control->failRollback = rollbackFails;
+                control->throwRollback = throws;
+                auto next = commit("tx.read-fault", {}, {Revision{1U}, Revision{1U}, {}, {}, {}, {}}, "next");
+                const auto rejected = service.append(next);
+                REQUIRE_FALSE(rejected);
+                CHECK(control->hits == 1U);
+                CHECK(service.sessionStatus().ownership == PersistenceOwnershipState::Acquired);
+                if(rollbackFails) {
+                    CHECK_FALSE(service.ready());
+                    CHECK_FALSE(service.initialize());
+                    CHECK(std::string(rejected.error().code.value()) == "Persistence.RollbackFailed");
+                    auto other = SqlitePersistenceBackend::open({path});
+                    REQUIRE(other);
+                    const auto denied = other.value()->acquireHostSession();
+                    REQUIRE_FALSE(denied);
+                    CHECK(std::string(denied.error().code.value()) == "Persistence.HostAlreadyOwned");
+                } else {
+                    CHECK(service.ready());
+                    REQUIRE(service.journalAfter(next.documentId, 0U).value().empty());
+                    REQUIRE(service.append(next));
+                    REQUIRE(service.recover());
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("Journal write admission preserves catalog and snapshot ownership before the first journal", "[persistence][journal][revision-admission]")
+{
+    for(const bool snapshotOnly : {false, true}) {
+        DYNAMIC_SECTION("snapshotOnly=" << snapshotOnly) {
+            const auto root = std::filesystem::path{LCNC_STRESS_TEST_ROOT} / "journal-first-owner" / uniqueDatabasePath().stem();
+            std::filesystem::create_directories(root);
+            const auto path = root / "state.db";
+            PersistenceService service;
+            configureService(service, path, root / "snapshots");
+            const auto project = validId<ProjectId>("project.first-owner");
+            const auto document = validId<DocumentId>("document.first-owner");
+            if(snapshotOnly) {
+                AppKernel source;
+                REQUIRE(source.addDocument(project, document));
+                REQUIRE(source.bootstrap());
+                REQUIRE(service.captureSnapshot(validId<SnapshotId>("snapshot.first-owner"), source.documents().snapshot(document).value()));
+                REQUIRE(source.shutdown());
+            } else {
+                REQUIRE(service.saveDocumentLifecycle(project, document, DocumentPersistenceState::Open));
+            }
+            auto next = commit("tx.first-owner", {}, {Revision{1U}, Revision{1U}, {}, {}, {}, {}}, "next");
+            next.projectId = validId<ProjectId>("project.wrong-owner");
+            next.documentId = document;
+            const auto rejected = service.append(next);
+            REQUIRE_FALSE(rejected);
+            CHECK(std::string(rejected.error().code.value()) == "Persistence.DocumentOwnershipChanged");
+            CHECK(service.journalAfter(document, 0U).value().empty());
+            next.projectId = project;
+            auto observer = SqlitePersistenceBackend::open({path});
+            REQUIRE(observer);
+            const std::string table = snapshotOnly ? "snapshot_index" : "document_catalog";
+            const auto original = observer.value()->query("SELECT digest FROM " + table).value().front().at("digest");
+            const std::array damaged{Value{"sha256:" + std::string(64U, '0')}};
+            REQUIRE(observer.value()->execute("UPDATE " + table + " SET digest=?", damaged));
+            REQUIRE_FALSE(service.append(next));
+            CHECK(service.journalAfter(document, 0U).value().empty());
+            REQUIRE(observer.value()->execute("UPDATE " + table + " SET digest=?", std::array{original}));
+            REQUIRE(service.append(next));
+            REQUIRE(service.recover());
+        }
+    }
 }
 
 TEST_CASE("PersistenceService migrates and appends an idempotent state journal", "[persistence][journal]")

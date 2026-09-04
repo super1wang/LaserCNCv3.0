@@ -621,19 +621,23 @@ foundation::Result<std::optional<SnapshotRecord>> PersistenceService::latestSnap
     const kernel::DocumentId& documentId) const
 {
     std::lock_guard lock(mutex_);
+    if(initialized_ && snapshotStore_ == nullptr) {
+        return foundation::Result<std::optional<SnapshotRecord>>::failure(snapshotPersistenceError(
+            "Persistence.SnapshotStoreNotConfigured", foundation::ErrorCategory::Conflict,
+            "A snapshot data store has not been configured"));
+    }
+    return latestSnapshotUnlocked(documentId);
+}
+
+foundation::Result<std::optional<SnapshotRecord>> PersistenceService::latestSnapshotUnlocked(
+    const kernel::DocumentId& documentId) const
+{
     if(!initialized_) {
         return foundation::Result<std::optional<SnapshotRecord>>::failure(
             snapshotPersistenceError(
                 "Persistence.NotReady",
                 foundation::ErrorCategory::Conflict,
                 "Persistence must be initialized before reading snapshots"));
-    }
-    if(snapshotStore_ == nullptr) {
-        return foundation::Result<std::optional<SnapshotRecord>>::failure(
-            snapshotPersistenceError(
-                "Persistence.SnapshotStoreNotConfigured",
-                foundation::ErrorCategory::Conflict,
-                "A snapshot data store has not been configured"));
     }
     try {
         const std::array parameters {
@@ -649,6 +653,11 @@ foundation::Result<std::optional<SnapshotRecord>> PersistenceService::latestSnap
         }
         if(rows.value().empty()) {
             return foundation::Result<std::optional<SnapshotRecord>>::success(std::nullopt);
+        }
+        if(snapshotStore_ == nullptr) {
+            return foundation::Result<std::optional<SnapshotRecord>>::failure(snapshotPersistenceError(
+                "Persistence.SnapshotStoreNotConfigured", foundation::ErrorCategory::Conflict,
+                "An indexed snapshot requires its data store for ownership verification"));
         }
         if(rows.value().size() != 1U) {
             return foundation::Result<std::optional<SnapshotRecord>>::failure(

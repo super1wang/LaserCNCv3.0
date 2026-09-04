@@ -240,6 +240,12 @@ private:
         const runtime::TransactionIdempotency& idempotency);
     [[nodiscard]] foundation::Result<runtime::TransactionCommit> loadCommitUnlocked(
         const kernel::TransactionId& transactionId) const;
+    [[nodiscard]] foundation::Result<std::vector<DocumentCatalogRecord>> documentCatalogUnlocked(
+        const std::optional<kernel::DocumentId>& documentId = std::nullopt) const;
+    [[nodiscard]] foundation::Result<std::optional<SnapshotRecord>> latestSnapshotUnlocked(
+        const kernel::DocumentId& documentId) const;
+    [[nodiscard]] foundation::Result<void> validateFirstJournalOwnership(
+        const runtime::TransactionCommit& commit) const;
 
     mutable std::mutex mutex_;
     std::unique_ptr<platform::IPersistenceBackend> backend_;
@@ -248,6 +254,7 @@ private:
     std::unique_ptr<platform::ISnapshotStore> snapshotStore_;
     bool sessionAttempted_{false};
     std::optional<platform::PersistenceSessionInfo> sessionInfo_;
+    bool journalRevisionsValidated_{false};
     bool initialized_{false};
     bool frozen_{false};
 };

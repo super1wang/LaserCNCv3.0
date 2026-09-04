@@ -311,6 +311,12 @@ foundation::Result<std::vector<DocumentCatalogRecord>>
 PersistenceService::documentCatalog() const
 {
     std::lock_guard lock(mutex_);
+    return documentCatalogUnlocked();
+}
+
+foundation::Result<std::vector<DocumentCatalogRecord>>
+PersistenceService::documentCatalogUnlocked(const std::optional<kernel::DocumentId>& filter) const
+{
     if(!initialized_) {
         return foundation::Result<std::vector<DocumentCatalogRecord>>::failure(
             catalogError(
@@ -319,9 +325,10 @@ PersistenceService::documentCatalog() const
                 "Persistence must be initialized before reading document lifecycle state"));
     }
     try {
-    auto rows = backend_->query(
-        "SELECT document_id,project_id,state,payload,digest,updated_at_ms "
-        "FROM document_catalog ORDER BY document_id");
+    const std::string columns = "SELECT document_id,project_id,state,payload,digest,updated_at_ms FROM document_catalog";
+    auto rows = filter
+        ? backend_->query(columns + " WHERE document_id=?", std::array{foundation::Value{std::string(filter->value())}})
+        : backend_->query(columns + " ORDER BY document_id");
     if(!rows) {
         return foundation::Result<std::vector<DocumentCatalogRecord>>::failure(
             std::move(rows).error());
@@ -355,6 +362,11 @@ PersistenceService::documentCatalog() const
                     "Persistence.InvalidDocumentCatalogRecord",
                     foundation::ErrorCategory::Infrastructure,
                     "A persisted document lifecycle record is invalid"));
+        }
+        if(filter && (documentId.value() != *filter || rows.value().size() != 1U)) {
+            return foundation::Result<std::vector<DocumentCatalogRecord>>::failure(catalogError(
+                "Persistence.DocumentCatalogIntegrityFailed", foundation::ErrorCategory::Infrastructure,
+                "A filtered document catalog lookup returned unexpected ownership"));
         }
         auto actualDigest = hashes_->digest(bytes(payload.value()));
         auto decoded = serializer_->deserialize(payload.value());

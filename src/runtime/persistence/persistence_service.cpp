@@ -1,4 +1,5 @@
 #include "object_record_codec.hpp"
+#include "journal_revision_validation.hpp"
 
 #include <lasercnc/persistence/persistence_service.hpp>
 
@@ -11,6 +12,7 @@
 #include <cstdint>
 #include <exception>
 #include <limits>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
@@ -367,7 +369,14 @@ foundation::Result<void> validateRecord(
             "A persisted journal payload does not match its control-plane metadata",
             {{"sequence", foundation::Value {std::to_string(record.sequence)}}}));
     }
-    return foundation::Result<void>::success();
+    const auto changes = root->find("changes");
+    const auto* objects = changes == root->end() ? nullptr : changes->second.getIf<foundation::Value::Array>();
+    if(objects == nullptr) {
+        return foundation::Result<void>::failure(persistenceError(
+            "Persistence.JournalPayloadInvalid", foundation::ErrorCategory::Infrastructure,
+            "A persisted journal has no valid change array"));
+    }
+    return detail::validateJournalRevisionTransition(record.revisionsBefore, record.revisionsAfter, !objects->empty());
 }
 
 constexpr std::string_view selectColumns =
@@ -377,6 +386,91 @@ constexpr std::string_view selectColumns =
     "project_revision_after,document_revision_after,geometry_revision_after,"
     "cam_revision_after,machine_context_revision_after,environment_revision_after,"
     "payload,digest,committed_at_ms";
+
+foundation::Result<void> validateRevisionChain(platform::IPersistenceBackend& backend,
+    const foundation::IValueSerializer& serializer, const platform::IHashService& hashes)
+{
+    auto rows = backend.query(std::string("SELECT ") + std::string(selectColumns)
+        + " FROM state_journal ORDER BY sequence");
+    if(!rows) { return foundation::Result<void>::failure(std::move(rows).error()); }
+    std::map<kernel::ProjectId, state::Revision> projects;
+    std::map<kernel::DocumentId, std::pair<kernel::ProjectId, state::RevisionSet>> documents;
+    std::uint64_t expectedSequence = 1U;
+    for(const auto& row : rows.value()) {
+        auto decoded = recordFromRow(row);
+        if(!decoded) { return foundation::Result<void>::failure(std::move(decoded).error()); }
+        const auto& record = decoded.value();
+        auto verified = validateRecord(record, serializer, hashes);
+        if(!verified) { return verified; }
+        if(record.sequence != expectedSequence++) {
+            return foundation::Result<void>::failure(persistenceError("Persistence.JournalSequenceGap",
+                foundation::ErrorCategory::Infrastructure, "Journal sequence is discontinuous before write admission"));
+        }
+        auto& project = projects[record.projectId];
+        if(project != record.revisionsBefore.at(state::RevisionScope::Project)) {
+            return foundation::Result<void>::failure(persistenceError("Persistence.ProjectRevisionChainBroken",
+                foundation::ErrorCategory::Infrastructure, "Project revision chain is discontinuous before write admission"));
+        }
+        project = record.revisionsAfter.at(state::RevisionScope::Project);
+        const auto [document, inserted] = documents.try_emplace(record.documentId, record.projectId, state::RevisionSet{});
+        if(!inserted && document->second.first != record.projectId) {
+            return foundation::Result<void>::failure(persistenceError("Persistence.DocumentOwnershipChanged",
+                foundation::ErrorCategory::Infrastructure, "Document journal ownership is inconsistent"));
+        }
+        for(const auto scope : revisionScopes) {
+            if(scope != state::RevisionScope::Project && document->second.second.at(scope) != record.revisionsBefore.at(scope)) {
+                return foundation::Result<void>::failure(persistenceError("Persistence.DocumentRevisionChainBroken",
+                    foundation::ErrorCategory::Infrastructure, "Document revision chain is discontinuous before write admission"));
+            }
+        }
+        document->second.second = record.revisionsAfter;
+    }
+    return foundation::Result<void>::success();
+}
+
+foundation::Result<void> validateAppendHeads(platform::IPersistenceBackend& backend,
+    const runtime::TransactionCommit& commit, const foundation::IValueSerializer& serializer,
+    const platform::IHashService& hashes, bool& documentHasJournal)
+{
+    for(const bool project : {true, false}) {
+        const std::array parameter{foundation::Value{std::string(project ? commit.projectId.value() : commit.documentId.value())}};
+        auto rows = backend.query(std::string("SELECT ") + std::string(selectColumns)
+            + (project ? " FROM state_journal WHERE project_id=? ORDER BY sequence DESC LIMIT 1"
+                       : " FROM state_journal WHERE document_id=? ORDER BY sequence DESC LIMIT 1"), parameter);
+        if(!rows) { return foundation::Result<void>::failure(std::move(rows).error()); }
+        if(rows.value().size() > 1U) {
+            return foundation::Result<void>::failure(persistenceError("Persistence.InvalidJournalRow",
+                foundation::ErrorCategory::Infrastructure, "A durable journal head is ambiguous"));
+        }
+        state::RevisionSet expected;
+        if(!rows.value().empty()) {
+            if(!project) { documentHasJournal = true; }
+            auto decoded = recordFromRow(rows.value().front());
+            if(!decoded) { return foundation::Result<void>::failure(std::move(decoded).error()); }
+            const auto& head = decoded.value();
+            auto verified = validateRecord(head, serializer, hashes);
+            if(!verified) { return verified; }
+            if(head.projectId != commit.projectId || (!project && head.documentId != commit.documentId)) {
+                return foundation::Result<void>::failure(persistenceError("Persistence.DocumentOwnershipChanged",
+                    foundation::ErrorCategory::Conflict, "The durable head belongs to a different document or project"));
+            }
+            expected = head.revisionsAfter;
+        }
+        for(const auto scope : revisionScopes) {
+            if((scope == state::RevisionScope::Project) != project) { continue; }
+            if(expected.at(scope) != commit.revisionsBefore.at(scope)) {
+                return foundation::Result<void>::failure(persistenceError("Persistence.JournalRevisionConflict",
+                    foundation::ErrorCategory::Conflict, "The submitted revision does not match the durable journal head",
+                    {{"projectId", foundation::Value{std::string(commit.projectId.value())}},
+                     {"documentId", foundation::Value{std::string(commit.documentId.value())}},
+                     {"scope", foundation::Value{std::string(state::revisionScopeName(scope))}},
+                     {"expected", foundation::Value{std::to_string(expected.at(scope).value())}},
+                     {"actual", foundation::Value{std::to_string(commit.revisionsBefore.at(scope).value())}}}));
+            }
+        }
+    }
+    return foundation::Result<void>::success();
+}
 
 // A failed rollback makes every later observation on this connection untrustworthy.
 // 中文翻译：回滚失败后，该连接上的后续读写均不再可信，必须使用新实例恢复。
@@ -809,6 +903,34 @@ foundation::Result<void> PersistenceService::initialize()
     }
 }
 
+foundation::Result<void> PersistenceService::validateFirstJournalOwnership(
+    const runtime::TransactionCommit& commit) const
+{
+    auto catalog = documentCatalogUnlocked(commit.documentId);
+    if(!catalog) { return foundation::Result<void>::failure(std::move(catalog).error()); }
+    for(const auto& record : catalog.value()) {
+        if(record.projectId != commit.projectId) {
+            return foundation::Result<void>::failure(persistenceError("Persistence.DocumentOwnershipChanged",
+                foundation::ErrorCategory::Conflict, "The first journal disagrees with the authenticated document catalog"));
+        }
+    }
+    auto snapshot = latestSnapshotUnlocked(commit.documentId);
+    if(!snapshot) { return foundation::Result<void>::failure(std::move(snapshot).error()); }
+    if(snapshot.value()) {
+        if(snapshot.value()->projectId != commit.projectId) {
+            return foundation::Result<void>::failure(persistenceError("Persistence.DocumentOwnershipChanged",
+                foundation::ErrorCategory::Conflict, "The first journal disagrees with the authenticated snapshot"));
+        }
+        for(const auto scope : revisionScopes) {
+            if(scope != state::RevisionScope::Project && snapshot.value()->revisions.at(scope) != state::Revision{}) {
+                return foundation::Result<void>::failure(persistenceError("Persistence.SnapshotRevisionNotJournaled",
+                    foundation::ErrorCategory::Infrastructure, "A snapshot has local revisions without a journal"));
+            }
+        }
+    }
+    return foundation::Result<void>::success();
+}
+
 foundation::Result<JournalRecord> PersistenceService::append(
     const runtime::TransactionCommit& commit,
     const std::optional<runtime::TransactionIdempotency>& idempotency)
@@ -903,6 +1025,36 @@ foundation::Result<JournalRecord> PersistenceService::append(
             }
             transactionOpen = false;
             return record;
+        }
+
+        auto transition = detail::validateJournalRevisionTransition(commit.revisionsBefore,
+            commit.revisionsAfter, !commit.changes.empty(), foundation::ErrorCategory::Validation);
+        if(!transition) {
+            auto failure = rollback(*backend_, std::move(transition).error());
+            return foundation::Result<JournalRecord>::failure(std::move(failure).error());
+        }
+        // The proof is connection-local and valid only while this Host exclusively owns the journal.
+        // 中文翻译：修订链证明仅属于当前独占连接，不保存第二套修订真值；每次写入仍读取并认证持久头。
+        if(!journalRevisionsValidated_) {
+            auto verified = validateRevisionChain(*backend_, *serializer_, *hashes_);
+            if(!verified) {
+                auto failure = rollback(*backend_, std::move(verified).error());
+                return foundation::Result<JournalRecord>::failure(std::move(failure).error());
+            }
+            journalRevisionsValidated_ = true;
+        }
+        bool documentHasJournal = false;
+        auto heads = validateAppendHeads(*backend_, commit, *serializer_, *hashes_, documentHasJournal);
+        if(!heads) {
+            auto failure = rollback(*backend_, std::move(heads).error());
+            return foundation::Result<JournalRecord>::failure(std::move(failure).error());
+        }
+        if(!documentHasJournal) {
+            auto ownership = validateFirstJournalOwnership(commit);
+            if(!ownership) {
+                auto failure = rollback(*backend_, std::move(ownership).error());
+                return foundation::Result<JournalRecord>::failure(std::move(failure).error());
+            }
         }
 
         std::vector<foundation::Value> parameters;

@@ -137,6 +137,23 @@ public:
     }
 };
 
+class EventingCreateHandler final : public ICommandHandler {
+public:
+    Result<Value> execute(const CommandRequest& request, ApplicationTransaction& transaction) override
+    {
+        auto result = delegate_.execute(request, transaction);
+        if(!result) { return result; }
+        auto collected = transaction.collectEvent(lasercnc::messaging::PendingDomainEvent{
+            validId<EventName>("kernel.history.created"), {1U, 0U, 0U}, std::nullopt, result.value()});
+        if(!collected) { return Result<Value>::failure(std::move(collected).error()); }
+        ++stagedEvents;
+        return result;
+    }
+    unsigned int stagedEvents{0U};
+private:
+    CreateHandler delegate_;
+};
+
 class ReplaceHandler final : public ICommandHandler {
 public:
     Result<Value> execute(
@@ -992,6 +1009,8 @@ TEST_CASE("Persistence stage failures preserve history revisions and idempotency
     const std::array stages{
         Stage{"claim begin", BackendPoint::Begin, "", 1U},
         Stage{"journal begin", BackendPoint::Begin, "", 2U},
+        Stage{"project revision head", BackendPoint::Query, "FROM state_journal WHERE project_id=", 1U},
+        Stage{"document revision head", BackendPoint::Query, "FROM state_journal WHERE document_id=", 1U},
         Stage{"journal insert", BackendPoint::Execute, "INSERT INTO state_journal", 1U},
         Stage{"journal readback", BackendPoint::Query, "FROM state_journal WHERE transaction_id=", 2U},
         Stage{"idempotency completion", BackendPoint::Execute, "UPDATE command_idempotency SET status='completed'", 1U},
@@ -1086,6 +1105,83 @@ TEST_CASE("Persistence stage failures preserve history revisions and idempotency
                 }
             }
         }
+    }
+}
+
+TEST_CASE("Journal write admission failure publishes no command state history events or receipt", "[history][persistence][revision-admission]")
+{
+    const auto path = databasePath();
+    const auto project = validId<ProjectId>("project.revision-gateway");
+    const auto document = validId<DocumentId>("document.revision-gateway");
+    const auto session = validId<SessionId>("session.revision-gateway");
+    auto attempted = request("request.revision-gateway", "kernel.history.event-create", project,
+        document, session, "object.attempted");
+    attempted.idempotencyKey = validId<IdempotencyKey>("key.revision-gateway");
+    {
+        AppKernel kernel;
+        configurePersistence(kernel, path);
+        configureRuntime(kernel, project, document, session, true);
+        auto eventing = std::make_shared<EventingCreateHandler>();
+        REQUIRE(lasercnc::test::registerCommand(kernel, createDescriptor("kernel.history.event-create", true), eventing));
+        REQUIRE(kernel.bootstrap());
+        const auto seeded = kernel.execution().executeCommand(request("request.revision-seed", "kernel.history.create",
+            project, document, session, "object.seed"));
+        REQUIRE(seeded);
+        REQUIRE(seeded.value().commit.has_value());
+        const auto before = kernel.documents().snapshot(document).value();
+        const auto history = kernel.history().snapshot(document).value().cursor;
+        auto external = *seeded.value().commit;
+        external.transactionId = validId<TransactionId>("tx.revision-external");
+        external.revisionsBefore = external.revisionsAfter;
+        external.revisionsAfter = RevisionManager::advance(external.revisionsBefore,
+            std::array{RevisionScope::Project, RevisionScope::Document}).value();
+        external.changes.front().objectId = validId<ObjectId>("object.external");
+        external.changes.front().after->id = external.changes.front().objectId;
+        external.history = {};
+        external.events.clear();
+        // Raw SQL simulates a durable head ahead of the in-memory transaction; no second Host is admitted.
+        // 中文翻译：原始 SQL 模拟持久头领先于内存事务的交错，不启动第二个合法 Host。
+        lasercnc::test::injectJournalFixture(path, external);
+        std::size_t events = 0U;
+        auto subscription = kernel.events().subscribe(validId<SubscriptionId>("subscription.revision-gateway"),
+            lasercnc::messaging::EventFilter{lasercnc::messaging::EventKind::Domain, std::nullopt},
+            lasercnc::messaging::DeliveryMode::Immediate, [&](const auto&) { ++events; });
+        REQUIRE(subscription);
+        const auto rejected = kernel.execution().executeCommand(attempted);
+        REQUIRE_FALSE(rejected);
+        CHECK(std::string(rejected.error().code.value()) == "Persistence.JournalRevisionConflict");
+        CHECK(kernel.documents().snapshot(document).value().objects().all() == before.objects().all());
+        CHECK(kernel.documents().snapshot(document).value().revisions() == before.revisions());
+        CHECK(kernel.history().snapshot(document).value().cursor == history);
+        CHECK(eventing->stagedEvents == 1U);
+        CHECK(events == 0U);
+        CHECK(kernel.persistence().journalAfter(document, 0U).value().size() == 2U);
+        auto observer = SqlitePersistenceBackend::open({path});
+        REQUIRE(observer);
+        CHECK(observer.value()->query("SELECT * FROM command_idempotency").value().empty());
+        REQUIRE(kernel.shutdown());
+    }
+    {
+        AppKernel kernel;
+        configurePersistence(kernel, path);
+        configureRuntime(kernel, project, document, session, false);
+        auto eventing = std::make_shared<EventingCreateHandler>();
+        REQUIRE(lasercnc::test::registerCommand(kernel, createDescriptor("kernel.history.event-create", true), eventing));
+        REQUIRE(kernel.bootstrap());
+        CHECK(hasObject(kernel, document, "object.seed"));
+        CHECK(hasObject(kernel, document, "object.external"));
+        CHECK_FALSE(hasObject(kernel, document, "object.attempted"));
+        std::size_t events = 0U;
+        auto subscription = kernel.events().subscribe(validId<SubscriptionId>("subscription.revision-retry"),
+            lasercnc::messaging::EventFilter{lasercnc::messaging::EventKind::Domain, std::nullopt},
+            lasercnc::messaging::DeliveryMode::Immediate, [&](const auto&) { ++events; });
+        REQUIRE(subscription);
+        REQUIRE(kernel.execution().executeCommand(attempted));
+        CHECK(eventing->stagedEvents == 1U);
+        CHECK(events == 1U);
+        CHECK(kernel.documents().snapshot(document).value().revisions().at(RevisionScope::Project) == Revision{3U});
+        CHECK(kernel.persistence().journalAfter(document, 0U).value().size() == 3U);
+        REQUIRE(kernel.shutdown());
     }
 }
 
