@@ -27,6 +27,8 @@ C2a 修复前的 shutdown 先分散读取 Transaction/Command/Query/Workflow/Scr
 
 后续进展：C2b1 的 Project-only 与 Task 长期桥接已通过本地检查点；C2b2a 的编排实例归属、完整控制调用与关闭预检也已通过。C2b2 命令分类和恢复、C2b3 目录失效及 C2c 仍待完成，当前状态以 [C2b 契约](ST1C2b-项目活动与生命周期控制.md) 为准，文末 C2a 历史成绩不自动延伸为这些节点的签核。
 
+C2b2b 后续补充：终态 Workflow 历史已按认证持久目录恢复，不要求当前文档 Open，不重开容器；非终态准入不变。Debug 328/328、14 项各 10 次与纯生产通过，详见 [C2b2b 交付](../阶段交付/2026-09-04-ST1C2b2b-终态工作流历史恢复.md)。生命周期命令分类及其他 legacy 身份范围仍须继续验收。
+
 ## 当前实现和证据
 
 私有 `src/kernel/execution_admission.hpp` 以互斥临界区同步租约计数与关闭，不在执行 Handler 或基础设施回调时持锁，不序列化普通请求。AppKernel 唯一持有准入门，Gateway 使用必需引用，Project/Document 使用仅由 AppKernel 安装的私有指针；独立组件没有默认启用的 Host 准入假象，也没有新增公共装配/重开接口。

@@ -1186,6 +1186,18 @@ public:
         if(!checkpoints) {
             return foundation::Result<void>::failure(std::move(checkpoints).error());
         }
+        std::map<kernel::DocumentId, kernel::ProjectId> historicalOwners;
+        if(documentRuntime_ != nullptr && std::ranges::any_of(checkpoints.value(), [](const auto& checkpoint) {
+               return isTerminal(checkpoint.snapshot.state);
+           })) {
+            // Historical ownership comes from the verified durable catalog, including tombstones.
+            // 中文翻译：历史归属来自已校验的持久目录（包括删除墓碑），不依赖文档当前装载状态。
+            auto catalog = persistence_.documentCatalog();
+            if(!catalog) { return foundation::Result<void>::failure(std::move(catalog).error()); }
+            for(const auto& record : catalog.value()) {
+                historicalOwners.emplace(record.documentId, record.projectId);
+            }
+        }
         std::map<kernel::WorkflowId, std::shared_ptr<Instance>> restored;
         for(auto& checkpoint : checkpoints.value()) {
             auto definition = registry_.resolve(checkpoint.snapshot.workflow);
@@ -1237,26 +1249,36 @@ public:
                     &checkpoint.snapshot.workflowId));
             }
             if(documentRuntime_ != nullptr) {
-                auto lifecycle = documentRuntime_->lifecycle(
-                    checkpoint.request.documentId);
-                if(!lifecycle
-                   || lifecycle.value().state != DocumentLifecycleState::Open
-                   || lifecycle.value().projectId != checkpoint.request.projectId) {
-                    return foundation::Result<void>::failure(runtimeError(
-                        "Workflow.RecoveryDocumentUnavailable",
-                        foundation::ErrorCategory::Conflict,
-                        "A durable workflow document is not open under its recorded project",
-                        &checkpoint.snapshot.workflowId,
-                        nullptr,
-                        lifecycle
-                            ? nullptr
-                            : std::make_shared<const foundation::Error>(
-                                  std::move(lifecycle).error())));
+                if(isTerminal(checkpoint.snapshot.state)) {
+                    const auto owner = historicalOwners.find(checkpoint.request.documentId);
+                    if(owner == historicalOwners.end() || owner->second != checkpoint.request.projectId) {
+                        return foundation::Result<void>::failure(runtimeError(
+                            "Workflow.RecoveryOwnershipUnavailable", foundation::ErrorCategory::Conflict,
+                            "A historical workflow requires verified durable document ownership",
+                            &checkpoint.snapshot.workflowId));
+                    }
+                } else {
+                    auto lifecycle = documentRuntime_->lifecycle(
+                        checkpoint.request.documentId);
+                    if(!lifecycle
+                       || lifecycle.value().state != DocumentLifecycleState::Open
+                       || lifecycle.value().projectId != checkpoint.request.projectId) {
+                        return foundation::Result<void>::failure(runtimeError(
+                            "Workflow.RecoveryDocumentUnavailable",
+                            foundation::ErrorCategory::Conflict,
+                            "A durable workflow document is not open under its recorded project",
+                            &checkpoint.snapshot.workflowId,
+                            nullptr,
+                            lifecycle
+                                ? nullptr
+                                : std::make_shared<const foundation::Error>(
+                                      std::move(lifecycle).error())));
+                    }
                 }
             }
             bool resumedMainAttempt = false;
             for(auto& step : checkpoint.snapshot.steps) {
-                if(step.state != WorkflowStepState::Running) {
+                if(isTerminal(checkpoint.snapshot.state) || step.state != WorkflowStepState::Running) {
                     continue;
                 }
                 if(checkpoint.snapshot.state == WorkflowState::Compensating

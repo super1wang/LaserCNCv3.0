@@ -16,6 +16,8 @@ C2b1 已实现 Project-only Command/Query 活动保护、无文档 Task 项目�
 
 C2b2a 已补编排实例真实归属、完整 advance/cancel 保护、未保存终态与文档关闭预检，Debug 324/324、20 项各 10 次及纯生产通过，见 [C2b2a 交付](docs/阶段交付/2026-09-04-ST1C2b2a-编排活动与关闭预检.md)。生命周期命令分类、终态/legacy 恢复、C2b3 和后续冻结节点仍未完成。
 
+C2b2b 已补终态 Workflow 的持久归属恢复，允许查询 Detached/Closed/Removed 容器的历史而不重新打开或执行，Debug 328/328、14 项各 10 次及纯生产通过，见 [C2b2b 交付](docs/阶段交付/2026-09-04-ST1C2b2b-终态工作流历史恢复.md)。生命周期命令分类与 legacy Project-only Task/Effect 认证根仍待处理，整体未冻结。
+
 - Phase 1：Foundation（`StrongId`、`Value`、`Result`、`Error`、`Schema`）
 - Phase 2：Application Composition（`AppKernel`、`ServiceRegistry`、`ModuleRuntime`）
 - Phase 3：Infrastructure Adapters（日志、JSON、TOML、SQLite、线程池）

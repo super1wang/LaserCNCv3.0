@@ -39,6 +39,14 @@
 
 1. C2b2a 编排活动与关闭预检：请求 ProjectId 必须拥有 DocumentId，拒绝不创建实例；在途 advance/cancel 覆盖节点回调、终态 trace/metrics 和取消检查点；终态未保存不能提前关闭，失败重试恢复；不要求已完成实例的只读/幂等清理控制重新打开容器。本地检查点通过，完整证据见 C2b2a 交付。
 2. 生命周期命令分类：明确治理的控制操作、能力、目标身份及允许状态，close 不被自身普通执行租约阻塞，open 不要求目标已 Open；禁止调用方 skip/unchecked 或改成 Global 绕过。不得把直接 Runtime API 已有支持当作命令化控制已交付。
-3. 持久归属与恢复：核验 legacy Project-only Task/Effect 的认证根；终态 Workflow 在文档 Detached、项目 Closed 和文档 Removed 后的恢复/历史查询必须单独验证。当前 `WorkflowRuntime::restore` 对所有检查点要求文档 Open，已定位与终态历史恢复的潜在冲突，尚未修改，不计通过。活动实例仍必须有有效可执行归属，不得放宽为从未认证 payload 自动造项目。
+3. 持久归属与恢复：终态 Workflow 在文档 Detached、项目 Closed 和文档 Removed 后的恢复/历史查询本地检查点通过，见 [C2b2b 交付](../阶段交付/2026-09-04-ST1C2b2b-终态工作流历史恢复.md)：Debug 328/328、14 项各 10 次及纯生产通过；终态从认证的 DocumentCatalog（含 Removed 墓碑）核验所有者，非终态仍要求真实 Open 文档。缺失/错误归属、目录读取错误/异常均拒绝，不从 checkpoint 造项目或文档。legacy Project-only Task/Effect 的认证根仍待核验，不由此项代签。
 
 生产修改前两项实例回归为 0/2、0.17 秒，证实错误 ProjectId 被接受及终态发布中提前关闭。扩展取消故障矩阵又暴露先写 Document Closing、后检查长期活动造成持久化回调重入锁和错误中间态，专项为 19/20；修复预检顺序后 20/20、7.54 秒。失败日志均保留，最终证据随本地交付登记。完成 C2b2a 不关闭后两项，也不关闭 C2b3/C2c/ST1D。
+
+## 终态历史恢复约束（C2b2b）
+
+- 终态属于历史，不要求当前容器可执行；只有已校验持久文档目录中的稳定归属可用于核验，包括 Removed 墓碑。不得用当前加载集合代替历史身份，也不得因历史存在而自动 open 或 recreate。
+- 非终态恢复保持原 `Workflow.RecoveryDocumentUnavailable` 校验，不能利用历史分支进入 Detached/Closed/Removed 容器。终态缺失或错误目录归属返回 `Workflow.RecoveryOwnershipUnavailable`；读取错误沿原错误链传播，恢复实例表不部分安装。
+- 保留工作流定义存在、版本、摘要、步骤集合及完成顺序校验；本轮不授予升级后的任意定义解释旧历史的权利，定义兼容性由 C6 完整限定。
+- 终态快照不得转换 Running 步骤或设置重放标记；终态 advance/cancel 沿既有幂等终态路径返回，不进入 Handler。失败 Host 销毁后再重试，不在 Failed Host 原地强行重开。
+- 六个自然终态场景（成功/取消 × Detached/Closed/Removed）生产修改前均重启失败；修复后每场景连续两次新 Host 恢复通过。其余 Failed/Compensated/CompensationFailed 通过认证检查点夹具验证状态保留，不等同于新增真实补偿执行测试。真实跨进程崩溃认证继续使用既有门禁，最终扩展由 ST1D 签核。

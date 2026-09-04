@@ -3212,6 +3212,239 @@ TEST_CASE("AppKernel restores a running workflow at the same idempotent attempt"
     removeSnapshotDirectory(snapshotDirectory);
 }
 
+TEST_CASE("Workflow history recovers terminal instances without reopening detached closed or removed containers", "[persistence][workflow][history-recovery]")
+{
+    for(const bool cancel : {false, true}) {
+        for(const int mode : {0, 1, 2}) {
+            const auto path = uniqueDatabasePath();
+            const auto directory = uniqueSnapshotDirectory();
+            INFO(path.string());
+            INFO(mode);
+            INFO(cancel);
+            const auto request = persistentWorkflowRequest("workflow.terminal-history");
+            const auto definition = persistentWorkflowDefinition(true);
+            const auto expected = cancel ? WorkflowState::Cancelled : WorkflowState::Succeeded;
+            {
+                AppKernel kernel;
+                auto handler = std::make_shared<PersistentCreateHandler>();
+                configureRuntimeKernel(kernel, path, directory, request.sessionId, handler);
+                REQUIRE(kernel.addDocument(request.projectId, request.documentId));
+                REQUIRE(lasercnc::test::registerWorkflow(kernel, definition));
+                REQUIRE(kernel.bootstrap());
+                REQUIRE(kernel.execution().startWorkflow(request));
+                auto terminal = cancel ? kernel.execution().cancelWorkflow(request.workflowId)
+                    : kernel.execution().advanceWorkflow(request.workflowId);
+                REQUIRE(terminal);
+                CHECK(terminal.value().state == expected);
+                CHECK(handler->calls == (cancel ? 0U : 1U));
+                if(mode != 1) { REQUIRE(kernel.documentRuntime().close(request.documentId)); }
+                if(mode == 2) { REQUIRE(kernel.documentRuntime().remove(request.documentId)); }
+                if(mode != 0) { REQUIRE(kernel.projectRuntime().close(request.projectId)); }
+                REQUIRE(kernel.shutdown());
+            }
+            for(unsigned restart = 0U; restart < 2U; ++restart) {
+                AppKernel kernel;
+                auto handler = std::make_shared<PersistentCreateHandler>();
+                configureRuntimeKernel(kernel, path, directory, request.sessionId, handler);
+                REQUIRE(lasercnc::test::registerWorkflow(kernel, definition));
+                auto bootstrapped = kernel.bootstrap();
+                CHECK(bootstrapped);
+                if(!bootstrapped) { break; }
+                CHECK_FALSE(kernel.documents().contains(request.documentId));
+                CHECK(kernel.projectRuntime().lifecycle(request.projectId).value().state
+                    == (mode == 0 ? ProjectLifecycleState::Open : ProjectLifecycleState::Closed));
+                auto lifecycle = kernel.documentRuntime().lifecycle(request.documentId);
+                if(mode == 2) { CHECK_FALSE(lifecycle); }
+                else { REQUIRE(lifecycle); CHECK(lifecycle.value().state == DocumentLifecycleState::Detached); }
+                auto recovered = kernel.execution().workflow(request.workflowId);
+                REQUIRE(recovered);
+                CHECK(recovered.value().state == expected);
+                CHECK(kernel.execution().advanceWorkflow(request.workflowId).value().state == expected);
+                CHECK(kernel.execution().cancelWorkflow(request.workflowId).value().state == expected);
+                CHECK(handler->calls == 0U);
+                auto catalog = kernel.persistence().documentCatalog();
+                REQUIRE(catalog);
+                REQUIRE(catalog.value().size() == 1U);
+                CHECK(catalog.value().front().state == (mode == 2
+                    ? DocumentPersistenceState::Removed : DocumentPersistenceState::Detached));
+                REQUIRE(kernel.shutdown());
+            }
+        }
+    }
+}
+
+TEST_CASE("Workflow history refuses missing or foreign ownership and nonterminal closed documents", "[persistence][workflow][history-recovery]")
+{
+    for(const int mode : {0, 1, 2}) {
+        const auto path = uniqueDatabasePath();
+        const auto directory = uniqueSnapshotDirectory();
+        INFO(path.string());
+        INFO(mode);
+        auto request = persistentWorkflowRequest("workflow.history-invalid");
+        const auto definition = persistentWorkflowDefinition(false);
+        const auto owner = request.projectId;
+        const auto foreign = validId<ProjectId>("project.foreign-history");
+        {
+            AppKernel kernel;
+            configureRuntimeKernel(kernel, path, directory, request.sessionId, std::make_shared<PersistentCreateHandler>());
+            REQUIRE(kernel.addProject(owner));
+            REQUIRE(kernel.addProject(foreign));
+            if(mode != 0) { REQUIRE(kernel.addDocument(owner, request.documentId)); }
+            REQUIRE(lasercnc::test::registerWorkflow(kernel, definition));
+            REQUIRE(kernel.bootstrap());
+            REQUIRE(kernel.projectRuntime().close(owner));
+            REQUIRE(kernel.projectRuntime().close(foreign));
+            REQUIRE(kernel.shutdown());
+        }
+        if(mode == 1) { request.projectId = foreign; }
+        {
+            auto seed = lasercnc::test::openPersistenceFixture(path);
+            auto snapshot = persistentWorkflowSnapshot(request,
+                mode == 2 ? WorkflowState::Pending : WorkflowState::Cancelled,
+                mode == 2 ? WorkflowStepState::Pending : WorkflowStepState::Cancelled);
+            REQUIRE(seed->saveWorkflowCheckpoint(request, definition, snapshot, {}));
+        }
+        AppKernel kernel;
+        auto handler = std::make_shared<PersistentCreateHandler>();
+        configureRuntimeKernel(kernel, path, directory, request.sessionId, handler);
+        REQUIRE(lasercnc::test::registerWorkflow(kernel, definition));
+        auto rejected = kernel.bootstrap();
+        REQUIRE_FALSE(rejected);
+        CHECK(std::string(rejected.error().code.value()) == "Workflow.KernelRecoveryFailed");
+        REQUIRE(rejected.error().cause != nullptr);
+        CHECK(std::string(rejected.error().cause->code.value()) == (mode == 2
+            ? "Workflow.RecoveryDocumentUnavailable" : "Workflow.RecoveryOwnershipUnavailable"));
+        CHECK_FALSE(kernel.execution().workflow(request.workflowId));
+        CHECK_FALSE(kernel.documents().contains(request.documentId));
+        CHECK(kernel.projectRuntime().lifecycle(owner).value().state == ProjectLifecycleState::Closed);
+        CHECK(kernel.projectRuntime().lifecycle(foreign).value().state == ProjectLifecycleState::Closed);
+        CHECK(handler->calls == 0U);
+    }
+}
+
+TEST_CASE("Workflow history preserves all terminal states under a verified closed owner", "[persistence][workflow][history-recovery]")
+{
+    const auto path = uniqueDatabasePath();
+    const auto directory = uniqueSnapshotDirectory();
+    INFO(path.string());
+    const auto request = persistentWorkflowRequest("workflow.history-all");
+    const auto definition = persistentWorkflowDefinition(false);
+    const std::array states{WorkflowState::Succeeded, WorkflowState::Failed, WorkflowState::Cancelled,
+        WorkflowState::Compensated, WorkflowState::CompensationFailed};
+    const std::array steps{WorkflowStepState::Succeeded, WorkflowStepState::Failed, WorkflowStepState::Cancelled,
+        WorkflowStepState::Compensated, WorkflowStepState::CompensationFailed};
+    {
+        AppKernel kernel;
+        configureRuntimeKernel(kernel, path, directory, request.sessionId, std::make_shared<PersistentCreateHandler>());
+        REQUIRE(kernel.addDocument(request.projectId, request.documentId));
+        REQUIRE(lasercnc::test::registerWorkflow(kernel, definition));
+        REQUIRE(kernel.bootstrap());
+        REQUIRE(kernel.projectRuntime().close(request.projectId));
+        REQUIRE(kernel.shutdown());
+    }
+    {
+        auto seed = lasercnc::test::openPersistenceFixture(path);
+        for(std::size_t index = 0U; index < states.size(); ++index) {
+            auto historical = request;
+            historical.workflowId = WorkflowId::create("workflow.history-all." + std::to_string(index)).value();
+            auto snapshot = persistentWorkflowSnapshot(historical, states[index], steps[index], 2U);
+            snapshot.variables = Value{Value::Object{{"retained", Value{true}}}};
+            REQUIRE(seed->saveWorkflowCheckpoint(historical, definition, snapshot, {}));
+        }
+    }
+    AppKernel kernel;
+    auto handler = std::make_shared<PersistentCreateHandler>();
+    configureRuntimeKernel(kernel, path, directory, request.sessionId, handler);
+    REQUIRE(lasercnc::test::registerWorkflow(kernel, definition));
+    REQUIRE(kernel.bootstrap());
+    for(std::size_t index = 0U; index < states.size(); ++index) {
+        const auto id = WorkflowId::create("workflow.history-all." + std::to_string(index)).value();
+        auto recovered = kernel.execution().workflow(id);
+        REQUIRE(recovered);
+        CHECK(recovered.value().state == states[index]);
+        REQUIRE(recovered.value().steps.size() == 1U);
+        CHECK(recovered.value().steps.front().state == steps[index]);
+        CHECK(recovered.value().steps.front().attempt == 2U);
+        CHECK_FALSE(recovered.value().steps.front().replayCurrentAttempt);
+        CHECK_FALSE(recovered.value().steps.front().replayCompensationAttempt);
+        CHECK(recovered.value().variables == Value{Value::Object{{"retained", Value{true}}}});
+        CHECK(kernel.execution().advanceWorkflow(id).value().state == states[index]);
+        CHECK(kernel.execution().cancelWorkflow(id).value().state == states[index]);
+    }
+    CHECK(handler->calls == 0U);
+    CHECK_FALSE(kernel.documents().contains(request.documentId));
+    CHECK(kernel.projectRuntime().lifecycle(request.projectId).value().state == ProjectLifecycleState::Closed);
+    REQUIRE(kernel.shutdown());
+}
+
+TEST_CASE("Workflow history fails closed on its durable ownership read and permits a clean restart", "[persistence][workflow][history-recovery]")
+{
+    using namespace lasercnc::test;
+    for(const bool throws : {false, true}) {
+        const auto path = uniqueDatabasePath();
+        const auto directory = uniqueSnapshotDirectory();
+        INFO(path.string());
+        const auto request = persistentWorkflowRequest("workflow.history-read-fault");
+        const auto definition = persistentWorkflowDefinition(false);
+        {
+            AppKernel kernel;
+            configureRuntimeKernel(kernel, path, directory, request.sessionId, std::make_shared<PersistentCreateHandler>());
+            REQUIRE(kernel.addDocument(request.projectId, request.documentId));
+            REQUIRE(registerWorkflow(kernel, definition));
+            REQUIRE(kernel.bootstrap());
+            REQUIRE(kernel.execution().startWorkflow(request));
+            REQUIRE(kernel.execution().cancelWorkflow(request.workflowId));
+            REQUIRE(kernel.projectRuntime().close(request.projectId));
+            REQUIRE(kernel.shutdown());
+        }
+        {
+            AppKernel kernel;
+            REQUIRE(kernel.executionServices().configure(std::make_shared<JsonconsAdapter>(), std::make_shared<NullLogService>()));
+            REQUIRE(registerWorkflow(kernel, definition));
+            auto sqlite = SqlitePersistenceBackend::open({path});
+            REQUIRE(sqlite);
+            auto backend = std::make_unique<FaultInjectingBackend>(std::move(sqlite).value());
+            auto* faults = backend.get();
+            bool checkpointsRead = false;
+            bool armed = false;
+            faults->beforeOperation = [&](BackendPoint point, std::string_view sql) {
+                if(point != BackendPoint::Query) { return; }
+                if(sql.find("FROM workflow_instances") != std::string_view::npos) { checkpointsRead = true; }
+                if(checkpointsRead && !armed && sql.find("FROM document_catalog") != std::string_view::npos) {
+                    armed = true;
+                    faults->arm(BackendPoint::Query, "FROM document_catalog", 1U, throws);
+                }
+            };
+            auto snapshots = FilesystemSnapshotStore::create({directory, 1024U * 1024U});
+            REQUIRE(snapshots);
+            REQUIRE(kernel.configurePersistence(std::move(backend), std::make_shared<JsonconsAdapter>(),
+                std::make_shared<Sha256HashService>(), std::move(snapshots).value()));
+            auto rejected = kernel.bootstrap();
+            REQUIRE_FALSE(rejected);
+            CHECK(armed);
+            CHECK(faults->hits == 1U);
+            CHECK(std::string(rejected.error().code.value()) == "Workflow.KernelRecoveryFailed");
+            REQUIRE(rejected.error().cause != nullptr);
+            CHECK(std::string(rejected.error().cause->code.value()) == (throws
+                ? "Persistence.DocumentCatalogReadFailed" : "Test.BackendStageFailure"));
+            CHECK_FALSE(kernel.execution().workflow(request.workflowId));
+            CHECK_FALSE(kernel.documents().contains(request.documentId));
+            CHECK(kernel.projectRuntime().lifecycle(request.projectId).value().state == ProjectLifecycleState::Closed);
+            faults->beforeOperation = {};
+        }
+        {
+            AppKernel kernel;
+            configureRuntimeKernel(kernel, path, directory, request.sessionId, std::make_shared<PersistentCreateHandler>());
+            REQUIRE(registerWorkflow(kernel, definition));
+            REQUIRE(kernel.bootstrap());
+            CHECK(kernel.execution().workflow(request.workflowId).value().state == WorkflowState::Cancelled);
+            CHECK_FALSE(kernel.documents().contains(request.documentId));
+            CHECK(kernel.projectRuntime().lifecycle(request.projectId).value().state == ProjectLifecycleState::Closed);
+            REQUIRE(kernel.shutdown());
+        }
+    }
+}
+
 TEST_CASE("Instance ownership retains cancellation until terminal checkpoint retry succeeds", "[persistence][workflow][instance-ownership]")
 {
     using namespace lasercnc::test;
