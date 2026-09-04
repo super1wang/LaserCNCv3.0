@@ -39,6 +39,8 @@ Phase 6 在 Kernel 内建立长耗时工作的唯一语义入口：`TaskRuntime 
 - Shared 使用受配置 capacity 约束，Exclusive 要求该槽无任何持有者；
 - ProjectRead 与 ProjectWrite 规范化到同一项目槽，ProjectWrite 强制 Exclusive；
 - 未显式配置的资源实例容量默认为 1；组合期可配置容量，Scheduler start 后冻结；
+- 组合期配置、外部 Effect 注册和运行时仲裁都只接受具名 ResourceKind/ResourceAccess；未知值在建立槽位、持有资源、durable effect claim 或 handler 前失败；
+- 同一槽的重复 Shared units 在每次相加前检查 `size_t` 上界，溢出返回 Validation Error，不能回绕后绕过 capacity；
 - 任务结束、失败、取消或 executor 提交失败都必须释放已持有资源。
 
 ## 异步 Command 接入
@@ -66,7 +68,7 @@ AppKernel 在 Configuring 注入并独占 `ITaskExecutor`，模块在组合回�
 | 依赖 | `Task.SelfDependency`、`Task.DuplicateDependency`、`Task.DependencyNotFound`、`Task.DependencyDidNotSucceed` |
 | 进度与取消 | `Task.InvalidProgress`、`Task.ProgressRegression`、`Task.Cancelled`、`Task.DeadlineExceeded` |
 | 文档与修订 | `Task.ProjectRequired`、`Task.ProjectMismatch`、`Task.RevisionConflict`、`Task.SourceRevisionChanged` |
-| 资源 | `Task.InvalidResourceCapacity`、`Task.InvalidResourceUnits`、`Task.ConflictingResourceClaims` |
+| 资源 | `Task.InvalidResourceKind`、`Task.InvalidResourceAccess`、`Task.InvalidResourceCapacity`、`Task.InvalidResourceUnits`、`Task.ResourceUnitsOverflow`、`Task.ConflictingResourceClaims`；外部 Effect 注册另有 `Command.InvalidEffectResourceKind`、`Command.InvalidEffectResourceAccess`、`Command.InvalidEffectResourceUnits` |
 | 异步命令 | `Command.HandlerModeMismatch`、`Command.AsyncSideEffectUnsupported`、`Command.PostAcceptanceIntegrationFailed` |
 | 生命周期 | `Task.ExecutorNotConfigured`、`Task.RuntimeNotAccepting`、`Task.WaitTimeout`、`Task.ShutdownTimeout` |
 

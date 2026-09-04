@@ -382,6 +382,40 @@ TEST_CASE("External effect registration requires replay guard resource and stabl
     CHECK_FALSE(registry.registerExternalEffectHandler(descriptor, nullptr).hasValue());
 }
 
+TEST_CASE("External effect registration rejects unknown resource enum values",
+          "[runtime][command][effect][resource][c6b14]")
+{
+    CommandRegistry registry;
+    auto handler = std::make_shared<ExternalEffectHandler>();
+    auto descriptor = commandDescriptor("kernel.command.external-invalid-resource-kind");
+    descriptor.sideEffect = SideEffectLevel::Publish;
+    descriptor.scope = ExecutionScope::Global;
+    descriptor.replayPolicy = ReplayPolicy::ReconcileOnly;
+    descriptor.effectGuards = {validId<EffectGuardId>("guard.invalid-resource")};
+    descriptor.resources = {ResourceClaim {
+        static_cast<ResourceKind>(255U),
+        validId<ResourceId>("resource.invalid-enum"),
+        ResourceAccess::Exclusive,
+        1U}};
+    auto invalidKind = registry.registerExternalEffectHandler(descriptor, handler);
+    CHECK_FALSE(invalidKind.hasValue());
+    if(!invalidKind) {
+        CHECK(std::string(invalidKind.error().code.value())
+              == "Command.InvalidEffectResourceKind");
+    }
+
+    descriptor.name = validId<CommandName>("kernel.command.external-invalid-resource-access");
+    descriptor.resources.front().kind = ResourceKind::DiskIO;
+    descriptor.resources.front().access = static_cast<ResourceAccess>(255U);
+    auto invalidAccess = registry.registerExternalEffectHandler(descriptor, handler);
+    CHECK_FALSE(invalidAccess.hasValue());
+    if(!invalidAccess) {
+        CHECK(std::string(invalidAccess.error().code.value())
+              == "Command.InvalidEffectResourceAccess");
+    }
+    CHECK(registry.size() == 0U);
+}
+
 TEST_CASE("EffectGuardRegistry freezes stable guard identities", "[runtime][effect][guard]")
 {
     EffectGuardRegistry guards;

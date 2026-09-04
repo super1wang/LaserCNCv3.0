@@ -47,6 +47,30 @@ bool validExternalSideEffect(SideEffectLevel sideEffect) noexcept
     return false;
 }
 
+bool validResourceKind(ResourceKind kind) noexcept
+{
+    switch(kind) {
+    case ResourceKind::CPU:
+    case ResourceKind::DiskIO:
+    case ResourceKind::GPU:
+    case ResourceKind::OCCT:
+    case ResourceKind::ProjectRead:
+    case ResourceKind::ProjectWrite:
+    case ResourceKind::MachineController:
+    case ResourceKind::CollisionBackend: return true;
+    }
+    return false;
+}
+
+bool validResourceAccess(ResourceAccess access) noexcept
+{
+    switch(access) {
+    case ResourceAccess::Shared:
+    case ResourceAccess::Exclusive: return true;
+    }
+    return false;
+}
+
 bool hasExternalMetadata(const CommandDescriptor& descriptor) noexcept
 {
     return descriptor.replayPolicy != ReplayPolicy::Never
@@ -416,6 +440,20 @@ foundation::Result<void> CommandRegistry::registerExternalEffectHandler(
             key));
     }
     for(const auto& claim : descriptor.resources) {
+        if(!validResourceKind(claim.kind)) {
+            return foundation::Result<void>::failure(commandError(
+                "Command.InvalidEffectResourceKind",
+                foundation::ErrorCategory::Validation,
+                "The external-effect resource kind is invalid",
+                key));
+        }
+        if(!validResourceAccess(claim.access)) {
+            return foundation::Result<void>::failure(commandError(
+                "Command.InvalidEffectResourceAccess",
+                foundation::ErrorCategory::Validation,
+                "The external-effect resource access mode is invalid",
+                key));
+        }
         if(claim.units == 0U) {
             return foundation::Result<void>::failure(commandError(
                 "Command.InvalidEffectResourceUnits",

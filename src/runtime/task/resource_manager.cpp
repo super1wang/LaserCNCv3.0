@@ -2,12 +2,37 @@
 
 #include <lasercnc/foundation/error.hpp>
 
+#include <limits>
 #include <map>
 #include <string>
 #include <utility>
 
 namespace lasercnc::runtime {
 namespace {
+
+bool validResourceKind(ResourceKind kind) noexcept
+{
+    switch(kind) {
+    case ResourceKind::CPU:
+    case ResourceKind::DiskIO:
+    case ResourceKind::GPU:
+    case ResourceKind::OCCT:
+    case ResourceKind::ProjectRead:
+    case ResourceKind::ProjectWrite:
+    case ResourceKind::MachineController:
+    case ResourceKind::CollisionBackend: return true;
+    }
+    return false;
+}
+
+bool validResourceAccess(ResourceAccess access) noexcept
+{
+    switch(access) {
+    case ResourceAccess::Shared:
+    case ResourceAccess::Exclusive: return true;
+    }
+    return false;
+}
 
 ResourceKind canonicalKind(ResourceKind kind) noexcept
 {
@@ -36,6 +61,13 @@ foundation::Result<void> ResourceManager::configure(
     kernel::ResourceId resource,
     std::size_t capacity)
 {
+    if(!validResourceKind(kind)) {
+        return foundation::Result<void>::failure(resourceError(
+            "Task.InvalidResourceKind",
+            foundation::ErrorCategory::Validation,
+            "The resource kind is invalid",
+            resource));
+    }
     if(capacity == 0U) {
         return foundation::Result<void>::failure(resourceError(
             "Task.InvalidResourceCapacity",
@@ -92,6 +124,20 @@ foundation::Result<bool> ResourceManager::tryAcquire(
     };
     std::map<Key, Aggregate> requested;
     for(const auto& claim : claims) {
+        if(!validResourceKind(claim.kind)) {
+            return foundation::Result<bool>::failure(resourceError(
+                "Task.InvalidResourceKind",
+                foundation::ErrorCategory::Validation,
+                "The resource kind is invalid",
+                claim.resource));
+        }
+        if(!validResourceAccess(claim.access)) {
+            return foundation::Result<bool>::failure(resourceError(
+                "Task.InvalidResourceAccess",
+                foundation::ErrorCategory::Validation,
+                "The resource access mode is invalid",
+                claim.resource));
+        }
         if(claim.units == 0U) {
             return foundation::Result<bool>::failure(resourceError(
                 "Task.InvalidResourceUnits",
@@ -110,6 +156,13 @@ foundation::Result<bool> ResourceManager::tryAcquire(
                     "Task.ConflictingResourceClaims",
                     foundation::ErrorCategory::Validation,
                     "A task contains conflicting claims for the same resource",
+                    claim.resource));
+            }
+            if(claim.units > std::numeric_limits<std::size_t>::max() - entry->second.units) {
+                return foundation::Result<bool>::failure(resourceError(
+                    "Task.ResourceUnitsOverflow",
+                    foundation::ErrorCategory::Validation,
+                    "Aggregated resource units exceed the representable range",
                     claim.resource));
             }
             entry->second.units += claim.units;

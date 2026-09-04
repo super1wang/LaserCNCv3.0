@@ -18,6 +18,7 @@
 #include <chrono>
 #include <functional>
 #include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -384,6 +385,63 @@ TEST_CASE("Scheduler arbitrates project read and write claims", "[runtime][task]
     CHECK(readDone.value().state == TaskState::Succeeded);
     CHECK(readerStarted.load());
     fixture.stop();
+}
+
+TEST_CASE("Resource model rejects unknown enums and aggregate overflow",
+          "[runtime][task][resource][c6b14]")
+{
+    ResourceManager configuration;
+    const auto configured = configuration.configure(
+        static_cast<ResourceKind>(255U), validId<ResourceId>("resource.invalid-kind"), 1U);
+    CHECK_FALSE(configured.hasValue());
+    CHECK(configuration.snapshot().empty());
+    if(!configured) {
+        CHECK(std::string(configured.error().code.value()) == "Task.InvalidResourceKind");
+    }
+
+    struct Scenario final {
+        const char* taskId;
+        std::vector<ResourceClaim> claims;
+        const char* errorCode;
+    };
+    const auto resource = validId<ResourceId>("resource.invalid-claim");
+    const std::array scenarios {
+        Scenario {"task-invalid-kind",
+            {{static_cast<ResourceKind>(255U), resource, ResourceAccess::Shared, 1U}},
+            "Task.InvalidResourceKind"},
+        Scenario {"task-invalid-access",
+            {{ResourceKind::DiskIO, resource, static_cast<ResourceAccess>(255U), 1U}},
+            "Task.InvalidResourceAccess"},
+        Scenario {"task-resource-overflow",
+            {{ResourceKind::DiskIO, resource, ResourceAccess::Shared,
+                 std::numeric_limits<std::size_t>::max()},
+                {ResourceKind::DiskIO, resource, ResourceAccess::Shared, 1U}},
+            "Task.ResourceUnitsOverflow"},
+    };
+    for(const auto& scenario : scenarios) {
+        DYNAMIC_SECTION(scenario.taskId) {
+            RuntimeFixture fixture(1U);
+            std::atomic_size_t calls {0U};
+            REQUIRE(fixture.registry.registerHandler(
+                descriptor("task.invalid-resource"),
+                std::make_shared<LambdaHandler>(
+                    [&calls](const TaskRequest&, const TaskContext&) {
+                        ++calls;
+                        return Result<Value>::success(Value {});
+                    })).hasValue());
+            fixture.start();
+            auto task = request(scenario.taskId, "task.invalid-resource");
+            task.resources = scenario.claims;
+            REQUIRE(fixture.runtime.submit(task).hasValue());
+            const auto completed = fixture.runtime.wait(task.taskId, 2s);
+            REQUIRE(completed.hasValue());
+            CHECK(completed.value().state == TaskState::Failed);
+            REQUIRE(completed.value().error.has_value());
+            CHECK(std::string(completed.value().error->code.value()) == scenario.errorCode);
+            CHECK(calls.load() == 0U);
+            fixture.stop();
+        }
+    }
 }
 
 TEST_CASE("TaskRuntime captures immutable document revisions and marks stale results", "[runtime][task][revision]")

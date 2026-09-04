@@ -97,6 +97,16 @@ SQLite 的失败为 Validation/Persistence.InvalidOptions；Snapshot 为 Validat
 
 C6b13 只修改 Registry 私有实现与错误分支，不改两份公共头、枚举底层值或定义 DTO；非法定义从“可注册、以后行为不确定/失败”收紧为组合期 Validation 拒绝。Workflow/Script 的 Request、Snapshot、状态机与 SQLite 检查点字段仍须在后续状态/持久族账本逐项登记。
 
+## Task 与外部 Effect 的资源声明
+
+| 文件与声明 | 字段及公开操作 | 已验证边界与后续缺口 |
+| --- | --- | --- |
+| [task.hpp](../../include/lasercnc/runtime/task.hpp)：ResourceKind、ResourceAccess、ResourceClaim | Kind 八种 CPU/DiskIO/GPU/OCCT/ProjectRead/ProjectWrite/MachineController/CollisionBackend；Access 为 Shared/Exclusive；Claim 含 kind、ResourceId、access、units=1 | C6b14 在配置、Effect 注册与 Task 仲裁处白名单验证枚举；未知值不建立槽、不注册命令、不取得资源或调用 handler。公共数字与字段不变；ResourceId 长度、声明/槽位总量归 C6c/C7 |
+| [resource_manager.hpp](../../include/lasercnc/runtime/resource_manager.hpp)：ResourceAvailability、ResourceManager | Availability 为 kind/resource/capacity/sharedUnits/exclusivelyHeld；configure、freeze/frozen、snapshot、tryAcquire、release | configure 未知 kind 返回 Task.InvalidResourceKind 且快照不变；tryAcquire 在锁和槽位修改前拒绝未知 kind/access、零 units、冲突及重复 Shared 聚合溢出。ProjectWrite 继续规范化至 ProjectRead 并强制 Exclusive；capacity 支持上限未由本节点认证 |
+| [command.hpp](../../include/lasercnc/runtime/command.hpp)：CommandDescriptor.resources | 外部 Effect descriptor 携带 ResourceClaim 数组 | 注册前拒绝未知 kind/access，分别为 Command.InvalidEffectResourceKind/InvalidEffectResourceAccess；零 units 既有拒绝保持。执行前仍经 ResourceManager，且先于 durable claim/handler；资源声明不取代 SideEffect、Guard、Idempotency 与 ReplayPolicy 权限准入 |
+
+Task 的 ResourceManager 仲裁发生在提交被接受后的 Scheduler 泵内，所以非法声明形成可查询的 Failed 终态并保留原 Validation Error，handler 零调用；这不改成同步 submit 参数失败。C6b14 只关闭枚举闭集与单任务聚合算术，不代签等待公平、取消/deadline、全局容量或有界终态保留，见 [契约](ST1C6b14-资源声明枚举与算术准入.md)。
+
 ## 后续顺序（保留完整目标）
 
 C6b5 登记的观察负例中，前三类由 C6b6 取得真实红灯并修复；以下按证据区分已补范围与剩余项：
@@ -108,6 +118,6 @@ C6b5 登记的观察负例中，前三类由 C6b6 取得真实红灯并修复；
 
 以上与观察身份淘汰复用、活动总量、时间顺序和资源预算账本并存；不能以修好某一个枚举后删掉其他必须项。
 
-1. C6b2–b12 检查点保留；C6b13 补 Workflow/Script 定义枚举准入，见 [交付](../阶段交付/2026-09-05-ST1C6b13-编排定义枚举准入.md)。下一步补 Host/执行/状态/持久族 DTO 与格式；不以观察或编排局部修复代签其他入口。
+1. C6b2–b12 检查点保留；C6b13 补 Workflow/Script 定义枚举，C6b14 补资源声明枚举与算术准入，见 [交付](../阶段交付/2026-09-05-ST1C6b14-资源声明枚举与算术准入.md)。下一步补 Host、其余执行、状态与持久族 DTO/格式；不以观察、编排或资源局部修复代签其他入口。
 2. 继续 Foundation、Observability、Messaging 已登记的行为缺口及 Host/执行/状态/持久族逐类型、枚举和 DTO 字段；将源码兼容、权限阶段、线程/寿命、Error cause 和 wire 版本分别关联到测试。已修复的 Schema/消息枚举与合并/错投仅覆盖各子节点列出的范围；观察记录的未知枚举、数值/终态/寿命问题不因“非业务真值”而免审。
 3. C6c/d 执行统一预算、同步与 Task、终态保留；C7 测容量，C8 完整日志/脚本/私有头门禁，ST1D 最终三配置签核。上述均未被本轮 8 个 Adapter 声明登记替代。
