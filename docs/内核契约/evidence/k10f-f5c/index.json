@@ -1,0 +1,246 @@
+{
+  "schema_version": 1,
+  "started_at": "2026-09-04T09:12:50.9075749+08:00",
+  "status": "verified",
+  "source_commit": "f32de3a34b2deeb04a7b36e618c4e93a8f3f9c36",
+  "working_tree_changes": [],
+  "benchmark_source_sha256": "A6261B4180AEED6B2CE57E36469C16FD7F19EB1695CC56BDDD43E5B0D94488F2",
+  "runner_source_sha256": "9AC3486A73D59D8603902E217BC5258411A69BF3BA9E60F38F80F1C9DB3D2F93",
+  "executable": "J:\\Code\\LaserCNCv3.0\\build\\vs2022\\tests\\Release\\lasercnc_kernel_benchmark.exe",
+  "executable_sha256": "5C5B3DCBBFF927A1D8FF46F92DDB9855DE15781A5C1CE282B1A91A373214D4A2",
+  "cpu": [
+    {
+      "Name": "12th Gen Intel(R) Core(TM) i5-12600KF",
+      "NumberOfCores": 10,
+      "NumberOfLogicalProcessors": 16
+    }
+  ],
+  "os": {
+    "Caption": "Microsoft Windows 11 专业版 Insider Preview",
+    "Version": "10.0.27749",
+    "BuildNumber": "27749",
+    "TotalVisibleMemorySize": 33387600
+  },
+  "object_counts": [
+    1000,
+    10000,
+    100000
+  ],
+  "samples": 5,
+  "warmup": 1,
+  "cycles": 10,
+  "runs": [
+    {
+      "family": "component",
+      "storage": "memory",
+      "object_count": 1000,
+      "elapsed_seconds": 0.1180569,
+      "report": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\component-memory-1000-37328-84858769453300\\report.json",
+      "log": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\component-memory-1000.log",
+      "report_sha256": "3A8288805F7BD99C175388423A5111ADB3F16EF6B4725B242FD9B2BCC79F7779",
+      "archived_report": "component-memory-1000.json"
+    },
+    {
+      "family": "component",
+      "storage": "sqlite",
+      "object_count": 1000,
+      "elapsed_seconds": 1.0518928,
+      "report": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\component-sqlite-1000-17676-84858879837800\\report.json",
+      "log": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\component-sqlite-1000.log",
+      "report_sha256": "7D10049A06A524D3EC945E90AF858148D2E2BF10A7E2E5A12DB79B810A1E4285",
+      "archived_report": "component-sqlite-1000.json"
+    },
+    {
+      "family": "gateway",
+      "storage": "memory",
+      "object_count": 1000,
+      "elapsed_seconds": 0.1124098,
+      "report": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\gateway-memory-1000-30764-84859931173300\\report.json",
+      "log": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\gateway-memory-1000.log",
+      "report_sha256": "514DDC1AF44B8042A25906ECE3CF8F3AA6FC78552AD19ACD65E6F7E7CBB0CF65",
+      "archived_report": "gateway-memory-1000.json"
+    },
+    {
+      "family": "gateway",
+      "storage": "sqlite",
+      "object_count": 1000,
+      "elapsed_seconds": 4.2548622,
+      "report": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\gateway-sqlite-1000-11768-84860054813700\\report.json",
+      "log": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\gateway-sqlite-1000.log",
+      "report_sha256": "7242F9110CD82D142ABE1EBB9D3AA3866AADED9786618C8CC1A285C1CEF7EB85",
+      "archived_report": "gateway-sqlite-1000.json"
+    },
+    {
+      "family": "journal",
+      "storage": "sqlite",
+      "object_count": 1000,
+      "elapsed_seconds": 0.9195508,
+      "report": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\journal-sqlite-1000-28232-84864309753200\\report.json",
+      "log": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\journal-sqlite-1000.log",
+      "report_sha256": "151014D0CB2D6CBCF378B86DBA9DDAA8D46B3DF3AE804F72A82334E79E9667B6",
+      "archived_report": "journal-sqlite-1000.json"
+    },
+    {
+      "family": "lifecycle",
+      "storage": "memory",
+      "object_count": 1000,
+      "elapsed_seconds": 0.074771,
+      "report": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\lifecycle-memory-1000-29224-84865239950800\\report.json",
+      "log": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\lifecycle-memory-1000.log",
+      "report_sha256": "B28803163072498B18A1D4575CAE5F899B5B4E1AF127F2AE0655B79FFD98FCB3",
+      "archived_report": "lifecycle-memory-1000.json"
+    },
+    {
+      "family": "lifecycle",
+      "storage": "sqlite",
+      "object_count": 1000,
+      "elapsed_seconds": 5.7758279,
+      "report": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\lifecycle-sqlite-1000-10068-84865313628300\\report.json",
+      "log": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\lifecycle-sqlite-1000.log",
+      "report_sha256": "AEECC5F1EA64F1E26EF4ECBCA666E3694C4892FAD482AC6AFB6C6827021861F0",
+      "archived_report": "lifecycle-sqlite-1000.json"
+    },
+    {
+      "family": "component",
+      "storage": "memory",
+      "object_count": 10000,
+      "elapsed_seconds": 0.494574,
+      "report": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\component-memory-10000-9792-84871093857400\\report.json",
+      "log": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\component-memory-10000.log",
+      "report_sha256": "F5831CD48574C6A79D8FA8A349C2A1A36AF4ABFED4FE1553BAF6B317F5EC162D",
+      "archived_report": "component-memory-10000.json"
+    },
+    {
+      "family": "component",
+      "storage": "sqlite",
+      "object_count": 10000,
+      "elapsed_seconds": 1.4865328,
+      "report": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\component-sqlite-10000-23712-84871593487800\\report.json",
+      "log": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\component-sqlite-10000.log",
+      "report_sha256": "FD140285F5F4B09B95A880F2382D046B32E5C5D1ADD4F717ECADF3EAB8E7E96B",
+      "archived_report": "component-sqlite-10000.json"
+    },
+    {
+      "family": "gateway",
+      "storage": "memory",
+      "object_count": 10000,
+      "elapsed_seconds": 1.0525748,
+      "report": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\gateway-memory-10000-30112-84873076444000\\report.json",
+      "log": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\gateway-memory-10000.log",
+      "report_sha256": "E314C243E1413FE6348736EFDB9B5C690C38993870752EC7A5B34C8DE248A892",
+      "archived_report": "gateway-memory-10000.json"
+    },
+    {
+      "family": "gateway",
+      "storage": "sqlite",
+      "object_count": 10000,
+      "elapsed_seconds": 4.5186877,
+      "report": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\gateway-sqlite-10000-37096-84874133899400\\report.json",
+      "log": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\gateway-sqlite-10000.log",
+      "report_sha256": "669E9137E1D084BF4B5F30111B888685A01F2A8BB451164F59E59B522F98903F",
+      "archived_report": "gateway-sqlite-10000.json"
+    },
+    {
+      "family": "journal",
+      "storage": "sqlite",
+      "object_count": 10000,
+      "elapsed_seconds": 1.891562,
+      "report": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\journal-sqlite-10000-34888-84878638935800\\report.json",
+      "log": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\journal-sqlite-10000.log",
+      "report_sha256": "6C79FA99F47C15BA0EA394E04CD60670E967822D24EDC5466DFF58CECAFD0CC7",
+      "archived_report": "journal-sqlite-10000.json"
+    },
+    {
+      "family": "lifecycle",
+      "storage": "memory",
+      "object_count": 10000,
+      "elapsed_seconds": 0.3299797,
+      "report": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\lifecycle-memory-10000-32372-84880533747300\\report.json",
+      "log": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\lifecycle-memory-10000.log",
+      "report_sha256": "FB9D96EF8AE9ABFE497EB3BEACDA777650CE66774E3780216D0BC5B6FF89020A",
+      "archived_report": "lifecycle-memory-10000.json"
+    },
+    {
+      "family": "lifecycle",
+      "storage": "sqlite",
+      "object_count": 10000,
+      "elapsed_seconds": 5.2392624,
+      "report": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\lifecycle-sqlite-10000-26408-84880872103300\\report.json",
+      "log": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\lifecycle-sqlite-10000.log",
+      "report_sha256": "35BF5F85154AF03F0BA8E139F372E64519D13E9E542DB800AE6D9D30D090194B",
+      "archived_report": "lifecycle-sqlite-10000.json"
+    },
+    {
+      "family": "component",
+      "storage": "memory",
+      "object_count": 100000,
+      "elapsed_seconds": 4.6870832,
+      "report": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\component-memory-100000-23264-84886107434500\\report.json",
+      "log": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\component-memory-100000.log",
+      "report_sha256": "EFF1B0D2A1C9B3A40E95B72A58240D3F31E3D46D81D1D94229D0D3A7D94F0114",
+      "archived_report": "component-memory-100000.json"
+    },
+    {
+      "family": "component",
+      "storage": "sqlite",
+      "object_count": 100000,
+      "elapsed_seconds": 7.1182875,
+      "report": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\component-sqlite-100000-36904-84890797185300\\report.json",
+      "log": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\component-sqlite-100000.log",
+      "report_sha256": "F63664FA94AB458B0DE9A4DB946E76EB3E69019CCFE047DF3A389F47CEDE74CB",
+      "archived_report": "component-sqlite-100000.json"
+    },
+    {
+      "family": "gateway",
+      "storage": "memory",
+      "object_count": 100000,
+      "elapsed_seconds": 10.6888865,
+      "report": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\gateway-memory-100000-36280-84897917130400\\report.json",
+      "log": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\gateway-memory-100000.log",
+      "report_sha256": "50D0013134C91C9B2257A95059ADB1E805B7256156373280F863A1E11094BFB2",
+      "archived_report": "gateway-memory-100000.json"
+    },
+    {
+      "family": "gateway",
+      "storage": "sqlite",
+      "object_count": 100000,
+      "elapsed_seconds": 14.8175374,
+      "report": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\gateway-sqlite-100000-4284-84908613333800\\report.json",
+      "log": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\gateway-sqlite-100000.log",
+      "report_sha256": "2B494B8A9625559D370BF7B1F8A41E19CDF8D58ED9F8781EE77B3DC6C5FE67AD",
+      "archived_report": "gateway-sqlite-100000.json"
+    },
+    {
+      "family": "journal",
+      "storage": "sqlite",
+      "object_count": 100000,
+      "elapsed_seconds": 11.6602024,
+      "report": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\journal-sqlite-100000-25552-84923433131300\\report.json",
+      "log": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\journal-sqlite-100000.log",
+      "report_sha256": "DE3E2AE82E54CD407F65A3D55B3F0125F871079D74FC5DA4C0CADD8B6BC7BA22",
+      "archived_report": "journal-sqlite-100000.json"
+    },
+    {
+      "family": "lifecycle",
+      "storage": "memory",
+      "object_count": 100000,
+      "elapsed_seconds": 3.2646394,
+      "report": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\lifecycle-memory-100000-5272-84935094661100\\report.json",
+      "log": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\lifecycle-memory-100000.log",
+      "report_sha256": "9CD4CD636830DDAC8856BADE0CBC6986064B9FC54337CA617A23F7F1A0695735",
+      "archived_report": "lifecycle-memory-100000.json"
+    },
+    {
+      "family": "lifecycle",
+      "storage": "sqlite",
+      "object_count": 100000,
+      "elapsed_seconds": 16.1424051,
+      "report": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\lifecycle-sqlite-100000-15724-84938359769500\\report.json",
+      "log": "J:\\Code\\LaserCNCv3.0\\build\\kernel-baselines\\run-20260904-091249-e186632556e24c70ac29a6cbf7316d7b\\lifecycle-sqlite-100000.log",
+      "report_sha256": "2DA89B73DCD81D9AD74F45BA4F492CCABF39820D8D5E387F73D281805A4B9F15",
+      "archived_report": "lifecycle-sqlite-100000.json"
+    }
+  ],
+  "completed_at": "2026-09-04T09:14:26.7273263+08:00",
+  "archive_note": "原始报告逐字节归档并核对 SHA-256；report/log 保留原采样绝对路径用于追溯，archived_report 指向本目录文件。数据库及运行日志留在本机 build 目录。"
+}
