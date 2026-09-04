@@ -186,6 +186,7 @@ add_executable(
     unit/runtime/project_runtime_tests.cpp
     unit/runtime/lifecycle_catalog_tests.cpp
     unit/runtime/close_snapshot_identity_tests.cpp
+    unit/runtime/snapshot_ordering_tests.cpp
     unit/runtime/kernel_shutdown_tests.cpp
     unit/runtime/history_runtime_tests.cpp
     unit/runtime/asset_state_tests.cpp
