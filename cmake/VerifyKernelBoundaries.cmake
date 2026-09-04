@@ -47,6 +47,8 @@ set(forbidden_app_kernel_bypasses
     "WorkflowRegistry& workflowRegistry() noexcept"
     "ScriptRegistry& scriptRegistry() noexcept"
     "ObjectTypeRegistry& objectTypes() noexcept"
+    "HistoryRuntime& history() noexcept"
+    "PersistenceService& persistence() noexcept"
     "CommandRuntime& commands("
     "QueryRuntime& queries("
     "TaskRuntime& tasks("

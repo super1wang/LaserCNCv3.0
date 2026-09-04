@@ -150,8 +150,7 @@ void configureKernelPersistence(
     auto snapshots = FilesystemSnapshotStore::create(
         FilesystemSnapshotStoreOptions {snapshotDirectory, 1024U * 1024U});
     REQUIRE(snapshots.hasValue());
-    REQUIRE(kernel.persistence()
-                .configure(
+    REQUIRE(kernel.configurePersistence(
                     std::move(backend).value(),
                     std::make_shared<JsonconsAdapter>(),
                     std::make_shared<Sha256HashService>(),
@@ -780,8 +779,7 @@ void configureRuntimeKernel(
     auto snapshots = FilesystemSnapshotStore::create(
         FilesystemSnapshotStoreOptions {snapshotDirectory, 1024U * 1024U});
     REQUIRE(snapshots.hasValue());
-    REQUIRE(kernel.persistence()
-                .configure(
+    REQUIRE(kernel.configurePersistence(
                     std::move(backend).value(),
                     adapter,
                     std::make_shared<Sha256HashService>(),
@@ -814,8 +812,7 @@ void configureAsyncRuntimeKernel(
         REQUIRE(backend.hasValue());
         injectedBackend = std::move(backend).value();
     }
-    REQUIRE(kernel.persistence()
-                .configure(
+    REQUIRE(kernel.configurePersistence(
                     std::move(injectedBackend),
                     adapter,
                     std::make_shared<Sha256HashService>())
@@ -879,7 +876,9 @@ TEST_CASE("Document open refuses unsupported durable object versions and remains
         TransactionCommit injected {validId<TransactionId>("tx.open-admission.injected"),
             project, document, first.revisionsAfter, revisions.value(),
             {{ObjectChangeKind::Updated, after.id, first.changes.front().after, after}}, {}};
-        REQUIRE(kernel.persistence().append(injected).hasValue());
+        PersistenceService fixture;
+        configureService(fixture, path);
+        REQUIRE(fixture.append(injected).hasValue());
         auto opened = kernel.documentRuntime().open(document);
         REQUIRE_FALSE(opened.hasValue());
         CHECK(std::string(opened.error().code.value()) == "ObjectType.UnsupportedVersion");
@@ -1338,8 +1337,7 @@ TEST_CASE("PersistenceService restores a snapshot and replays only its journal t
         auto snapshots = FilesystemSnapshotStore::create(
             FilesystemSnapshotStoreOptions {snapshotDirectory, 1024U * 1024U});
         REQUIRE(snapshots.hasValue());
-        REQUIRE(kernel.persistence()
-                    .configure(
+        REQUIRE(kernel.configurePersistence(
                         std::move(backend).value(),
                         std::make_shared<JsonconsAdapter>(),
                         std::make_shared<Sha256HashService>(),
@@ -1890,8 +1888,7 @@ TEST_CASE("Task completion exposes persistence failure without changing task out
     auto failing = std::make_unique<FailingTaskTerminalBackend>(
         std::move(sqlite).value());
     auto* observed = failing.get();
-    REQUIRE(kernel.persistence()
-                .configure(
+    REQUIRE(kernel.configurePersistence(
                     std::move(failing),
                     adapter,
                     std::make_shared<Sha256HashService>())
@@ -2018,8 +2015,7 @@ TEST_CASE("AppKernel persists diagnostic history without changing check results"
         lasercnc::kernel::AppKernel kernel;
         auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
         REQUIRE(backend.hasValue());
-        REQUIRE(kernel.persistence()
-                    .configure(
+        REQUIRE(kernel.configurePersistence(
                         std::move(backend).value(),
                         std::make_shared<JsonconsAdapter>(),
                         std::make_shared<Sha256HashService>())
@@ -2081,8 +2077,7 @@ TEST_CASE("Diagnostic persistence failure is isolated after the in-memory report
     lasercnc::kernel::AppKernel kernel;
     auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
     REQUIRE(backend.hasValue());
-    REQUIRE(kernel.persistence()
-                .configure(
+    REQUIRE(kernel.configurePersistence(
                     std::move(backend).value(),
                     std::make_shared<JsonconsAdapter>(),
                     std::make_shared<Sha256HashService>())
@@ -2287,8 +2282,7 @@ TEST_CASE("Document close keeps state attached when snapshot persistence fails",
     REQUIRE(kernel.addDocument(project, document).hasValue());
     auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
     REQUIRE(backend.hasValue());
-    REQUIRE(kernel.persistence()
-                .configure(
+    REQUIRE(kernel.configurePersistence(
                     std::move(backend).value(),
                     std::make_shared<JsonconsAdapter>(),
                     std::make_shared<Sha256HashService>())
@@ -2471,6 +2465,46 @@ TEST_CASE("TransactionManager leaves memory unchanged when journaling fails", "[
     removeDatabase(path);
 }
 
+TEST_CASE("Standalone quarantined persistence cannot be reinitialized", "[persistence][fault-matrix][host-boundary]")
+{
+    for(const bool throws : {false, true}) {
+        DYNAMIC_SECTION("rollback throws=" << throws) {
+            const auto path = uniqueDatabasePath();
+            {
+                PersistenceService service;
+                auto sqlite = SqlitePersistenceBackend::open({path});
+                REQUIRE(sqlite.hasValue());
+                auto backend = std::make_unique<lasercnc::test::FaultInjectingBackend>(std::move(sqlite).value());
+                auto* control = backend.get();
+                REQUIRE(service.configure(std::move(backend), std::make_shared<JsonconsAdapter>(),
+                    std::make_shared<Sha256HashService>()).hasValue());
+                REQUIRE(service.initialize().hasValue());
+                const auto advanced = RevisionManager::advance(RevisionSet{},
+                    std::array{RevisionScope::Project, RevisionScope::Document});
+                REQUIRE(advanced.hasValue());
+                control->arm(lasercnc::test::BackendPoint::Commit, "", 1U, false);
+                control->failRollback = true;
+                control->throwRollback = throws;
+                const auto rejected = service.append(commit("tx.quarantined.fixture", {}, advanced.value(), "fixture"));
+                REQUIRE_FALSE(rejected.hasValue());
+                CHECK(std::string(rejected.error().code.value()) == "Persistence.RollbackFailed");
+                CHECK(control->hits == 1U);
+                CHECK(control->rollbackHits == 1U);
+                CHECK_FALSE(service.ready());
+                const auto reinitialized = service.initialize();
+                REQUIRE_FALSE(reinitialized.hasValue());
+                CHECK(std::string(reinitialized.error().code.value()) == "Persistence.BackendQuarantined");
+                auto observer = SqlitePersistenceBackend::open({path});
+                REQUIRE(observer.hasValue());
+                const auto rows = observer.value()->query("SELECT * FROM state_journal");
+                REQUIRE(rows.hasValue());
+                CHECK(rows.value().empty());
+            }
+            removeDatabase(path);
+        }
+    }
+}
+
 TEST_CASE("AppKernel initializes and freezes configured persistence", "[kernel][persistence]")
 {
     const auto path = uniqueDatabasePath();
@@ -2481,8 +2515,7 @@ TEST_CASE("AppKernel initializes and freezes configured persistence", "[kernel][
         lasercnc::kernel::AppKernel kernel;
         auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
         REQUIRE(backend.hasValue());
-        REQUIRE(kernel.persistence()
-                    .configure(
+        REQUIRE(kernel.configurePersistence(
                         std::move(backend).value(),
                         std::make_shared<JsonconsAdapter>(),
                         std::make_shared<Sha256HashService>())
@@ -2494,13 +2527,13 @@ TEST_CASE("AppKernel initializes and freezes configured persistence", "[kernel][
         auto lateBackend = SqlitePersistenceBackend::open(
             SqliteConnectionOptions {latePath});
         REQUIRE(lateBackend.hasValue());
-        auto late = kernel.persistence().configure(
+        auto late = kernel.configurePersistence(
             std::move(lateBackend).value(),
             std::make_shared<JsonconsAdapter>(),
             std::make_shared<Sha256HashService>());
         REQUIRE_FALSE(late.hasValue());
         CHECK(std::string(late.error().code.value())
-              == "Persistence.ConfigurationFrozen");
+              == "Kernel.PersistenceConfigurationClosed");
         REQUIRE(kernel.shutdown().hasValue());
     }
     removeDatabase(path);
@@ -2780,8 +2813,7 @@ TEST_CASE("Workflow checkpoint failure prevents handler execution", "[persistenc
         auto failing = std::make_unique<FailingWorkflowCheckpointBackend>(
             std::move(backend).value());
         auto* observed = failing.get();
-        REQUIRE(kernel.persistence()
-                    .configure(
+        REQUIRE(kernel.configurePersistence(
                         std::move(failing),
                         adapter,
                         std::make_shared<Sha256HashService>())
@@ -2831,7 +2863,7 @@ TEST_CASE("Workflow post-command checkpoint faults preserve one durable command 
                     REQUIRE(registerCommand(kernel, persistentCommandDescriptor(), handler).hasValue());
                     REQUIRE(registerWorkflow(kernel, definition).hasValue());
                     if(add) { REQUIRE(kernel.addDocument(workflow.projectId, workflow.documentId).hasValue()); }
-                    REQUIRE(kernel.persistence().configure(std::move(backend), std::make_shared<JsonconsAdapter>(),
+                    REQUIRE(kernel.configurePersistence(std::move(backend), std::make_shared<JsonconsAdapter>(),
                         std::move(hashes)).hasValue());
                     REQUIRE(kernel.bootstrap().hasValue());
                 };
@@ -2925,8 +2957,7 @@ TEST_CASE("AppKernel rejects durable workflow definition drift", "[persistence][
         REQUIRE(lasercnc::test::registerWorkflow(kernel, std::move(changed)).hasValue());
         auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
         REQUIRE(backend.hasValue());
-        REQUIRE(kernel.persistence()
-                    .configure(
+        REQUIRE(kernel.configurePersistence(
                         std::move(backend).value(),
                         adapter,
                         std::make_shared<Sha256HashService>())
@@ -3066,7 +3097,7 @@ TEST_CASE("CommandRuntime persists and replays completed external effects", "[ru
             1U).hasValue());
         auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
         REQUIRE(backend.hasValue());
-        REQUIRE(kernel.persistence().configure(
+        REQUIRE(kernel.configurePersistence(
             std::move(backend).value(),
             adapter,
             std::make_shared<Sha256HashService>()).hasValue());
@@ -3107,7 +3138,7 @@ TEST_CASE("CommandRuntime persists and replays completed external effects", "[ru
         REQUIRE(kernel.capabilities().replace(session, grants).hasValue());
         auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
         REQUIRE(backend.hasValue());
-        REQUIRE(kernel.persistence().configure(
+        REQUIRE(kernel.configurePersistence(
             std::move(backend).value(),
             adapter,
             std::make_shared<Sha256HashService>()).hasValue());
@@ -3145,7 +3176,7 @@ TEST_CASE("Safe external effects require explicit same-key retry after failure",
     REQUIRE(kernel.capabilities().replace(session, grants).hasValue());
     auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
     REQUIRE(backend.hasValue());
-    REQUIRE(kernel.persistence().configure(
+    REQUIRE(kernel.configurePersistence(
         std::move(backend).value(),
         adapter,
         std::make_shared<Sha256HashService>()).hasValue());
@@ -3199,7 +3230,7 @@ TEST_CASE("Effect guards fail before durable claim and handler execution", "[run
     REQUIRE(kernel.capabilities().replace(session, grants).hasValue());
     auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
     REQUIRE(backend.hasValue());
-    REQUIRE(kernel.persistence().configure(
+    REQUIRE(kernel.configurePersistence(
         std::move(backend).value(),
         adapter,
         std::make_shared<Sha256HashService>()).hasValue());
@@ -3253,7 +3284,7 @@ TEST_CASE("Unsafe external-effect failures become reconcile or indeterminate", "
     REQUIRE(kernel.capabilities().replace(session, grants).hasValue());
     auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
     REQUIRE(backend.hasValue());
-    REQUIRE(kernel.persistence().configure(
+    REQUIRE(kernel.configurePersistence(
         std::move(backend).value(),
         adapter,
         std::make_shared<Sha256HashService>()).hasValue());
@@ -3307,7 +3338,7 @@ TEST_CASE("External effects require registered guards and durable persistence at
             std::make_shared<TestEffectHandler>()).hasValue());
         auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
         REQUIRE(backend.hasValue());
-        REQUIRE(kernel.persistence().configure(
+        REQUIRE(kernel.configurePersistence(
             std::move(backend).value(),
             adapter,
             std::make_shared<Sha256HashService>()).hasValue());
@@ -3369,7 +3400,7 @@ TEST_CASE("External effects acquire guards before exclusive resources and durabl
         1U).hasValue());
     auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
     REQUIRE(backend.hasValue());
-    REQUIRE(kernel.persistence().configure(
+    REQUIRE(kernel.configurePersistence(
         std::move(backend).value(),
         adapter,
         std::make_shared<Sha256HashService>()).hasValue());

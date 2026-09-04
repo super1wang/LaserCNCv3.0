@@ -57,6 +57,11 @@ public:
         std::unique_ptr<platform::ITaskExecutor> executor);
     [[nodiscard]] foundation::Result<void> configureAssetStore(
         std::shared_ptr<platform::IAssetStore> store);
+    [[nodiscard]] foundation::Result<void> configurePersistence(
+        std::unique_ptr<platform::IPersistenceBackend> backend,
+        std::shared_ptr<foundation::IValueSerializer> serializer,
+        std::shared_ptr<platform::IHashService> hashes,
+        std::unique_ptr<platform::ISnapshotStore> snapshotStore = nullptr);
     [[nodiscard]] foundation::Result<void> bootstrap();
     [[nodiscard]] foundation::Result<void> shutdown(
         std::chrono::milliseconds taskTimeout = std::chrono::seconds(5));
@@ -72,7 +77,6 @@ public:
     [[nodiscard]] const state::DocumentStore& documents() const noexcept;
     [[nodiscard]] runtime::DocumentRuntime& documentRuntime() noexcept;
     [[nodiscard]] const runtime::DocumentRuntime& documentRuntime() const noexcept;
-    [[nodiscard]] runtime::HistoryRuntime& history() noexcept;
     [[nodiscard]] const runtime::HistoryRuntime& history() const noexcept;
     [[nodiscard]] runtime::ExecutionServices& executionServices() noexcept;
     [[nodiscard]] const runtime::ExecutionServices& executionServices() const noexcept;
@@ -98,7 +102,6 @@ public:
     [[nodiscard]] const observability::LocalMetricsService& metrics() const noexcept;
     [[nodiscard]] observability::DiagnosticsService& diagnostics() noexcept;
     [[nodiscard]] const observability::DiagnosticsService& diagnostics() const noexcept;
-    [[nodiscard]] persistence::PersistenceService& persistence() noexcept;
     [[nodiscard]] const persistence::PersistenceService& persistence() const noexcept;
     [[nodiscard]] AppKernelState state() const noexcept;
 

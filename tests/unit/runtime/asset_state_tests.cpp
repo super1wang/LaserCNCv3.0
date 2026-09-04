@@ -129,7 +129,7 @@ void configure(AppKernel& kernel, const TemporaryRoot& root,
     REQUIRE(backend.hasValue());
     auto snapshots = FilesystemSnapshotStore::create({root.path / "snapshots", 1024U * 1024U});
     REQUIRE(snapshots.hasValue());
-    REQUIRE(kernel.persistence().configure(std::move(backend).value(), std::make_shared<JsonconsAdapter>(),
+    REQUIRE(kernel.configurePersistence(std::move(backend).value(), std::make_shared<JsonconsAdapter>(),
         std::make_shared<Sha256HashService>(), std::move(snapshots).value()).hasValue());
     if(addDocument) {
         REQUIRE(kernel.addDocument(project, document).hasValue());

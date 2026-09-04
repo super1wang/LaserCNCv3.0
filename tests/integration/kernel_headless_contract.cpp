@@ -7,6 +7,7 @@
 #include <lasercnc/kernel/app_kernel.hpp>
 #include <lasercnc/observability/log_observability_exporter.hpp>
 #include "kernel_test_module.hpp"
+#include "persistence_fixture.hpp"
 #include "kernel_crash_contract.hpp"
 
 #include <algorithm>
@@ -387,7 +388,7 @@ Result<void> configurePersistenceContract(
     if(!snapshots) {
         return Result<void>::failure(std::move(snapshots).error());
     }
-    return kernel.persistence().configure(
+    return kernel.configurePersistence(
         std::move(backend).value(),
         validator,
         std::make_shared<Sha256HashService>(),
@@ -793,7 +794,8 @@ int seedPersistence(const std::filesystem::path& stateRoot)
     if(!image) {
         return fail("persistence snapshot source", image.error());
     }
-    auto captured = kernel.persistence().captureSnapshot(
+    auto fixture = lasercnc::test::openPersistenceFixture(stateRoot / "kernel.db", stateRoot / "snapshots");
+    auto captured = fixture->captureSnapshot(
         requiredId<SnapshotId>("snapshot.persistence-contract"), image.value());
     if(!captured) {
         return fail("persistence snapshot", captured.error());
@@ -811,7 +813,7 @@ int seedPersistence(const std::filesystem::path& stateRoot)
     if(!latest) {
         return fail("persistence latest document", latest.error());
     }
-    auto accepted = kernel.persistence().acceptTask(
+    auto accepted = fixture->acceptTask(
         TaskRequest {
             requiredId<TaskId>("task.persistence.interrupted"),
             requiredId<TaskName>("kernel.persistence.interrupted"),
@@ -926,7 +928,8 @@ int seedWorkflowRecovery(const std::filesystem::path& stateRoot)
     if(!documentSnapshot) {
         return fail("workflow seed document snapshot", documentSnapshot.error());
     }
-    auto captured = kernel.persistence().captureSnapshot(
+    auto fixture = lasercnc::test::openPersistenceFixture(stateRoot / "kernel.db", stateRoot / "snapshots");
+    auto captured = fixture->captureSnapshot(
         requiredId<SnapshotId>("snapshot.persistence-workflow"),
         documentSnapshot.value());
     if(!captured) {
@@ -942,7 +945,7 @@ int seedWorkflowRecovery(const std::filesystem::path& stateRoot)
     interrupted.state = WorkflowState::Running;
     interrupted.steps.front().state = WorkflowStepState::Running;
     interrupted.steps.front().attempt = 1U;
-    auto checkpointed = kernel.persistence().saveWorkflowCheckpoint(
+    auto checkpointed = fixture->saveWorkflowCheckpoint(
         request, persistenceWorkflowDefinition(), interrupted, {});
     if(!checkpointed) {
         return fail("workflow seed running checkpoint", checkpointed.error());

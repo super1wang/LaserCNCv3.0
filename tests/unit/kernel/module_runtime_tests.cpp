@@ -40,6 +40,43 @@ static_assert(std::is_same_v<
 static_assert(std::is_same_v<
               decltype(std::declval<AppKernel&>().scriptRegistry()),
               const ScriptRegistry&>);
+static_assert(std::is_same_v<decltype(std::declval<AppKernel&>().history()), const HistoryRuntime&>);
+static_assert(std::is_same_v<decltype(std::declval<AppKernel&>().persistence()),
+              const lasercnc::persistence::PersistenceService&>);
+
+template<typename Host>
+concept HostRestoresHistory = requires(Host& host, std::span<const TransactionCommit> commits) {
+    host.history().restore(commits);
+};
+template<typename Host>
+concept HostAppendsJournal = requires(Host& host, const TransactionCommit& commit) {
+    host.persistence().append(commit);
+};
+template<typename Host>
+concept HostAcceptsTask = requires(Host& host, const TaskRequest& request) {
+    host.persistence().acceptTask(request, std::nullopt);
+};
+template<typename Host>
+concept HostWritesWorkflow = requires(Host& host, const WorkflowRequest& request,
+    const WorkflowDefinition& definition, const WorkflowSnapshot& snapshot) {
+    host.persistence().saveWorkflowCheckpoint(request, definition, snapshot, {});
+};
+template<typename Host>
+concept HostInitializesPersistence = requires(Host& host) { host.persistence().initialize(); };
+static_assert(!HostRestoresHistory<AppKernel> && !HostRestoresHistory<const AppKernel>);
+static_assert(!HostAppendsJournal<AppKernel> && !HostAppendsJournal<const AppKernel>);
+static_assert(!HostAcceptsTask<AppKernel> && !HostAcceptsTask<const AppKernel>);
+static_assert(!HostWritesWorkflow<AppKernel> && !HostWritesWorkflow<const AppKernel>);
+static_assert(!HostInitializesPersistence<AppKernel> && !HostInitializesPersistence<const AppKernel>);
+// Positive controls ensure these are real component methods, not vacuous missing-name checks.
+// 中文翻译：正对照确认方法在独立组件上真实存在，不因方法名不存在而产生空通过。
+static_assert(requires(HistoryRuntime& history, std::span<const TransactionCommit> commits) { history.restore(commits); });
+static_assert(requires(lasercnc::persistence::PersistenceService& service, const TransactionCommit& commit,
+    const TaskRequest& task, const WorkflowRequest& request, const WorkflowDefinition& definition,
+    const WorkflowSnapshot& snapshot) {
+    service.append(commit); service.acceptTask(task, std::nullopt);
+    service.saveWorkflowCheckpoint(request, definition, snapshot, {}); service.initialize();
+});
 
 namespace {
 
@@ -443,6 +480,48 @@ Result<void> registerGovernedContributions(ModuleRegistrar& registrar)
 }
 
 } // namespace
+
+TEST_CASE("AppKernel state observers cannot write and persistence composition closes at startup", "[kernel][persistence][host-boundary]")
+{
+    class CompositionProbe final : public IModule {
+    public:
+        explicit CompositionProbe(bool fail = false) : fail_(fail) {}
+        const ModuleDescriptor& descriptor() const noexcept override { return descriptor_; }
+        Result<void> initialize(AppKernel& kernel) override
+        {
+            CHECK(kernel.state() == AppKernelState::Starting);
+            const auto rejected = kernel.configurePersistence(nullptr, nullptr, nullptr);
+            REQUIRE_FALSE(rejected.hasValue());
+            CHECK(std::string(rejected.error().code.value()) == "Kernel.PersistenceConfigurationClosed");
+            return fail_ ? Result<void>::failure(makeError("Test.CompositionRejected", ErrorCategory::Internal,
+                "Intentional composition failure")) : Result<void>::success();
+        }
+    private:
+        bool fail_;
+        ModuleDescriptor descriptor_{makeId<ModuleId>("module.persistence-composition-probe"),
+            "Persistence composition probe", {1U, 0U, 0U}};
+    };
+    AppKernel kernel;
+    const AppKernel& observer = kernel;
+    CHECK(&kernel.history() == &observer.history());
+    CHECK(&kernel.persistence() == &observer.persistence());
+    REQUIRE(kernel.addModule(std::make_unique<CompositionProbe>()).hasValue());
+    REQUIRE(kernel.bootstrap().hasValue());
+    auto ready = kernel.configurePersistence(nullptr, nullptr, nullptr);
+    REQUIRE_FALSE(ready.hasValue());
+    CHECK(std::string(ready.error().code.value()) == "Kernel.PersistenceConfigurationClosed");
+    REQUIRE(kernel.shutdown().hasValue());
+    auto stopped = kernel.configurePersistence(nullptr, nullptr, nullptr);
+    REQUIRE_FALSE(stopped.hasValue());
+    CHECK(std::string(stopped.error().code.value()) == "Kernel.PersistenceConfigurationClosed");
+    AppKernel failed;
+    REQUIRE(failed.addModule(std::make_unique<CompositionProbe>(true)).hasValue());
+    REQUIRE_FALSE(failed.bootstrap().hasValue());
+    CHECK(failed.state() == AppKernelState::Failed);
+    const auto retry = failed.configurePersistence(nullptr, nullptr, nullptr);
+    REQUIRE_FALSE(retry.hasValue());
+    CHECK(std::string(retry.error().code.value()) == "Kernel.PersistenceConfigurationClosed");
+}
 
 TEST_CASE("Kernel module stress failures release all contributions and owned services", "[kernel][modules][stress][f3b]")
 {

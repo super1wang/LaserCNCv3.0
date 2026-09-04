@@ -670,11 +670,6 @@ const runtime::DocumentRuntime& AppKernel::documentRuntime() const noexcept
     return documentRuntime_;
 }
 
-runtime::HistoryRuntime& AppKernel::history() noexcept
-{
-    return history_;
-}
-
 const runtime::HistoryRuntime& AppKernel::history() const noexcept
 {
     return history_;
@@ -800,9 +795,19 @@ const observability::DiagnosticsService& AppKernel::diagnostics() const noexcept
     return diagnostics_;
 }
 
-persistence::PersistenceService& AppKernel::persistence() noexcept
+foundation::Result<void> AppKernel::configurePersistence(
+    std::unique_ptr<platform::IPersistenceBackend> backend,
+    std::shared_ptr<foundation::IValueSerializer> serializer,
+    std::shared_ptr<platform::IHashService> hashes,
+    std::unique_ptr<platform::ISnapshotStore> snapshotStore)
 {
-    return persistence_;
+    if(state_ != AppKernelState::Configuring) {
+        return foundation::Result<void>::failure(foundation::makeError(
+            "Kernel.PersistenceConfigurationClosed", foundation::ErrorCategory::Conflict,
+            "Persistence can only be configured before kernel bootstrap"));
+    }
+    return persistence_.configure(std::move(backend), std::move(serializer),
+        std::move(hashes), std::move(snapshotStore));
 }
 
 const persistence::PersistenceService& AppKernel::persistence() const noexcept

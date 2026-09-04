@@ -1,4 +1,5 @@
 #include "kernel_test_module.hpp"
+#include "persistence_fixture.hpp"
 
 #include <lasercnc/infrastructure/filesystem_snapshot_store.hpp>
 #include <lasercnc/infrastructure/bs_thread_pool_executor.hpp>
@@ -232,11 +233,16 @@ struct Fixture final {
         take(kernel.capabilities().replace(session, std::array{id<CapabilityId>("document.write"), id<CapabilityId>("document.read")}));
         auto snapshotStore = std::make_unique<GatedSnapshotStore>(take(FilesystemSnapshotStore::create({root / "snapshots", 1024U * 1024U})));
         store = snapshotStore.get();
-        take(kernel.persistence().configure(take(SqlitePersistenceBackend::open({root / "state.db"})),
+        take(kernel.configurePersistence(take(SqlitePersistenceBackend::open({root / "state.db"})),
             std::make_shared<JsonconsAdapter>(), std::make_shared<Sha256HashService>(), std::move(snapshotStore)));
         take(kernel.bootstrap());
-        if(seed) { take(kernel.persistence().captureSnapshot(id<SnapshotId>("snapshot.stress.baseline"),
-            take(kernel.documents().snapshot(document)))); }
+        if(seed) {
+            // Seed durable state through a fixture-owned connection, not a Host write bypass.
+            // 中文翻译：通过夹具自有连接建立持久基线，不借用 Host 写旁路。
+            auto persistence = test::openPersistenceFixture(root / "state.db", root / "snapshots");
+            take(persistence->captureSnapshot(id<SnapshotId>("snapshot.stress.baseline"),
+                take(kernel.documents().snapshot(document))));
+        }
     }
     AppKernel kernel;
     std::shared_ptr<CreateHandler> command{std::make_shared<CreateHandler>()};

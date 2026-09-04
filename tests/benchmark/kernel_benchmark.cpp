@@ -4,6 +4,7 @@
 #include <Psapi.h>
 
 #include "kernel_test_module.hpp"
+#include "persistence_fixture.hpp"
 #include <lasercnc/infrastructure/filesystem_snapshot_store.hpp>
 #include <lasercnc/infrastructure/jsoncons_adapter.hpp>
 #include <lasercnc/infrastructure/sha256_hash_service.hpp>
@@ -21,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -245,7 +247,8 @@ struct Report final {
     Value::Array lifecycle;
 };
 
-void configurePersistence(persistence::PersistenceService& persistence, const std::filesystem::path& root,
+template<typename Target>
+void configurePersistence(Target& persistence, const std::filesystem::path& root,
     Report& report)
 {
     std::filesystem::create_directories(root);
@@ -259,8 +262,14 @@ void configurePersistence(persistence::PersistenceService& persistence, const st
         }
         report.metadata.emplace("sqlite_settings", Value{std::move(settings)});
     }
-    take(persistence.configure(std::move(backend), std::make_shared<JsonconsAdapter>(),
-        std::make_shared<Sha256HashService>(), take(FilesystemSnapshotStore::create({root / "snapshots", 256U * 1024U * 1024U}))));
+    auto snapshots = take(FilesystemSnapshotStore::create({root / "snapshots", 256U * 1024U * 1024U}));
+    if constexpr(std::is_same_v<Target, AppKernel>) {
+        take(persistence.configurePersistence(std::move(backend), std::make_shared<JsonconsAdapter>(),
+            std::make_shared<Sha256HashService>(), std::move(snapshots)));
+    } else {
+        take(persistence.configure(std::move(backend), std::make_shared<JsonconsAdapter>(),
+            std::make_shared<Sha256HashService>(), std::move(snapshots)));
+    }
 }
 
 class NullLog final : public observability::ILogService {
@@ -302,16 +311,17 @@ std::unique_ptr<AppKernel> configuredKernel(Report& report, const std::filesyste
     take(test::registerCommand(*kernel, CommandDescriptor{id<CommandName>("bench.update"), {1U, 0U, 0U}, schema, schema,
         ExecutionMode::Synchronous, SideEffectLevel::DocumentWrite, capability, true, true, false}, std::make_shared<UpdateHandler>()));
     take(kernel->capabilities().replace(session, std::array{capability, id<CapabilityId>("kernel.history.edit")}));
-    if(durable) { configurePersistence(kernel->persistence(), root, report); }
+    if(durable) { configurePersistence(*kernel, root, report); }
     return kernel;
 }
-void seedKernel(AppKernel& kernel, Report& report, bool durable)
+void seedKernel(AppKernel& kernel, Report& report, bool durable, const std::filesystem::path& root = {})
 {
     const auto start = Clock::now();
     take(kernel.bootstrap());
     take(kernel.documentRuntime().attach({project, document, {}, objects(report.opts.count)}));
     if(durable) {
-        take(kernel.persistence().captureSnapshot(id<SnapshotId>("snapshot.benchmark.baseline"), take(kernel.documents().snapshot(document))));
+        auto persistence = test::openPersistenceFixture(root / "state.db", root / "snapshots", 256U * 1024U * 1024U);
+        take(persistence->captureSnapshot(id<SnapshotId>("snapshot.benchmark.baseline"), take(kernel.documents().snapshot(document))));
     }
     report.metadata.insert_or_assign("last_seed_ms", Value{elapsed(start)});
 }
@@ -375,7 +385,7 @@ void component(Report& report)
 void gateway(Report& report)
 {
     auto kernel = configuredKernel(report, report.root / "gateway", report.opts.durable());
-    seedKernel(*kernel, report, report.opts.durable());
+    seedKernel(*kernel, report, report.opts.durable(), report.root / "gateway");
     report.metadata.emplace("seed_memory", memory());
     ReadHandler direct;
     const auto globalQuery = query(true);
@@ -480,7 +490,7 @@ void lifecycle(Report& report)
         auto before = memory();
         const auto start = Clock::now();
         auto kernel = configuredKernel(report, report.root / ("cycle-" + std::to_string(cycle)), report.opts.durable());
-        seedKernel(*kernel, report, report.opts.durable());
+        seedKernel(*kernel, report, report.opts.durable(), report.root / ("cycle-" + std::to_string(cycle)));
         const auto startup = elapsed(start);
         auto live = memory();
         verifyDocument(take(kernel->documents().snapshot(document)), report.opts.count, 'a', 0U);

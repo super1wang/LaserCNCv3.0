@@ -1,5 +1,6 @@
 #include "kernel_crash_contract.hpp"
 #include "kernel_test_module.hpp"
+#include "persistence_fixture.hpp"
 #include "kernel_file_crash_probe.hpp"
 
 #include <lasercnc/infrastructure/filesystem_snapshot_store.hpp>
@@ -313,7 +314,7 @@ std::shared_ptr<CreateHandler> configure(AppKernel& kernel, const std::filesyste
     }
     auto backend = take(SqlitePersistenceBackend::open({root / "state.db"}));
     auto store = take(FilesystemSnapshotStore::create({root / "snapshots", 1024U * 1024U}));
-    take(kernel.persistence().configure(std::make_unique<CrashBackend>(std::move(backend), control),
+    take(kernel.configurePersistence(std::make_unique<CrashBackend>(std::move(backend), control),
         std::make_shared<JsonconsAdapter>(), std::make_shared<Sha256HashService>(), std::move(store)));
     auto bootstrapped = kernel.bootstrap();
     if(startup) { *startup = std::move(bootstrapped); }
@@ -615,7 +616,10 @@ int runKernelCrashContract(std::string_view mode, const std::filesystem::path& r
     }
     if(seed) {
         take(kernel.execution().executeCommand(createRequest(true)));
-        take(kernel.persistence().captureSnapshot(id<SnapshotId>("snapshot.crash.baseline"), take(kernel.documents().snapshot(document))));
+        {
+            auto persistence = test::openPersistenceFixture(root / "state.db", root / "snapshots");
+            take(persistence->captureSnapshot(id<SnapshotId>("snapshot.crash.baseline"), take(kernel.documents().snapshot(document))));
+        }
         if(scenario.starts_with("undo-") || scenario.starts_with("redo-")) {
             take(kernel.execution().executeCommand(createRequest()));
         }

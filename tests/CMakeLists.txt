@@ -153,6 +153,15 @@ add_test(
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_occt_boundary.cmake"
 )
 
+add_test(
+    NAME architecture.host_state_boundary_negative_probes
+    COMMAND "${CMAKE_COMMAND}"
+        "-DLCNC_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+        "-DLCNC_TEST_BINARY_ROOT=${CMAKE_CURRENT_BINARY_DIR}/architecture-probes"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_host_state_boundary.cmake"
+)
+set_tests_properties(architecture.host_state_boundary_negative_probes PROPERTIES TIMEOUT 40)
+
 add_executable(
     lasercnc_kernel_headless_contract
     integration/kernel_headless_contract.cpp

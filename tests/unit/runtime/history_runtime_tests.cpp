@@ -7,6 +7,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include "kernel_test_module.hpp"
+#include "persistence_fixture.hpp"
 #include "fault_injecting_backend.hpp"
 #include "fault_injecting_data_plane.hpp"
 
@@ -260,8 +261,7 @@ void configurePersistence(AppKernel& kernel, const std::filesystem::path& path)
 {
     auto backend = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
     REQUIRE(backend.hasValue());
-    REQUIRE(kernel.persistence()
-                .configure(
+    REQUIRE(kernel.configurePersistence(
                     std::move(backend).value(),
                     std::make_shared<JsonconsAdapter>(),
                     std::make_shared<Sha256HashService>())
@@ -785,7 +785,7 @@ TEST_CASE("Journal failure changes neither document nor history", "[history][per
         auto backend = std::make_unique<FailingJournalBackend>(
             std::move(sqlite).value());
         auto* control = backend.get();
-        REQUIRE(kernel.persistence().configure(
+        REQUIRE(kernel.configurePersistence(
             std::move(backend),
             std::make_shared<JsonconsAdapter>(),
             std::make_shared<Sha256HashService>()).hasValue());
@@ -853,7 +853,7 @@ TEST_CASE("Persistence stage failures preserve history revisions and idempotency
                         REQUIRE(sqlite.hasValue());
                         auto backend = std::make_unique<lasercnc::test::FaultInjectingBackend>(std::move(sqlite).value());
                         auto* control = backend.get();
-                        REQUIRE(kernel.persistence().configure(std::move(backend),
+                        REQUIRE(kernel.configurePersistence(std::move(backend),
                             std::make_shared<JsonconsAdapter>(), std::make_shared<Sha256HashService>()).hasValue());
                         configureRuntime(kernel, project, document, session, true);
                         REQUIRE(kernel.bootstrap().hasValue());
@@ -930,7 +930,7 @@ TEST_CASE("Rollback failure quarantines persistence until a fresh recovery", "[h
                 REQUIRE(sqlite.hasValue());
                 auto backend = std::make_unique<lasercnc::test::FaultInjectingBackend>(std::move(sqlite).value());
                 auto* control = backend.get();
-                REQUIRE(kernel.persistence().configure(std::move(backend), std::make_shared<JsonconsAdapter>(),
+                REQUIRE(kernel.configurePersistence(std::move(backend), std::make_shared<JsonconsAdapter>(),
                     std::make_shared<Sha256HashService>()).hasValue());
                 configureRuntime(kernel, project, document, session, true);
                 REQUIRE(kernel.bootstrap().hasValue());
@@ -947,9 +947,9 @@ TEST_CASE("Rollback failure quarantines persistence until a fresh recovery", "[h
                 CHECK(kernel.history().snapshot(document).value().cursor == HistoryCursor{});
                 CHECK_FALSE(kernel.persistence().ready());
                 CHECK_FALSE(kernel.persistence().journalAfter(document, 0U).hasValue());
-                auto reinitialized = kernel.persistence().initialize();
-                REQUIRE_FALSE(reinitialized.hasValue());
-                CHECK(std::string(reinitialized.error().code.value()) == "Persistence.BackendQuarantined");
+                auto reconfigured = kernel.configurePersistence(nullptr, nullptr, nullptr);
+                REQUIRE_FALSE(reconfigured.hasValue());
+                CHECK(std::string(reconfigured.error().code.value()) == "Kernel.PersistenceConfigurationClosed");
                 CHECK_FALSE(kernel.execution().executeCommand(command).hasValue());
                 // An independent connection must never observe the failed transaction.
                 // 中文翻译：独立连接不得观察到失败事务中的记录。
@@ -1002,8 +1002,17 @@ TEST_CASE("Snapshot publication failures preserve the indexed state and permit o
                     auto snapshots = std::make_unique<FaultSnapshotStore>(std::move(files).value());
                     auto* data = snapshots.get();
                     auto hashes = std::make_shared<FaultHashService>(std::make_shared<Sha256HashService>());
-                    REQUIRE(kernel.persistence().configure(std::move(backend), std::make_shared<JsonconsAdapter>(),
+                    lasercnc::persistence::PersistenceService fixture;
+                    REQUIRE(fixture.configure(std::move(backend), std::make_shared<JsonconsAdapter>(),
                         hashes, std::move(snapshots)).hasValue());
+                    REQUIRE(fixture.initialize().hasValue());
+                    auto kernelBackend = SqlitePersistenceBackend::open({path});
+                    auto kernelFiles = FilesystemSnapshotStore::create({directory, 1024U * 1024U});
+                    REQUIRE(kernelBackend.hasValue());
+                    REQUIRE(kernelFiles.hasValue());
+                    REQUIRE(kernel.configurePersistence(std::move(kernelBackend).value(),
+                        std::make_shared<JsonconsAdapter>(), std::make_shared<Sha256HashService>(),
+                        std::move(kernelFiles).value()).hasValue());
                     configureRuntime(kernel, project, document, session, true);
                     REQUIRE(kernel.bootstrap().hasValue());
                     REQUIRE(kernel.execution().executeCommand(request("request.snapshot.seed", "kernel.history.create",
@@ -1011,7 +1020,7 @@ TEST_CASE("Snapshot publication failures preserve the indexed state and permit o
                     const auto image = kernel.documents().snapshot(document).value();
                     revisions = image.revisions();
                     objects = image.objects().all();
-                    REQUIRE(kernel.persistence().captureSnapshot(baseline, image).hasValue());
+                    REQUIRE(fixture.captureSnapshot(baseline, image).hasValue());
                     if(stage == "hash") { hashes->arm("lasercnc.document-snapshot", 1U, throws); }
                     if(stage == "begin") { db->arm(BackendPoint::Begin, "", 1U, throws); }
                     if(stage == "journal-query") { db->arm(BackendPoint::Query, "FROM state_journal WHERE document_id", 1U, throws); }
@@ -1022,7 +1031,7 @@ TEST_CASE("Snapshot publication failures preserve the indexed state and permit o
                     if(stage == "existing-read") { data->arm(SnapshotFault::Read, throws); }
                     if(stage == "existing-hash") { hashes->arm("lasercnc.document-snapshot", 2U, throws); }
                     const auto target = stage.starts_with("existing-") ? baseline : candidate;
-                    REQUIRE_FALSE(kernel.persistence().captureSnapshot(target, image).hasValue());
+                    REQUIRE_FALSE(fixture.captureSnapshot(target, image).hasValue());
                     CHECK(db->hits + data->hits + hashes->hits == 1U);
                     auto indexed = db->query("SELECT * FROM snapshot_index");
                     REQUIRE(indexed.hasValue());
@@ -1042,7 +1051,7 @@ TEST_CASE("Snapshot publication failures preserve the indexed state and permit o
                     REQUIRE(sqlite.hasValue());
                     auto files = FilesystemSnapshotStore::create({directory, 1024U * 1024U});
                     REQUIRE(files.hasValue());
-                    REQUIRE(kernel.persistence().configure(std::move(sqlite).value(), std::make_shared<JsonconsAdapter>(),
+                    REQUIRE(kernel.configurePersistence(std::move(sqlite).value(), std::make_shared<JsonconsAdapter>(),
                         std::make_shared<Sha256HashService>(), std::move(files).value()).hasValue());
                     configureRuntime(kernel, project, document, session, false);
                     REQUIRE(kernel.bootstrap().hasValue());
@@ -1050,8 +1059,9 @@ TEST_CASE("Snapshot publication failures preserve the indexed state and permit o
                     CHECK(image.objects().all() == objects);
                     CHECK(image.revisions() == revisions);
                     CHECK(kernel.history().snapshot(document).value().cursor == HistoryCursor{1U, 1U});
-                    REQUIRE(kernel.persistence().captureSnapshot(candidate, image).hasValue());
-                    REQUIRE(kernel.persistence().captureSnapshot(candidate, image).hasValue());
+                    auto fixture = lasercnc::test::openPersistenceFixture(path, directory);
+                    REQUIRE(fixture->captureSnapshot(candidate, image).hasValue());
+                    REQUIRE(fixture->captureSnapshot(candidate, image).hasValue());
                     CHECK(kernel.persistence().latestSnapshot(document).value()->snapshotId == candidate);
                     REQUIRE(kernel.shutdown().hasValue());
                 }
@@ -1078,7 +1088,7 @@ TEST_CASE("Close metadata faults retain committed data without claiming a detach
                 const auto setup = [&](AppKernel& kernel, std::unique_ptr<lasercnc::platform::IPersistenceBackend> backend, bool add) {
                     auto files = FilesystemSnapshotStore::create({directory, 1024U * 1024U});
                     REQUIRE(files.hasValue());
-                    REQUIRE(kernel.persistence().configure(std::move(backend), std::make_shared<JsonconsAdapter>(),
+                    REQUIRE(kernel.configurePersistence(std::move(backend), std::make_shared<JsonconsAdapter>(),
                         std::make_shared<Sha256HashService>(), std::move(files).value()).hasValue());
                     configureRuntime(kernel, project, document, session, add);
                     REQUIRE(kernel.bootstrap().hasValue());
@@ -1148,7 +1158,7 @@ TEST_CASE("Journal and outcome hash faults leave no partial history or idempoten
                     auto sqlite = SqlitePersistenceBackend::open({path});
                     REQUIRE(sqlite.hasValue());
                     auto hashes = std::make_shared<lasercnc::test::FaultHashService>(std::make_shared<Sha256HashService>());
-                    REQUIRE(kernel.persistence().configure(std::move(sqlite).value(), std::make_shared<JsonconsAdapter>(), hashes).hasValue());
+                    REQUIRE(kernel.configurePersistence(std::move(sqlite).value(), std::make_shared<JsonconsAdapter>(), hashes).hasValue());
                     configureRuntime(kernel, project, document, session, true);
                     REQUIRE(kernel.bootstrap().hasValue());
                     hashes->arm(stage == "outcome-digest" ? "lasercnc.command-outcome" : "lasercnc.state-journal",
