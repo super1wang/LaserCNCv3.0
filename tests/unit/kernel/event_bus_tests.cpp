@@ -5,8 +5,11 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <memory>
+#include <chrono>
+#include <future>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace lasercnc::foundation;
@@ -183,4 +186,236 @@ TEST_CASE("Event subscription lifetime cancels pending delivery safely", "[messa
     REQUIRE(survivingToken.hasValue());
     bus.reset();
     survivingToken.value().cancel();
+}
+
+TEST_CASE("EventBus rejects every undefined delivery mode and filter kind", "[messaging][event][c6]")
+{
+    EventBus bus;
+    auto kept = bus.subscribe(validId<SubscriptionId>("subscription.kept"), {}, DeliveryMode::Queued,
+        [](const EventEnvelope&) {});
+    REQUIRE(kept);
+    REQUIRE(bus.publish(TransientEvent::system(validId<EventName>("event.kept"), Version{1U, 0U, 0U}, {})));
+    for(unsigned int raw = 2U; raw <= 255U; ++raw) {
+        INFO("mode=" << raw);
+        auto result = bus.subscribe(validId<SubscriptionId>("subscription.invalid"), {},
+            static_cast<DeliveryMode>(raw), [](const EventEnvelope&) {});
+        CHECK_FALSE(result);
+        if(!result) {
+            CHECK(std::string(result.error().code.value()) == "Event.InvalidDeliveryMode");
+            CHECK(result.error().category == ErrorCategory::Validation);
+        }
+        CHECK(bus.subscriptionCount() == 1U);
+        CHECK(bus.queuedCount() == 1U);
+    }
+    for(unsigned int raw = 3U; raw <= 255U; ++raw) {
+        for(const auto mode : {DeliveryMode::Immediate, DeliveryMode::Queued}) {
+            INFO("filterKind=" << raw << " mode=" << static_cast<unsigned int>(mode));
+            auto result = bus.subscribe(validId<SubscriptionId>("subscription.invalid"),
+                EventFilter{static_cast<EventKind>(raw), std::nullopt}, mode, [](const EventEnvelope&) {});
+            CHECK_FALSE(result);
+            if(!result) {
+                CHECK(std::string(result.error().code.value()) == "Event.InvalidFilterKind");
+                CHECK(result.error().category == ErrorCategory::Validation);
+            }
+            CHECK(bus.subscriptionCount() == 1U);
+            CHECK(bus.queuedCount() == 1U);
+        }
+    }
+    CHECK(bus.drainQueued().delivered == 1U);
+}
+
+TEST_CASE("EventBus coalesces notifications only within an exact version", "[messaging][event][c6]")
+{
+    for(const auto changed : {Version{2U, 0U, 0U}, Version{1U, 1U, 0U}, Version{1U, 0U, 1U}}) {
+        DYNAMIC_SECTION("version=" << changed.toString()) {
+            EventBus bus;
+            std::vector<EventEnvelope> received;
+            auto token = bus.subscribe(validId<SubscriptionId>("subscription.version"), {}, DeliveryMode::Queued,
+                [&](const EventEnvelope& event) { received.push_back(event); });
+            REQUIRE(token);
+            const auto name = validId<EventName>("task.progress");
+            REQUIRE(bus.publish(TransientEvent::notification(name, Version{1U, 0U, 0U}, Value{"old"}, "same")));
+            auto other = bus.publish(TransientEvent::notification(name, changed, Value{"other"}, "same"));
+            REQUIRE(other);
+            CHECK(other.value().queued == 1U);
+            CHECK(other.value().coalesced == 0U);
+            auto updated = bus.publish(TransientEvent::notification(name, Version{1U, 0U, 0U}, Value{"updated"}, "same"));
+            REQUIRE(updated);
+            CHECK(updated.value().coalesced == 1U);
+            CHECK(bus.drainQueued().delivered == 2U);
+            REQUIRE(received.size() == 2U);
+            CHECK(received[0].version() == Version{1U, 0U, 0U});
+            CHECK(received[0].payload() == Value{"updated"});
+            CHECK(received[1].version() == changed);
+            CHECK(received[1].payload() == Value{"other"});
+        }
+    }
+}
+
+TEST_CASE("EventBus never reassigns cancelled queued work to a reused subscription id", "[messaging][event][c6]")
+{
+    for(const auto newMode : {DeliveryMode::Immediate, DeliveryMode::Queued}) {
+        DYNAMIC_SECTION("newMode=" << static_cast<unsigned int>(newMode)) {
+            EventBus bus;
+            unsigned int oldCalls = 0U;
+            unsigned int newCalls = 0U;
+            const auto id = validId<SubscriptionId>("subscription.reused");
+            auto old = bus.subscribe(id, {}, DeliveryMode::Queued, [&](const EventEnvelope&) { ++oldCalls; });
+            REQUIRE(old);
+            REQUIRE(bus.publish(TransientEvent::system(validId<EventName>("old.event"), Version{1U, 0U, 0U}, {})));
+            old.value().cancel();
+            auto replacement = bus.subscribe(id, EventFilter{EventKind::System, validId<EventName>("new.event")},
+                newMode, [&](const EventEnvelope&) { ++newCalls; });
+            REQUIRE(replacement);
+            CHECK(bus.drainQueued().delivered == 0U);
+            CHECK(oldCalls == 0U);
+            CHECK(newCalls == 0U);
+            REQUIRE(bus.publish(TransientEvent::system(validId<EventName>("new.event"), Version{1U, 0U, 0U}, {})));
+            static_cast<void>(bus.drainQueued());
+            CHECK(newCalls == 1U);
+        }
+    }
+}
+
+TEST_CASE("EventBus retains subscription identity inside an extracted drain batch", "[messaging][event][c6]")
+{
+    EventBus bus;
+    unsigned int oldCalls = 0U;
+    unsigned int newCalls = 0U;
+    std::optional<EventSubscription> old;
+    std::optional<EventSubscription> replacement;
+    const auto reused = validId<SubscriptionId>("subscription.z-reused");
+    auto first = bus.subscribe(validId<SubscriptionId>("subscription.a-first"), {}, DeliveryMode::Queued,
+        [&](const EventEnvelope&) {
+            old->cancel();
+            auto next = bus.subscribe(reused, {}, DeliveryMode::Queued, [&](const EventEnvelope&) { ++newCalls; });
+            REQUIRE(next);
+            replacement.emplace(std::move(next).value());
+        });
+    REQUIRE(first);
+    auto second = bus.subscribe(reused, {}, DeliveryMode::Queued, [&](const EventEnvelope&) { ++oldCalls; });
+    REQUIRE(second);
+    old.emplace(std::move(second).value());
+    REQUIRE(bus.publish(TransientEvent::system(validId<EventName>("batch.event"), Version{1U, 0U, 0U}, {})));
+    const auto drained = bus.drainQueued();
+    CHECK(drained.matched == 2U);
+    CHECK(drained.delivered == 1U);
+    CHECK(drained.failures.empty());
+    CHECK(oldCalls == 0U);
+    CHECK(newCalls == 0U);
+}
+
+TEST_CASE("EventBus does not coalesce notification work across subscription incarnations", "[messaging][event][c6]")
+{
+    EventBus bus;
+    std::vector<Value> received;
+    const auto id = validId<SubscriptionId>("subscription.incarnation");
+    const auto name = validId<EventName>("task.progress");
+    auto old = bus.subscribe(id, {}, DeliveryMode::Queued, [](const EventEnvelope&) {});
+    REQUIRE(old);
+    REQUIRE(bus.publish(TransientEvent::notification(name, Version{1U, 0U, 0U}, Value{"old"}, "same")));
+    old.value().cancel();
+    auto next = bus.subscribe(id, {}, DeliveryMode::Queued,
+        [&](const EventEnvelope& event) { received.push_back(event.payload()); });
+    REQUIRE(next);
+    const auto published = bus.publish(TransientEvent::notification(name, Version{1U, 0U, 0U}, Value{"new"}, "same"));
+    REQUIRE(published);
+    CHECK(published.value().queued == 1U);
+    CHECK(published.value().coalesced == 0U);
+    CHECK(bus.drainQueued().delivered == 1U);
+    REQUIRE(received.size() == 1U);
+    CHECK(received.front() == Value{"new"});
+}
+
+TEST_CASE("EventBus preserves every declared delivery and filter combination", "[messaging][event][c6]")
+{
+    for(const auto mode : {DeliveryMode::Immediate, DeliveryMode::Queued}) {
+        for(unsigned int filterIndex = 0U; filterIndex < 4U; ++filterIndex) {
+            DYNAMIC_SECTION("mode=" << static_cast<unsigned int>(mode) << " filter=" << filterIndex) {
+                EventBus bus;
+                std::vector<EventKind> received;
+                const auto kind = filterIndex == 3U ? std::optional<EventKind>{}
+                    : std::optional<EventKind>{static_cast<EventKind>(filterIndex)};
+                auto token = bus.subscribe(validId<SubscriptionId>("subscription.valid-matrix"),
+                    EventFilter{kind, std::nullopt}, mode, [&](const EventEnvelope& event) { received.push_back(event.kind()); });
+                REQUIRE(token);
+                REQUIRE(bus.publish(committedEvent(), validId<CorrelationId>("correlation.matrix"), validId<TraceId>("trace.matrix")));
+                REQUIRE(bus.publish(TransientEvent::notification(validId<EventName>("notification.matrix"), Version{1U, 0U, 0U}, {})));
+                REQUIRE(bus.publish(TransientEvent::system(validId<EventName>("system.matrix"), Version{1U, 0U, 0U}, {})));
+                const auto expected = filterIndex == 3U ? 3U : 1U;
+                CHECK(received.size() == (mode == DeliveryMode::Immediate ? expected : 0U));
+                CHECK(bus.drainQueued().delivered == (mode == DeliveryMode::Queued ? expected : 0U));
+                CHECK(received.size() == expected);
+                for(const auto observed : received) { CHECK((!kind || observed == *kind)); }
+            }
+        }
+    }
+}
+
+TEST_CASE("EventBus isolates reused subscriptions while another thread drains", "[messaging][event][c6]")
+{
+    EventBus bus;
+    unsigned int oldCalls = 0U;
+    unsigned int newCalls = 0U;
+    std::promise<void> entered;
+    auto enteredFuture = entered.get_future();
+    std::promise<void> release;
+    auto releaseFuture = release.get_future();
+    auto first = bus.subscribe(validId<SubscriptionId>("subscription.a-barrier"), {}, DeliveryMode::Queued,
+        [&](const EventEnvelope&) {
+            entered.set_value();
+            if(releaseFuture.wait_for(std::chrono::seconds{5}) != std::future_status::ready) {
+                throw std::runtime_error("test drain barrier timed out");
+            }
+        });
+    REQUIRE(first);
+    const auto reused = validId<SubscriptionId>("subscription.z-concurrent");
+    auto old = bus.subscribe(reused, {}, DeliveryMode::Queued, [&](const EventEnvelope&) { ++oldCalls; });
+    REQUIRE(old);
+    REQUIRE(bus.publish(TransientEvent::system(validId<EventName>("concurrent.event"), Version{1U, 0U, 0U}, {})));
+    EventDeliveryReport report;
+    std::jthread worker([&] { report = bus.drainQueued(); });
+    const bool ready = enteredFuture.wait_for(std::chrono::seconds{5}) == std::future_status::ready;
+    std::optional<EventSubscription> replacement;
+    if(ready) {
+        old.value().cancel();
+        auto next = bus.subscribe(reused, {}, DeliveryMode::Queued, [&](const EventEnvelope&) { ++newCalls; });
+        if(next) { replacement.emplace(std::move(next).value()); }
+    }
+    release.set_value();
+    worker.join();
+    REQUIRE(ready);
+    REQUIRE(replacement);
+    CHECK(report.matched == 2U);
+    CHECK(report.delivered == 1U);
+    CHECK(report.failures.empty());
+    CHECK(oldCalls == 0U);
+    CHECK(newCalls == 0U);
+}
+
+TEST_CASE("EventBus cancellation does not transfer already captured immediate callbacks", "[messaging][event][c6]")
+{
+    EventBus bus;
+    unsigned int oldCalls = 0U;
+    unsigned int newCalls = 0U;
+    std::optional<EventSubscription> old;
+    std::optional<EventSubscription> replacement;
+    const auto reused = validId<SubscriptionId>("subscription.z-immediate");
+    auto first = bus.subscribe(validId<SubscriptionId>("subscription.a-immediate"), {}, DeliveryMode::Immediate,
+        [&](const EventEnvelope&) {
+            old->cancel();
+            auto next = bus.subscribe(reused, {}, DeliveryMode::Immediate, [&](const EventEnvelope&) { ++newCalls; });
+            REQUIRE(next);
+            replacement.emplace(std::move(next).value());
+        });
+    REQUIRE(first);
+    auto second = bus.subscribe(reused, {}, DeliveryMode::Immediate, [&](const EventEnvelope&) { ++oldCalls; });
+    REQUIRE(second);
+    old.emplace(std::move(second).value());
+    const auto report = bus.publish(TransientEvent::system(validId<EventName>("immediate.event"), Version{1U, 0U, 0U}, {}));
+    REQUIRE(report);
+    CHECK(report.value().delivered == 2U);
+    CHECK(report.value().failures.empty());
+    CHECK(oldCalls == 1U);
+    CHECK(newCalls == 0U);
 }

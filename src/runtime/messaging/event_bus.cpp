@@ -14,15 +14,19 @@ namespace lasercnc::messaging {
 namespace detail {
 
 struct EventBusCore final {
+    struct SubscriptionIdentity final {};
+
     struct SubscriptionEntry final {
         EventFilter filter;
         DeliveryMode mode;
         EventCallback callback;
+        std::shared_ptr<const SubscriptionIdentity> identity;
     };
 
     struct QueuedDelivery final {
         kernel::SubscriptionId subscriptionId;
         EventEnvelope envelope;
+        std::shared_ptr<const SubscriptionIdentity> identity;
     };
 
     std::mutex mutex;
@@ -252,6 +256,23 @@ foundation::Result<EventSubscription> EventBus::subscribe(
             "An event callback is required",
             subscriptionId));
     }
+    if(mode != DeliveryMode::Immediate && mode != DeliveryMode::Queued) {
+        return foundation::Result<EventSubscription>::failure(eventError(
+            "Event.InvalidDeliveryMode", foundation::ErrorCategory::Validation,
+            "Event delivery mode must be Immediate or Queued", subscriptionId));
+    }
+    if(filter.kind.has_value()) {
+        switch(*filter.kind) {
+        case EventKind::Domain:
+        case EventKind::Notification:
+        case EventKind::System:
+            break;
+        default:
+            return foundation::Result<EventSubscription>::failure(eventError(
+                "Event.InvalidFilterKind", foundation::ErrorCategory::Validation,
+                "Event filter kind must be a declared EventKind", subscriptionId));
+        }
+    }
     std::lock_guard lock(core_->mutex);
     if(core_->closed) {
         return foundation::Result<EventSubscription>::failure(eventError(
@@ -264,7 +285,8 @@ foundation::Result<EventSubscription> EventBus::subscribe(
     const auto [unused, inserted] = core_->subscriptions.emplace(
         id,
         detail::EventBusCore::SubscriptionEntry {
-            std::move(filter), mode, std::move(callback)});
+            std::move(filter), mode, std::move(callback),
+            std::make_shared<const detail::EventBusCore::SubscriptionIdentity>()});
     static_cast<void>(unused);
     if(!inserted) {
         return foundation::Result<EventSubscription>::failure(eventError(
@@ -352,8 +374,10 @@ foundation::Result<EventDeliveryReport> EventBus::publishEnvelope(EventEnvelope 
                         nextQueue.rend(),
                         [&](const detail::EventBusCore::QueuedDelivery& pending) {
                             return pending.subscriptionId == subscriptionId
+                                && pending.identity == subscription.identity
                                 && pending.envelope.kind() == EventKind::Notification
                                 && pending.envelope.name() == envelope.name()
+                                && pending.envelope.version() == envelope.version()
                                 && pending.envelope.coalescingKey() == envelope.coalescingKey();
                         });
                     if(queued != nextQueue.rend()) {
@@ -364,7 +388,7 @@ foundation::Result<EventDeliveryReport> EventBus::publishEnvelope(EventEnvelope 
                 }
                 if(!coalesced) {
                     nextQueue.push_back(
-                        detail::EventBusCore::QueuedDelivery {subscriptionId, envelope});
+                        detail::EventBusCore::QueuedDelivery {subscriptionId, envelope, subscription.identity});
                     ++report.queued;
                 }
             }
@@ -419,7 +443,9 @@ EventDeliveryReport EventBus::drainQueued(std::size_t maximumDeliveries)
         {
             std::lock_guard lock(core_->mutex);
             const auto subscription = core_->subscriptions.find(delivery.subscriptionId);
-            if(subscription == core_->subscriptions.end()) {
+            // A reused public ID must not inherit an earlier subscription's queued deliveries.
+            // 中文翻译：公开 ID 的复用不得继承早先订阅的排队投递，包括已提取到 drain 批次的消息。
+            if(subscription == core_->subscriptions.end() || subscription->second.identity != delivery.identity) {
                 continue;
             }
             callback = subscription->second.callback;

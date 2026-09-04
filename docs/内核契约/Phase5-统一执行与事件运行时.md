@@ -1,6 +1,6 @@
 # Phase 5 统一执行与事件运行时
 
-状态：已验收。
+状态：Phase 5 历史检查点已验收；当前增量收口以 [冻结审计清单](Kernel-1.0-冻结审计清单.md) 为准，不将以下历史阶段范围自动扩张为最终 Kernel Frozen。
 
 Phase 5 建立所有 Headless、CLI、未来 GUI/Script/AI 必须共用的 Command、Query 与 Event Kernel 入口。本阶段不实现任何 CAD、CAM、Machine、Process 或其他领域命令。
 
@@ -18,7 +18,7 @@ Phase 5 建立所有 Headless、CLI、未来 GUI/Script/AI 必须共用的 Comma
 - Domain Event、Notification、System Event 三类语义保持分离。
 - Domain Event 只能由成功提交产生的 CommittedDomainEvent 转换；Notification 和 System Event 使用受限工厂创建，不能伪装成 Domain Event。
 - 支持按事件类别/名称过滤、Immediate/Queued delivery、RAII Subscription lifetime、Trace/Correlation 传播。
-- Notification 可按订阅、事件名和 coalescing key 合并；Domain/System Event 不合并。
+- Notification 合并在 C6b4 收紧为同一订阅实例、事件名、完整 Version 和 coalescing key；Domain/System Event 不合并。取消后公开订阅 ID 的复用不能继承旧排队项，见 [C6b4 契约](ST1C6b4-消息准入与订阅身份.md)。
 - 发布先在锁内准备投递快照，回调始终在锁外执行；回调可以重入发布，单个订阅者异常被转换为 delivery failure，不阻断其他订阅者，也不改变已提交业务状态。
 - queued 事件由调用方显式 drain；EventBus 不私建线程，也不把 Phase 6 的长任务 Scheduler 冒充 Host 事件循环。
 
