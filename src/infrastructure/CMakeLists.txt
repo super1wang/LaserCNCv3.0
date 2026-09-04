@@ -9,6 +9,10 @@ target_sources(
         execution/bs_thread_pool/bs_thread_pool_executor.cpp
         hash/windows/sha256_hash_service.cpp
         logging/spdlog/spdlog_log_service.cpp
+        logging/spdlog/log_file_identity.cpp
+        logging/spdlog/log_file_identity.hpp
+        persistence/filesystem/windows/log_file_identity.cpp
+        persistence/filesystem/windows/log_file_identity.hpp
         persistence/sqlite/sqlite_persistence_backend.cpp
         persistence/filesystem/windows/filesystem_snapshot_store.cpp
         persistence/filesystem/filesystem_asset_store.cpp

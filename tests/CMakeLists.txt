@@ -177,6 +177,7 @@ add_executable(
     unit/infrastructure/snapshot_create_probe.cpp
     unit/infrastructure/filesystem_asset_store_tests.cpp
     unit/infrastructure/file_path_admission_tests.cpp
+    unit/infrastructure/logging_path_identity_tests.cpp
     unit/infrastructure/spdlog_log_service_tests.cpp
     unit/infrastructure/sqlite_persistence_backend_tests.cpp
     unit/infrastructure/toml_config_adapter_tests.cpp

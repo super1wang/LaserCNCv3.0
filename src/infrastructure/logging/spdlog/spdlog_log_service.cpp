@@ -1,5 +1,6 @@
 #include <lasercnc/infrastructure/spdlog_log_service.hpp>
 #include "../../file_path_validation.hpp"
+#include "log_file_identity.hpp"
 
 #include <lasercnc/foundation/error.hpp>
 #include <lasercnc/infrastructure/jsoncons_adapter.hpp>
@@ -229,6 +230,10 @@ foundation::Result<std::unique_ptr<SpdlogLogService>> SpdlogLogService::create(
     }
 
     try {
+        auto identities = detail::validateLogFileIdentities(options);
+        if(!identities) {
+            return foundation::Result<std::unique_ptr<SpdlogLogService>>::failure(std::move(identities).error());
+        }
         auto implementation = std::make_unique<Impl>(options);
         return foundation::Result<std::unique_ptr<SpdlogLogService>>::success(
             std::unique_ptr<SpdlogLogService>(
