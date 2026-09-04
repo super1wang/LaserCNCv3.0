@@ -987,6 +987,8 @@ TEST_CASE("DocumentRuntime blocks close while a document query is active",
           "[runtime][document][query][concurrency]")
 {
     RuntimeFixture fixture;
+    const auto sibling = validId<DocumentId>("document.project-sibling");
+    REQUIRE(fixture.kernel.addDocument(fixture.project, sibling).hasValue());
     std::promise<void> entered;
     auto enteredFuture = entered.get_future();
     std::promise<void> release;
@@ -1009,6 +1011,11 @@ TEST_CASE("DocumentRuntime blocks close while a document query is active",
     });
     enteredFuture.wait();
 
+    auto projectClose = fixture.kernel.projectRuntime().close(fixture.project);
+    CHECK_FALSE(projectClose.hasValue());
+    CHECK(fixture.kernel.projectRuntime().lifecycle(fixture.project).value().state == ProjectLifecycleState::Open);
+    CHECK(fixture.kernel.documents().contains(sibling));
+
     auto refused = fixture.kernel.documentRuntime().close(fixture.document);
     REQUIRE_FALSE(refused.hasValue());
     CHECK(std::string(refused.error().code.value()) == "Document.ActiveOperations");
@@ -1019,5 +1026,7 @@ TEST_CASE("DocumentRuntime blocks close while a document query is active",
     release.set_value();
     REQUIRE(running.get().hasValue());
     REQUIRE(fixture.kernel.documentRuntime().close(fixture.document).hasValue());
+    REQUIRE(fixture.kernel.projectRuntime().close(fixture.project).hasValue());
+    CHECK_FALSE(fixture.kernel.documents().contains(sibling));
     REQUIRE(fixture.kernel.shutdown().hasValue());
 }

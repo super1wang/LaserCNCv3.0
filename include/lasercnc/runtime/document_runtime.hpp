@@ -4,6 +4,7 @@
 #include <lasercnc/kernel/identifiers.hpp>
 #include <lasercnc/platform/asset_store.hpp>
 #include <lasercnc/state/document.hpp>
+#include <lasercnc/runtime/project_runtime.hpp>
 
 #include <array>
 #include <atomic>
@@ -115,6 +116,7 @@ private:
     friend class TransactionManager;
     friend class WorkflowRuntime;
     friend class kernel::AppKernel;
+    friend class ProjectRuntime;
 
     struct Entry final {
         kernel::ProjectId projectId;
@@ -122,6 +124,7 @@ private:
         std::array<std::size_t, 6U> activities{};
         std::optional<foundation::Error> error;
     };
+    struct ActivityToken;
 
     struct CloseBlockers final {
         std::function<std::size_t(const kernel::DocumentId&)> transactions;
@@ -138,6 +141,12 @@ private:
     [[nodiscard]] foundation::Result<void> adoptCatalog(
         const std::vector<persistence::DocumentCatalogRecord>& records);
     void configureCloseBlockers(CloseBlockers blockers);
+    [[nodiscard]] foundation::Result<ProjectActivityLease> acquireProject(
+        const kernel::DocumentId& documentId) const;
+    [[nodiscard]] foundation::Result<std::vector<kernel::DocumentId>> preflightProjectClose(
+        const kernel::ProjectId& projectId) const;
+    [[nodiscard]] foundation::Result<DocumentLifecycleSnapshot> closeForProject(
+        const kernel::ProjectId& projectId, const kernel::DocumentId& documentId);
     [[nodiscard]] foundation::Result<DocumentActivityLease> acquireActivity(
         const kernel::DocumentId& documentId,
         DocumentActivityKind kind) const;
@@ -146,7 +155,8 @@ private:
         DocumentActivityKind kind) const noexcept;
     [[nodiscard]] foundation::Result<DocumentLifecycleSnapshot> detachImpl(
         const kernel::DocumentId& documentId,
-        bool persist);
+        bool persist,
+        const ProjectActivityLease* projectLease = nullptr);
     [[nodiscard]] static DocumentLifecycleSnapshot snapshotOf(
         const kernel::DocumentId& documentId,
         const Entry& entry);
@@ -157,6 +167,7 @@ private:
     persistence::PersistenceService& persistence_;
     const state::ObjectTypeRegistry* objectTypes_;
     const platform::IAssetStore* assetStore_;
+    ProjectRuntime* projects_{nullptr};
     mutable std::mutex mutex_;
     mutable std::map<kernel::DocumentId, Entry> entries_;
     CloseBlockers blockers_;

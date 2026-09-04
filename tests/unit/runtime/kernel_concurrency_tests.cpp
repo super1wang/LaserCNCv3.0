@@ -792,3 +792,45 @@ TEST_CASE("Kernel concurrency closing excludes query admission and permits clean
         REQUIRE(kernel.shutdown());
     }
 }
+
+TEST_CASE("ProjectRuntime seals all child admission during coordinated durable close", "[project-runtime][concurrency]")
+{
+    for(unsigned int round = 0U; round < rounds; ++round) {
+        const auto root = newRoot();
+        INFO("round=" << round << " evidence=" << root.string());
+        Fixture fixture{root};
+        auto& kernel = fixture.kernel;
+        const auto sibling = id<DocumentId>("document.sibling");
+        const auto other = id<ProjectId>("project.other");
+        const auto foreign = id<DocumentId>("document.foreign");
+        REQUIRE(kernel.documentRuntime().create(project, sibling));
+        REQUIRE(kernel.projectRuntime().create(other));
+        REQUIRE(kernel.documentRuntime().create(other, foreign));
+        fixture.store->armed = true;
+        auto close = std::async(std::launch::async, [&] { return kernel.projectRuntime().close(project); });
+        ReleaseOnExit release{fixture.store->gate};
+        REQUIRE(fixture.store->gate.awaitArrivals(1U));
+        REQUIRE(take(kernel.projectRuntime().lifecycle(project)).state == ProjectLifecycleState::Closing);
+        REQUIRE_FALSE(kernel.projectRuntime().open(project));
+        REQUIRE_FALSE(kernel.projectRuntime().close(project));
+        REQUIRE_FALSE(kernel.documentRuntime().create(project, id<DocumentId>("document.rejected")));
+        REQUIRE_FALSE(kernel.documentRuntime().attach({project, id<DocumentId>("document.attach-rejected"), {}, {}}));
+        REQUIRE_FALSE(kernel.documentRuntime().snapshot(document));
+        REQUIRE_FALSE(kernel.documentRuntime().snapshot(sibling));
+        REQUIRE_FALSE(kernel.documentRuntime().remove(sibling));
+        REQUIRE_FALSE(kernel.documentRuntime().close(sibling));
+        REQUIRE_FALSE(kernel.execution().executeQuery(queryRequest()));
+        REQUIRE(fixture.query->calls == 0U);
+        REQUIRE(kernel.documentRuntime().snapshot(foreign));
+        fixture.store->gate.release();
+        REQUIRE(take(completed(close)).state == ProjectLifecycleState::Closed);
+        REQUIRE_FALSE(kernel.documents().contains(document));
+        REQUIRE_FALSE(kernel.documents().contains(sibling));
+        REQUIRE(kernel.documents().contains(foreign));
+        REQUIRE(kernel.projectRuntime().open(project));
+        REQUIRE_FALSE(kernel.documents().contains(document));
+        REQUIRE(kernel.documentRuntime().open(document));
+        verifyQuery(take(kernel.execution().executeQuery(queryRequest())));
+        REQUIRE(kernel.shutdown());
+    }
+}

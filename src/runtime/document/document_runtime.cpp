@@ -66,6 +66,16 @@ foundation::Result<kernel::SnapshotId> closeSnapshotId(
 
 } // namespace
 
+struct DocumentRuntime::ActivityToken final {
+    ActivityToken(kernel::DocumentId id, DocumentActivityKind activity, ProjectActivityLease project)
+        : documentId(std::move(id)), kind(activity), projectLease(std::move(project)) {}
+    ~ActivityToken() { if(owner != nullptr) { owner->releaseActivity(documentId, kind); } }
+    kernel::DocumentId documentId;
+    DocumentActivityKind kind;
+    ProjectActivityLease projectLease;
+    const DocumentRuntime* owner{nullptr};
+};
+
 const char* documentLifecycleStateName(DocumentLifecycleState state) noexcept
 {
     switch(state) {
@@ -98,6 +108,11 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::create(
                 foundation::ErrorCategory::Conflict,
                 "The document runtime is not accepting lifecycle operations",
                 documentId));
+    }
+    auto projectActivity = projects_ != nullptr ? projects_->acquireActivity(projectId)
+        : foundation::Result<ProjectActivityLease>::success({});
+    if(!projectActivity) {
+        return foundation::Result<DocumentLifecycleSnapshot>::failure(std::move(projectActivity).error());
     }
     {
         std::lock_guard lock(mutex_);
@@ -181,6 +196,11 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::attach(
     }
     const auto documentId = image.documentId;
     const auto projectId = image.projectId;
+    auto projectActivity = projects_ != nullptr ? projects_->acquireActivity(projectId)
+        : foundation::Result<ProjectActivityLease>::success({});
+    if(!projectActivity) {
+        return foundation::Result<DocumentLifecycleSnapshot>::failure(std::move(projectActivity).error());
+    }
     auto assetsAdmitted = validateObjectAssets(image.objects, assetStore_);
     if(!assetsAdmitted) {
         return foundation::Result<DocumentLifecycleSnapshot>::failure(std::move(assetsAdmitted).error());
@@ -305,6 +325,11 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::open(
                 "Only a durably detached document can be opened",
                 documentId));
     }
+    auto projectActivity = projects_ != nullptr ? projects_->acquireActivity(record->projectId)
+        : foundation::Result<ProjectActivityLease>::success({});
+    if(!projectActivity) {
+        return foundation::Result<DocumentLifecycleSnapshot>::failure(std::move(projectActivity).error());
+    }
     auto recovered = persistence_.recover();
     if(!recovered) {
         return foundation::Result<DocumentLifecycleSnapshot>::failure(
@@ -352,7 +377,11 @@ foundation::Result<state::Document> DocumentRuntime::snapshot(
 foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::close(
     const kernel::DocumentId& documentId)
 {
-    return detachImpl(documentId, true);
+    auto projectActivity = acquireProject(documentId);
+    if(!projectActivity) {
+        return foundation::Result<DocumentLifecycleSnapshot>::failure(std::move(projectActivity).error());
+    }
+    return detachImpl(documentId, true, &projectActivity.value());
 }
 
 foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::detach(
@@ -366,12 +395,17 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::detach(
                 "Configured persistence requires close instead of direct detach",
                 documentId));
     }
-    return detachImpl(documentId, false);
+    auto projectActivity = acquireProject(documentId);
+    if(!projectActivity) {
+        return foundation::Result<DocumentLifecycleSnapshot>::failure(std::move(projectActivity).error());
+    }
+    return detachImpl(documentId, false, &projectActivity.value());
 }
 
 foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::detachImpl(
     const kernel::DocumentId& documentId,
-    bool persist)
+    bool persist,
+    const ProjectActivityLease* projectLease)
 {
     if(!accepting()) {
         return foundation::Result<DocumentLifecycleSnapshot>::failure(
@@ -400,6 +434,11 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::detachImpl(
                     foundation::ErrorCategory::Conflict,
                     "Only an open document can begin closing",
                     documentId));
+        }
+        if(projectLease != nullptr && !projectLease->matches(found->second.projectId)) {
+            return foundation::Result<DocumentLifecycleSnapshot>::failure(documentRuntimeError(
+                "Document.OwnershipConflict", foundation::ErrorCategory::Conflict,
+                "The document ownership changed during lifecycle admission", documentId));
         }
         const auto activities = activityCount(found->second.activities);
         if(activities != 0U) {
@@ -572,6 +611,8 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::detachImpl(
 foundation::Result<void> DocumentRuntime::remove(
     const kernel::DocumentId& documentId)
 {
+    auto projectActivity = acquireProject(documentId);
+    if(!projectActivity) { return foundation::Result<void>::failure(std::move(projectActivity).error()); }
     if(!accepting()) {
         return foundation::Result<void>::failure(documentRuntimeError(
             "Document.RuntimeNotAccepting",
@@ -587,6 +628,11 @@ foundation::Result<void> DocumentRuntime::remove(
             foundation::ErrorCategory::NotFound,
             "The document lifecycle entry does not exist",
             documentId));
+    }
+    if(!projectActivity.value().matches(found->second.projectId)) {
+        return foundation::Result<void>::failure(documentRuntimeError(
+            "Document.OwnershipConflict", foundation::ErrorCategory::Conflict,
+            "The document ownership changed during removal admission", documentId));
     }
     if(found->second.state != DocumentLifecycleState::Detached
        || documents_.contains(documentId)) {
@@ -771,6 +817,82 @@ void DocumentRuntime::configureCloseBlockers(CloseBlockers blockers)
     blockers_ = std::move(blockers);
 }
 
+foundation::Result<ProjectActivityLease> DocumentRuntime::acquireProject(
+    const kernel::DocumentId& documentId) const
+{
+    if(!accepting()) {
+        return foundation::Result<ProjectActivityLease>::failure(documentRuntimeError(
+            "Document.RuntimeNotAccepting", foundation::ErrorCategory::Conflict,
+            "The document runtime is not accepting lifecycle operations", documentId));
+    }
+    if(projects_ == nullptr) { return foundation::Result<ProjectActivityLease>::success({}); }
+    auto current = lifecycle(documentId);
+    if(!current) { return foundation::Result<ProjectActivityLease>::failure(std::move(current).error()); }
+    return projects_->acquireActivity(current.value().projectId);
+}
+
+foundation::Result<std::vector<kernel::DocumentId>> DocumentRuntime::preflightProjectClose(
+    const kernel::ProjectId& projectId) const
+{
+    CloseBlockers blockers;
+    std::vector<kernel::DocumentId> result;
+    {
+        std::lock_guard lock(mutex_);
+        blockers = blockers_;
+        for(const auto& [documentId, entry] : entries_) {
+            if(entry.projectId != projectId) { continue; }
+            if(entry.state != DocumentLifecycleState::Open
+               && entry.state != DocumentLifecycleState::Detached) {
+                return foundation::Result<std::vector<kernel::DocumentId>>::failure(documentRuntimeError(
+                    "Project.ChildStateConflict", foundation::ErrorCategory::Conflict,
+                    "Every child must be open or detached before project close", documentId));
+            }
+            if(activityCount(entry.activities) != 0U) {
+                return foundation::Result<std::vector<kernel::DocumentId>>::failure(documentRuntimeError(
+                    "Project.CloseBlocked", foundation::ErrorCategory::Conflict,
+                    "A child document still has active leases", documentId));
+            }
+            if(entry.state == DocumentLifecycleState::Open) { result.push_back(documentId); }
+        }
+    }
+    try {
+        for(const auto& documentId : result) {
+            if((blockers.transactions && blockers.transactions(documentId) != 0U)
+               || (blockers.tasks && blockers.tasks(documentId) != 0U)
+               || (blockers.workflows && blockers.workflows(documentId) != 0U)
+               || (blockers.scripts && blockers.scripts(documentId) != 0U)) {
+                return foundation::Result<std::vector<kernel::DocumentId>>::failure(documentRuntimeError(
+                    "Project.CloseBlocked", foundation::ErrorCategory::Conflict,
+                    "A child document still has active runtime work", documentId));
+            }
+        }
+    } catch(...) {
+        return foundation::Result<std::vector<kernel::DocumentId>>::failure(foundation::makeError(
+            "Project.CloseProbeFailed", foundation::ErrorCategory::Internal,
+            "Project child activity could not be inspected"));
+    }
+    return foundation::Result<std::vector<kernel::DocumentId>>::success(std::move(result));
+}
+
+foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::closeForProject(
+    const kernel::ProjectId& projectId, const kernel::DocumentId& documentId)
+{
+    auto document = lifecycle(documentId);
+    if(!document) { return foundation::Result<DocumentLifecycleSnapshot>::failure(std::move(document).error()); }
+    if(projects_ == nullptr || document.value().projectId != projectId) {
+        return foundation::Result<DocumentLifecycleSnapshot>::failure(documentRuntimeError(
+            "Document.OwnershipConflict", foundation::ErrorCategory::Conflict,
+            "The project close coordinator does not own this document", documentId));
+    }
+    auto project = projects_->lifecycle(projectId);
+    if(!project || project.value().state != ProjectLifecycleState::Closing) {
+        return foundation::Result<DocumentLifecycleSnapshot>::failure(documentRuntimeError(
+            "Project.NotClosing", foundation::ErrorCategory::Conflict,
+            "The parent project must have sealed admission before coordinated close", documentId));
+    }
+    return detachImpl(documentId, true);
+}
+
 foundation::Result<DocumentActivityLease> DocumentRuntime::acquireActivity(
     const kernel::DocumentId& documentId,
     DocumentActivityKind kind) const
@@ -792,6 +914,16 @@ foundation::Result<DocumentActivityLease> DocumentRuntime::acquireActivity(
                 "The document activity kind is invalid",
                 documentId));
     }
+    auto projectActivity = acquireProject(documentId);
+    if(!projectActivity) { return foundation::Result<DocumentActivityLease>::failure(std::move(projectActivity).error()); }
+    std::shared_ptr<ActivityToken> token;
+    try {
+        token = std::make_shared<ActivityToken>(documentId, kind, std::move(projectActivity).value());
+    } catch(...) {
+        return foundation::Result<DocumentActivityLease>::failure(documentRuntimeError(
+            "Document.ActivityAdmissionFailed", foundation::ErrorCategory::Internal,
+            "The document activity lease could not be allocated", documentId));
+    }
     std::lock_guard lock(mutex_);
     const auto found = entries_.find(documentId);
     if(found == entries_.end() || found->second.state != DocumentLifecycleState::Open) {
@@ -802,34 +934,14 @@ foundation::Result<DocumentActivityLease> DocumentRuntime::acquireActivity(
                 "The document is not open for new runtime activity",
                 documentId));
     }
-    ++found->second.activities[index];
-    try {
-        auto token = std::shared_ptr<void>(
-            new std::uint8_t {0U},
-            [this, documentId, kind](void* pointer) noexcept {
-                delete static_cast<std::uint8_t*>(pointer);
-                releaseActivity(documentId, kind);
-            });
-        return foundation::Result<DocumentActivityLease>::success(
-            DocumentActivityLease {std::move(token)});
-    } catch(const std::exception& exception) {
-        --found->second.activities[index];
-        return foundation::Result<DocumentActivityLease>::failure(
-            documentRuntimeError(
-                "Document.ActivityAdmissionFailed",
-                foundation::ErrorCategory::Internal,
-                "The document activity lease could not be created",
-                documentId,
-                {{"reason", foundation::Value {exception.what()}}}));
-    } catch(...) {
-        --found->second.activities[index];
-        return foundation::Result<DocumentActivityLease>::failure(
-            documentRuntimeError(
-                "Document.ActivityAdmissionFailed",
-                foundation::ErrorCategory::Internal,
-                "The document activity lease could not be created",
-                documentId));
+    if(!token->projectLease.matches(found->second.projectId)) {
+        return foundation::Result<DocumentActivityLease>::failure(documentRuntimeError(
+            "Document.OwnershipConflict", foundation::ErrorCategory::Conflict,
+            "The document ownership changed during activity admission", documentId));
     }
+    ++found->second.activities[index];
+    token->owner = this;
+    return foundation::Result<DocumentActivityLease>::success(DocumentActivityLease{std::move(token)});
 }
 
 void DocumentRuntime::releaseActivity(

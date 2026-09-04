@@ -17,7 +17,7 @@ LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9 及 K10A–K10E 的�
 
 F5A/B/C 工程加固检查点已验收：隔离 ASan 与真实探针、进程退出门禁、History/Persistence/Scheduler 的 Host 只读边界、未知契约状态拒绝及四 scope 输出断言均已闭合。固定实现 `0cbd348` 的 Debug/Release 各 264/264、ASan 267/267，全集 792 次、故障矩阵 180 次、独立进程恢复 580 次连续执行全部通过；21 份基线报告已归档。见 [F5C 记录](docs/内核契约/K10F-F5C-执行边界与状态终审.md) 和 [阶段交付](docs/阶段交付/2026-09-04-K10F-F5-工程加固与最终门禁.md)。
 
-复核原规划后，ST1 按完整目标补齐独立 Project 生命周期，不再等待“是否实现”的额外决策，也不缩减为 Document ownership。ST1A 版本化持久目录与迁移基础已通过 Debug 275/275、专项 36 次和纯生产门禁，ProjectRuntime、执行准入及最终恢复认证尚未完成；见 [ST1 收口契约](docs/内核契约/ST1-独立项目生命周期收口.md) 与 [逐项审计清单](docs/内核契约/Kernel-1.0-冻结审计清单.md)。F5C 的旧固定版本成绩不替代 ST1 新代码的最终门禁。
+复核原规划后，ST1 按完整目标补齐独立 Project 生命周期，不再等待“是否实现”的额外决策，也不缩减为 Document ownership。ST1A 版本化持久目录与迁移基础已通过组件门禁；ST1B 的 ProjectRuntime、空项目、文档联动和关闭协调已通过本地检查点：Debug 284/284、项目用例 27 次连续验证及纯生产构建。Project-only 执行准入、完整恢复与最终认证仍由 ST1C/D 完成；见 [ST1B 交付](docs/阶段交付/2026-09-04-ST1B-项目生命周期与文档关闭协调.md)、[ST1 收口契约](docs/内核契约/ST1-独立项目生命周期收口.md) 与 [逐项审计清单](docs/内核契约/Kernel-1.0-冻结审计清单.md)。F5C 的旧固定版本成绩不替代 ST1 新代码的最终门禁。
 
 - 标准：C++20
 - 测试：Catch2 + CTest

@@ -318,6 +318,7 @@ void seedKernel(AppKernel& kernel, Report& report, bool durable, const std::file
 {
     const auto start = Clock::now();
     take(kernel.bootstrap());
+    take(kernel.projectRuntime().create(project));
     take(kernel.documentRuntime().attach({project, document, {}, objects(report.opts.count)}));
     if(durable) {
         auto persistence = test::openPersistenceFixture(root / "state.db", root / "snapshots", 256U * 1024U * 1024U);

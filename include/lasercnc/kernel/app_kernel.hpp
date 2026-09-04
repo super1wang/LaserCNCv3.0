@@ -74,6 +74,9 @@ public:
     [[nodiscard]] foundation::Result<void> addDocument(
         ProjectId projectId,
         DocumentId documentId);
+    [[nodiscard]] foundation::Result<void> addProject(ProjectId projectId);
+    [[nodiscard]] runtime::ProjectRuntime& projectRuntime() noexcept;
+    [[nodiscard]] const runtime::ProjectRuntime& projectRuntime() const noexcept;
     [[nodiscard]] const state::DocumentStore& documents() const noexcept;
     [[nodiscard]] runtime::DocumentRuntime& documentRuntime() noexcept;
     [[nodiscard]] const runtime::DocumentRuntime& documentRuntime() const noexcept;
@@ -112,6 +115,7 @@ private:
     state::ObjectTypeRegistry objectTypes_;
     std::shared_ptr<platform::IAssetStore> assetStore_;
     persistence::PersistenceService persistence_;
+    runtime::ProjectRuntime projectRuntime_;
     runtime::DocumentRuntime documentRuntime_;
     runtime::HistoryRuntime history_;
     runtime::TransactionManager transactions_;

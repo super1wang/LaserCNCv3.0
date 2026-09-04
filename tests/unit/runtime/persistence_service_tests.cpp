@@ -2359,6 +2359,10 @@ TEST_CASE("DocumentRuntime blocks close while a document task remains active",
     CHECK(accepted.value().taskId == taskId);
     enteredFuture.wait();
 
+    auto projectClose = kernel.projectRuntime().close(project);
+    CHECK_FALSE(projectClose.hasValue());
+    CHECK(kernel.projectRuntime().lifecycle(project).value().state == ProjectLifecycleState::Open);
+
     auto refused = kernel.documentRuntime().close(document);
     REQUIRE_FALSE(refused.hasValue());
     CHECK(std::string(refused.error().code.value()) == "Document.CloseBlocked");

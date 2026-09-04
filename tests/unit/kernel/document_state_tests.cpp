@@ -137,6 +137,9 @@ TEST_CASE("DocumentRuntime owns runtime lifecycle while DocumentStore stays inte
     const auto otherProject = makeId<ProjectId>("project.other");
     const auto document = makeId<DocumentId>("document.runtime");
 
+    REQUIRE(kernel.projectRuntime().create(project).hasValue());
+    REQUIRE(kernel.projectRuntime().create(otherProject).hasValue());
+
     auto created = kernel.documentRuntime().create(project, document);
     REQUIRE(created.hasValue());
     CHECK(created.value().state == lasercnc::runtime::DocumentLifecycleState::Open);

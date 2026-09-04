@@ -215,6 +215,7 @@ TEST_CASE("Document attach validates types before lifecycle mutation without imp
     const auto document = id<DocumentId>("document.attach");
     DocumentImage image {id<ProjectId>("project.attach"), document, RevisionSet{},
         {{id<ObjectId>("object.attach"), id<ObjectTypeId>("type.test.versioned"), Value {std::int64_t {1}}}}};
+    REQUIRE(kernel.projectRuntime().create(image.projectId).hasValue());
     bool valid = false;
     SECTION("known old schema is preserved") { valid = true; }
     SECTION("unknown type") { image.objects.front().type = id<ObjectTypeId>("type.unknown"); }

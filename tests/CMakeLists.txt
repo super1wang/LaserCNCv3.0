@@ -120,6 +120,7 @@ add_executable(
     unit/runtime/task_runtime_tests.cpp
     unit/runtime/persistence_service_tests.cpp
     unit/runtime/project_persistence_tests.cpp
+    unit/runtime/project_runtime_tests.cpp
     unit/runtime/history_runtime_tests.cpp
     unit/runtime/asset_state_tests.cpp
     unit/runtime/kernel_concurrency_tests.cpp

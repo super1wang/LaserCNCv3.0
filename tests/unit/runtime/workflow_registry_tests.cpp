@@ -640,6 +640,10 @@ TEST_CASE("DocumentRuntime blocks close while a workflow remains active",
     REQUIRE(started.hasValue());
     CHECK_FALSE(isTerminal(started.value().state));
 
+    auto projectClose = fixture.kernel.projectRuntime().close(request.projectId);
+    CHECK_FALSE(projectClose.hasValue());
+    CHECK(fixture.kernel.projectRuntime().lifecycle(request.projectId).value().state == ProjectLifecycleState::Open);
+
     auto refused = fixture.kernel.documentRuntime().close(request.documentId);
     REQUIRE_FALSE(refused.hasValue());
     CHECK(std::string(refused.error().code.value()) == "Document.CloseBlocked");
@@ -999,6 +1003,10 @@ TEST_CASE("DocumentRuntime blocks close while a script remains active",
     auto started = fixture.kernel.execution().executeScript(request);
     REQUIRE(started.hasValue());
     CHECK_FALSE(isTerminal(started.value().state));
+
+    auto projectClose = fixture.kernel.projectRuntime().close(request.projectId);
+    CHECK_FALSE(projectClose.hasValue());
+    CHECK(fixture.kernel.projectRuntime().lifecycle(request.projectId).value().state == ProjectLifecycleState::Open);
 
     auto refused = fixture.kernel.documentRuntime().close(request.documentId);
     REQUIRE_FALSE(refused.hasValue());

@@ -4,6 +4,7 @@
 #include <lasercnc/runtime/asset_validation.hpp>
 
 #include <algorithm>
+#include <set>
 #include <string>
 #include <utility>
 
@@ -35,7 +36,8 @@ private:
 } // namespace
 
 AppKernel::AppKernel()
-    : documentRuntime_(documents_, persistence_, &objectTypes_),
+    : projectRuntime_(persistence_),
+      documentRuntime_(documents_, persistence_, &objectTypes_),
       history_(documents_),
       transactions_(documents_, &persistence_, &documentRuntime_, &history_, &objectTypes_),
       workflowRegistry_(commandRegistry_, queryRegistry_),
@@ -115,6 +117,8 @@ AppKernel::AppKernel()
           workflows_,
           scripts_)
 {
+    projectRuntime_.documents_ = &documentRuntime_;
+    documentRuntime_.projects_ = &projectRuntime_;
     documentRuntime_.configureCloseBlockers(
         runtime::DocumentRuntime::CloseBlockers {
             [this](const DocumentId& documentId) {
@@ -271,6 +275,26 @@ foundation::Result<void> AppKernel::restoreState()
                 }
             }
         }
+        // Only verified durable roots can seed the once-only legacy migration.
+        // 中文翻译：只有已验证的持久文档根身份可以参与一次性旧目录迁移。
+        std::set<ProjectId> durableRoots;
+        for(const auto& image : recovered.value().documents) { durableRoots.insert(image.projectId); }
+        for(const auto& record : catalog.value()) { durableRoots.insert(record.projectId); }
+        const std::vector<ProjectId> migrationRoots(durableRoots.begin(), durableRoots.end());
+        auto migrated = persistence_.completeProjectCatalogMigration(migrationRoots);
+        if(!migrated) { return migrated; }
+        auto projects = persistence_.projectCatalog();
+        if(!projects) { return foundation::Result<void>::failure(std::move(projects).error()); }
+        for(const auto& root : durableRoots) {
+            if(std::none_of(projects.value().begin(), projects.value().end(),
+                [&](const auto& record) { return record.projectId == root; })) {
+                return foundation::Result<void>::failure(foundation::makeError(
+                    "Project.RecoveryMissingRoot", foundation::ErrorCategory::Infrastructure,
+                    "A durable document root has no project catalog entry"));
+            }
+        }
+        auto projectsAdopted = projectRuntime_.adoptCatalog(projects.value());
+        if(!projectsAdopted) { return projectsAdopted; }
         auto restoredImages = recovered.value().documents;
         restoredImages.erase(
             std::remove_if(
@@ -321,6 +345,25 @@ foundation::Result<void> AppKernel::restoreState()
                 {}});
         }
 
+        // An unavailable container must never expose recovered open children.
+        // 中文翻译：不可用的项目容器不能暴露已恢复的 Open 子文档。
+        for(const auto& image : restoredImages) {
+            auto project = projectRuntime_.lifecycle(image.projectId);
+            if(!project || project.value().state != runtime::ProjectLifecycleState::Open) {
+                return foundation::Result<void>::failure(foundation::makeError(
+                    "Project.RecoveryChildStateConflict", foundation::ErrorCategory::Infrastructure,
+                    "An open durable document belongs to an unavailable project"));
+            }
+        }
+        // Explicit startup composition may introduce new empty project identities.
+        // 中文翻译：显式启动组合可声明新的空项目，但不能修复缺失的持久根身份。
+        for(const auto& project : projectRuntime_.list()) {
+            if(std::none_of(projects.value().begin(), projects.value().end(),
+                [&](const auto& record) { return record.projectId == project.projectId; })) {
+                auto saved = persistence_.saveProjectLifecycle(project.projectId, persistence::ProjectPersistenceState::Open);
+                if(!saved) { return saved; }
+            }
+        }
         auto restored = documents_.restoreDocuments(restoredImages);
         if(!restored) {
             state_ = AppKernelState::Failed;
@@ -553,6 +596,7 @@ foundation::Result<void> AppKernel::bootstrap()
     traces_.freeze();
     metrics_.freeze();
     diagnostics_.freeze();
+    projectRuntime_.start();
     documentRuntime_.start();
     commands_.start();
     queries_.start();
@@ -608,6 +652,7 @@ foundation::Result<void> AppKernel::shutdown(std::chrono::milliseconds taskTimeo
 
     const bool wasConfiguring = state_ == AppKernelState::Configuring;
     state_ = AppKernelState::Stopping;
+    projectRuntime_.stop();
     documentRuntime_.stop();
     scripts_.stop();
     workflows_.stop();
@@ -651,9 +696,23 @@ foundation::Result<void> AppKernel::addDocument(
             foundation::ErrorCategory::Conflict,
             "Documents can only be attached while the application kernel is configuring"));
     }
-    return documentRuntime_.configureDocument(
-        std::move(projectId), std::move(documentId));
+    auto configured = documentRuntime_.configureDocument(projectId, std::move(documentId));
+    if(!configured) { return configured; }
+    return projectRuntime_.configureProject(projectId);
 }
+
+foundation::Result<void> AppKernel::addProject(ProjectId projectId)
+{
+    if(state_ != AppKernelState::Configuring) {
+        return foundation::Result<void>::failure(foundation::makeError(
+            "Kernel.ProjectLoadNotConfiguring", foundation::ErrorCategory::Conflict,
+            "Projects can only be configured before kernel bootstrap"));
+    }
+    return projectRuntime_.configureProject(projectId);
+}
+
+runtime::ProjectRuntime& AppKernel::projectRuntime() noexcept { return projectRuntime_; }
+const runtime::ProjectRuntime& AppKernel::projectRuntime() const noexcept { return projectRuntime_; }
 
 const state::DocumentStore& AppKernel::documents() const noexcept
 {
