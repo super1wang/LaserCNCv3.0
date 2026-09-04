@@ -213,6 +213,130 @@ const char* stepStateName(runtime::WorkflowStepState state) noexcept
 
 constexpr std::size_t maximumErrorChainDepth = 32U;
 
+bool knownWorkflowState(runtime::WorkflowState state) noexcept
+{
+    switch(state) {
+    case runtime::WorkflowState::Pending:
+    case runtime::WorkflowState::Running:
+    case runtime::WorkflowState::Waiting:
+    case runtime::WorkflowState::Succeeded:
+    case runtime::WorkflowState::Failed:
+    case runtime::WorkflowState::CancelRequested:
+    case runtime::WorkflowState::Compensating:
+    case runtime::WorkflowState::Cancelled:
+    case runtime::WorkflowState::Compensated:
+    case runtime::WorkflowState::CompensationFailed: return true;
+    }
+    return false;
+}
+
+bool knownStepState(runtime::WorkflowStepState state) noexcept
+{
+    switch(state) {
+    case runtime::WorkflowStepState::Pending:
+    case runtime::WorkflowStepState::Ready:
+    case runtime::WorkflowStepState::Running:
+    case runtime::WorkflowStepState::Waiting:
+    case runtime::WorkflowStepState::Succeeded:
+    case runtime::WorkflowStepState::Skipped:
+    case runtime::WorkflowStepState::Failed:
+    case runtime::WorkflowStepState::Cancelled:
+    case runtime::WorkflowStepState::Compensated:
+    case runtime::WorkflowStepState::CompensationFailed: return true;
+    }
+    return false;
+}
+
+bool knownStepKind(runtime::WorkflowStepKind kind) noexcept
+{
+    switch(kind) {
+    case runtime::WorkflowStepKind::Command:
+    case runtime::WorkflowStepKind::Query:
+    case runtime::WorkflowStepKind::WaitTask:
+    case runtime::WorkflowStepKind::Assign:
+    case runtime::WorkflowStepKind::Assert:
+    case runtime::WorkflowStepKind::Barrier: return true;
+    }
+    return false;
+}
+
+bool knownPredicateKind(runtime::WorkflowPredicateKind kind) noexcept
+{
+    switch(kind) {
+    case runtime::WorkflowPredicateKind::Exists:
+    case runtime::WorkflowPredicateKind::IsTrue:
+    case runtime::WorkflowPredicateKind::Equals:
+    case runtime::WorkflowPredicateKind::NotEquals:
+    case runtime::WorkflowPredicateKind::ArrayNotEmpty: return true;
+    }
+    return false;
+}
+
+bool validDefinitionEnums(const runtime::WorkflowDefinition& definition) noexcept
+{
+    for(const auto& step : definition.steps) {
+        if(!knownStepKind(step.kind)
+           || (step.condition.has_value()
+               && !knownPredicateKind(step.condition->kind))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool knownErrorCategory(foundation::ErrorCategory category) noexcept
+{
+    switch(category) {
+    case foundation::ErrorCategory::Validation:
+    case foundation::ErrorCategory::NotFound:
+    case foundation::ErrorCategory::Conflict:
+    case foundation::ErrorCategory::Authorization:
+    case foundation::ErrorCategory::Cancellation:
+    case foundation::ErrorCategory::Timeout:
+    case foundation::ErrorCategory::Infrastructure:
+    case foundation::ErrorCategory::Internal: return true;
+    }
+    return false;
+}
+
+bool knownSeverity(foundation::Severity severity) noexcept
+{
+    switch(severity) {
+    case foundation::Severity::Info:
+    case foundation::Severity::Warning:
+    case foundation::Severity::Error:
+    case foundation::Severity::Fatal: return true;
+    }
+    return false;
+}
+
+bool validErrorEnums(const foundation::Error& error, std::size_t depth = 0U) noexcept
+{
+    if(!knownErrorCategory(error.category) || !knownSeverity(error.severity)) {
+        return false;
+    }
+    return error.cause == nullptr || depth >= maximumErrorChainDepth
+        || validErrorEnums(*error.cause, depth + 1U);
+}
+
+bool validSnapshotErrors(const runtime::WorkflowSnapshot& snapshot) noexcept
+{
+    if(snapshot.error.has_value() && !validErrorEnums(*snapshot.error)) {
+        return false;
+    }
+    for(const auto& step : snapshot.steps) {
+        if(step.error.has_value() && !validErrorEnums(*step.error)) {
+            return false;
+        }
+    }
+    for(const auto& error : snapshot.compensationErrors) {
+        if(!validErrorEnums(error)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 foundation::Value errorValue(
     const std::optional<foundation::Error>& error,
     std::size_t depth = 0U)
@@ -963,6 +1087,13 @@ foundation::Result<kernel::ContentDigest> PersistenceService::workflowDefinition
             foundation::ErrorCategory::Conflict,
             "Persistence must be initialized before hashing a workflow definition"));
     }
+    if(!validDefinitionEnums(definition)) {
+        return foundation::Result<kernel::ContentDigest>::failure(
+            workflowPersistenceError(
+                "Persistence.InvalidWorkflowDefinition",
+                foundation::ErrorCategory::Validation,
+                "A durable workflow definition uses an unknown enum value"));
+    }
     auto payload = serializer_->serialize(definitionValue(definition));
     if(!payload) {
         return foundation::Result<kernel::ContentDigest>::failure(std::move(payload).error());
@@ -982,6 +1113,32 @@ foundation::Result<void> PersistenceService::saveWorkflowCheckpoint(
             "Persistence.NotReady",
             foundation::ErrorCategory::Conflict,
             "Persistence must be initialized before saving workflow checkpoints"));
+    }
+    if(!validDefinitionEnums(definition)) {
+        return foundation::Result<void>::failure(workflowPersistenceError(
+            "Persistence.InvalidWorkflowDefinition",
+            foundation::ErrorCategory::Validation,
+            "A durable workflow definition uses an unknown enum value"));
+    }
+    if(!knownWorkflowState(snapshot.state)) {
+        return foundation::Result<void>::failure(workflowPersistenceError(
+            "Persistence.InvalidWorkflowState",
+            foundation::ErrorCategory::Validation,
+            "A durable workflow checkpoint uses an unknown workflow state"));
+    }
+    for(const auto& step : snapshot.steps) {
+        if(!knownStepState(step.state)) {
+            return foundation::Result<void>::failure(workflowPersistenceError(
+                "Persistence.InvalidWorkflowStepState",
+                foundation::ErrorCategory::Validation,
+                "A durable workflow checkpoint uses an unknown step state"));
+        }
+    }
+    if(!validSnapshotErrors(snapshot)) {
+        return foundation::Result<void>::failure(workflowPersistenceError(
+            "Persistence.InvalidWorkflowError",
+            foundation::ErrorCategory::Validation,
+            "A durable workflow error uses an unknown category or severity"));
     }
     if(request.workflowId != snapshot.workflowId || request.workflow != snapshot.workflow
        || request.workflow != definition.descriptor.name

@@ -83,6 +83,71 @@ const char* stateName(runtime::TaskState state) noexcept
     return "unknown";
 }
 
+bool knownTaskState(runtime::TaskState state) noexcept
+{
+    switch(state) {
+    case runtime::TaskState::Pending:
+    case runtime::TaskState::Ready:
+    case runtime::TaskState::Running:
+    case runtime::TaskState::Succeeded:
+    case runtime::TaskState::Failed:
+    case runtime::TaskState::CancelRequested:
+    case runtime::TaskState::Cancelled:
+    case runtime::TaskState::Stale: return true;
+    }
+    return false;
+}
+
+bool knownResourceKind(runtime::ResourceKind kind) noexcept
+{
+    switch(kind) {
+    case runtime::ResourceKind::CPU:
+    case runtime::ResourceKind::DiskIO:
+    case runtime::ResourceKind::GPU:
+    case runtime::ResourceKind::OCCT:
+    case runtime::ResourceKind::ProjectRead:
+    case runtime::ResourceKind::ProjectWrite:
+    case runtime::ResourceKind::MachineController:
+    case runtime::ResourceKind::CollisionBackend: return true;
+    }
+    return false;
+}
+
+bool knownResourceAccess(runtime::ResourceAccess access) noexcept
+{
+    switch(access) {
+    case runtime::ResourceAccess::Shared:
+    case runtime::ResourceAccess::Exclusive: return true;
+    }
+    return false;
+}
+
+bool knownErrorCategory(foundation::ErrorCategory category) noexcept
+{
+    switch(category) {
+    case foundation::ErrorCategory::Validation:
+    case foundation::ErrorCategory::NotFound:
+    case foundation::ErrorCategory::Conflict:
+    case foundation::ErrorCategory::Authorization:
+    case foundation::ErrorCategory::Cancellation:
+    case foundation::ErrorCategory::Timeout:
+    case foundation::ErrorCategory::Infrastructure:
+    case foundation::ErrorCategory::Internal: return true;
+    }
+    return false;
+}
+
+bool knownSeverity(foundation::Severity severity) noexcept
+{
+    switch(severity) {
+    case foundation::Severity::Info:
+    case foundation::Severity::Warning:
+    case foundation::Severity::Error:
+    case foundation::Severity::Fatal: return true;
+    }
+    return false;
+}
+
 foundation::Result<runtime::TaskState> parseTerminalState(std::string_view state)
 {
     if(state == "succeeded") {
@@ -470,6 +535,20 @@ foundation::Result<void> PersistenceService::acceptTask(
     const std::optional<state::RevisionSet>& sourceRevisions,
     const std::optional<runtime::TransactionIdempotency>& commandIdempotency)
 {
+    for(const auto& resource : request.resources) {
+        if(!knownResourceKind(resource.kind)) {
+            return foundation::Result<void>::failure(taskPersistenceError(
+                "Persistence.InvalidTaskResourceKind",
+                foundation::ErrorCategory::Validation,
+                "A durable task request uses an unknown resource kind"));
+        }
+        if(!knownResourceAccess(resource.access)) {
+            return foundation::Result<void>::failure(taskPersistenceError(
+                "Persistence.InvalidTaskResourceAccess",
+                foundation::ErrorCategory::Validation,
+                "A durable task request uses an unknown resource access mode"));
+        }
+    }
     std::lock_guard lock(mutex_);
     if(!initialized_) {
         return foundation::Result<void>::failure(taskPersistenceError(
@@ -585,11 +664,25 @@ foundation::Result<void> PersistenceService::acceptTask(
 foundation::Result<void> PersistenceService::recordTaskTerminal(
     const runtime::TaskSnapshot& snapshot)
 {
+    if(!knownTaskState(snapshot.state)) {
+        return foundation::Result<void>::failure(taskPersistenceError(
+            "Persistence.InvalidTaskState",
+            foundation::ErrorCategory::Validation,
+            "A durable task snapshot uses an unknown state"));
+    }
     if(!runtime::isTerminal(snapshot.state)) {
         return foundation::Result<void>::failure(taskPersistenceError(
             "Persistence.TaskNotTerminal",
             foundation::ErrorCategory::Validation,
             "Only terminal task snapshots can be persisted as outcomes"));
+    }
+    if(snapshot.error.has_value()
+       && (!knownErrorCategory(snapshot.error->category)
+           || !knownSeverity(snapshot.error->severity))) {
+        return foundation::Result<void>::failure(taskPersistenceError(
+            "Persistence.InvalidTaskError",
+            foundation::ErrorCategory::Validation,
+            "A durable task error uses an unknown category or severity"));
     }
     std::lock_guard lock(mutex_);
     if(!initialized_) {

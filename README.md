@@ -4,7 +4,7 @@ LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9 及 K10A–K10E 的�
 
 ## 已完成阶段
 
-当前收口按 [ST1C 补充执行计划](docs/内核契约/ST1C-补充审计与剩余执行计划.md) 继续：最新 [C6b16 快照存储写入证明准入](docs/阶段交付/2026-09-05-ST1C6b16-快照存储写入证明准入.md) 在数据库索引前拒绝未知 SnapshotWriteDisposition，并要求 AlreadyPresent 读回精确内容；C6b15 的版本解析规则继续保留。下一步按 [C6 子节点](docs/内核契约/ST1C6-公共契约与输入预算.md) 继续 Host、其余状态与持久族类型/格式，再完成统一预算和终态保留，之后 C7/C8 与 ST1D。整体尚未 Frozen，不扩展上层模块。
+当前收口按 [ST1C 补充执行计划](docs/内核契约/ST1C-补充审计与剩余执行计划.md) 继续：最新 [C6b17 持久 DTO 写前准入](docs/阶段交付/2026-09-05-ST1C6b17-持久DTO写前准入.md) 在序列化和事务前拒绝 Journal、Task、Workflow 的未知枚举与矛盾形状，C6b16 的 Snapshot Store 写入证明继续保留。下一步按 [C6 子节点](docs/内核契约/ST1C6-公共契约与输入预算.md) 继续 Host、State、Task Error cause 及其他持久族类型/格式，再完成统一预算和终态保留，之后 C7/C8 与 ST1D。整体尚未 Frozen，不扩展上层模块。
 
 C5a/b 已完成持久化会话端口、SQLite/Windows 独占及强制初始化的本地检查点：C5b Debug 299/299、专项 56/56、新增 5 项各 10 次、纯生产及架构检查通过，见 [C5b 交付](docs/阶段交付/2026-09-04-ST1C5b-初始化独占与活动状态保护.md)。第二 Host 不再改写运行中 claim，隔离后仍保留所有权；C1b 已承接写入端修订检查。C2c 生命周期及 ST1D 最终签核仍未闭合，不宣称 Frozen。
 

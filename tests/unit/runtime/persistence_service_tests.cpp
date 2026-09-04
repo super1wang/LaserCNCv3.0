@@ -1141,6 +1141,158 @@ TEST_CASE("Snapshot capture validates store disposition and existing payload bef
     }
 }
 
+TEST_CASE("Journal write admission rejects invalid durable DTO enums and shapes", "[persistence][journal][dto][c6b17]")
+{
+    struct Scenario final { const char* name; const char* errorCode; };
+    const std::array scenarios {
+        Scenario {"unknown-change-kind", "Persistence.InvalidJournalChangeKind"},
+        Scenario {"invalid-change-shape", "Persistence.InvalidJournalChange"},
+        Scenario {"unknown-history-kind", "Persistence.InvalidJournalHistoryKind"},
+        Scenario {"invalid-history-shape", "Persistence.InvalidJournalHistory"},
+    };
+    for(std::size_t index = 0U; index < scenarios.size(); ++index) {
+        DYNAMIC_SECTION(scenarios[index].name) {
+            PersistenceService service;
+            configureService(service, ":memory:");
+            const RevisionSet one {
+                Revision {1U}, Revision {1U}, Revision {1U}, {}, {}, {}};
+            auto candidate = commit("transaction.invalid-durable-dto", {}, one, "invalid");
+            if(index == 0U) {
+                candidate.changes.front().kind = static_cast<ObjectChangeKind>(255U);
+            } else if(index == 1U) {
+                candidate.changes.front().before = candidate.changes.front().after;
+            } else if(index == 2U) {
+                candidate.history.kind = static_cast<HistoryMutationKind>(255U);
+            } else {
+                candidate.history.kind = HistoryMutationKind::Record;
+            }
+
+            const auto rejected = service.append(candidate);
+            REQUIRE_FALSE(rejected.hasValue());
+            CHECK(std::string(rejected.error().code.value()) == scenarios[index].errorCode);
+            const auto retained = service.journalAfter(candidate.documentId, 0U);
+            REQUIRE(retained.hasValue());
+            CHECK(retained.value().empty());
+        }
+    }
+}
+
+TEST_CASE("Task persistence rejects invalid durable enum values before mutation", "[persistence][task][dto][c6b17]")
+{
+    struct Scenario final { const char* name; const char* errorCode; };
+    const std::array scenarios {
+        Scenario {"unknown-resource-kind", "Persistence.InvalidTaskResourceKind"},
+        Scenario {"unknown-resource-access", "Persistence.InvalidTaskResourceAccess"},
+        Scenario {"unknown-task-state", "Persistence.InvalidTaskState"},
+        Scenario {"unknown-error-category", "Persistence.InvalidTaskError"},
+        Scenario {"unknown-error-severity", "Persistence.InvalidTaskError"},
+    };
+    for(std::size_t index = 0U; index < scenarios.size(); ++index) {
+        DYNAMIC_SECTION(scenarios[index].name) {
+            PersistenceService service;
+            configureService(service, ":memory:");
+            auto request = TaskRequest {
+                validId<TaskId>("task.invalid-durable-dto"),
+                validId<TaskName>("kernel.persistence.invalid-dto"),
+                Value {Value::Object {}},
+                validId<TraceId>("trace.invalid-durable-dto")};
+            request.resources = {ResourceClaim {
+                index == 0U ? static_cast<ResourceKind>(255U) : ResourceKind::DiskIO,
+                validId<ResourceId>("resource.invalid-durable-dto"),
+                index == 1U ? static_cast<ResourceAccess>(255U) : ResourceAccess::Shared,
+                1U}};
+
+            if(index < 2U) {
+                const auto rejected = service.acceptTask(request, std::nullopt);
+                REQUIRE_FALSE(rejected.hasValue());
+                CHECK(std::string(rejected.error().code.value()) == scenarios[index].errorCode);
+                const auto retained = service.taskHistory(request.taskId);
+                REQUIRE(retained.hasValue());
+                CHECK_FALSE(retained.value().has_value());
+                continue;
+            }
+
+            REQUIRE(service.acceptTask(request, std::nullopt).hasValue());
+            auto snapshot = TaskSnapshot {
+                request.taskId,
+                request.task,
+                index == 2U ? static_cast<TaskState>(255U) : TaskState::Failed,
+                1.0,
+                "failed",
+                request.traceId,
+                std::nullopt,
+                std::nullopt,
+                makeError("Test.InvalidDurableError", ErrorCategory::Internal, "invalid")};
+            if(index == 3U) {
+                snapshot.error->category = static_cast<ErrorCategory>(255U);
+            } else if(index == 4U) {
+                snapshot.error->severity = static_cast<Severity>(255U);
+            }
+            const auto rejected = service.recordTaskTerminal(snapshot);
+            REQUIRE_FALSE(rejected.hasValue());
+            CHECK(std::string(rejected.error().code.value()) == scenarios[index].errorCode);
+            const auto retained = service.taskHistory(request.taskId);
+            REQUIRE(retained.hasValue());
+            REQUIRE(retained.value().has_value());
+            CHECK(retained.value()->state == TaskState::Pending);
+        }
+    }
+}
+
+TEST_CASE("Workflow persistence rejects invalid durable enum values before mutation", "[persistence][workflow][dto][c6b17]")
+{
+    struct Scenario final { const char* name; const char* errorCode; };
+    const std::array scenarios {
+        Scenario {"unknown-workflow-state", "Persistence.InvalidWorkflowState"},
+        Scenario {"unknown-step-state", "Persistence.InvalidWorkflowStepState"},
+        Scenario {"unknown-definition-step-kind", "Persistence.InvalidWorkflowDefinition"},
+        Scenario {"unknown-definition-predicate-kind", "Persistence.InvalidWorkflowDefinition"},
+        Scenario {"unknown-workflow-error-category", "Persistence.InvalidWorkflowError"},
+        Scenario {"unknown-step-error-severity", "Persistence.InvalidWorkflowError"},
+    };
+    for(std::size_t index = 0U; index < scenarios.size(); ++index) {
+        DYNAMIC_SECTION(scenarios[index].name) {
+            PersistenceService service;
+            configureService(service, ":memory:");
+            const auto request = persistentWorkflowRequest("workflow.invalid-durable-dto");
+            auto definition = persistentWorkflowDefinition(false);
+            auto snapshot = persistentWorkflowSnapshot(
+                request, WorkflowState::Failed, WorkflowStepState::Failed, 1U);
+            if(index == 0U) {
+                snapshot.state = static_cast<WorkflowState>(255U);
+            } else if(index == 1U) {
+                snapshot.steps.front().state = static_cast<WorkflowStepState>(255U);
+            } else if(index == 2U) {
+                definition.steps.front().kind = static_cast<WorkflowStepKind>(255U);
+            } else if(index == 3U) {
+                definition.steps.front().condition = WorkflowPredicate {
+                    static_cast<WorkflowPredicateKind>(255U), "flag", Value {true}};
+            } else if(index == 4U) {
+                snapshot.error = makeError(
+                    "Test.InvalidWorkflowError", ErrorCategory::Internal, "invalid");
+                snapshot.error->category = static_cast<ErrorCategory>(255U);
+            } else {
+                snapshot.steps.front().error = makeError(
+                    "Test.InvalidStepError", ErrorCategory::Internal, "invalid");
+                snapshot.steps.front().error->severity = static_cast<Severity>(255U);
+            }
+
+            if(index == 2U || index == 3U) {
+                const auto digest = service.workflowDefinitionDigest(definition);
+                REQUIRE_FALSE(digest.hasValue());
+                CHECK(std::string(digest.error().code.value()) == scenarios[index].errorCode);
+            }
+            const auto rejected = service.saveWorkflowCheckpoint(
+                request, definition, snapshot, {});
+            REQUIRE_FALSE(rejected.hasValue());
+            CHECK(std::string(rejected.error().code.value()) == scenarios[index].errorCode);
+            const auto retained = service.workflowCheckpoint(request.workflowId);
+            REQUIRE(retained.hasValue());
+            CHECK_FALSE(retained.value().has_value());
+        }
+    }
+}
+
 TEST_CASE("Journal write admission rejects stale project and document revisions without a durable change", "[persistence][journal][revision-admission]")
 {
     for(const bool otherDocument : {false, true}) {

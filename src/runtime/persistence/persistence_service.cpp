@@ -94,6 +94,85 @@ const char* historyKindName(runtime::HistoryMutationKind kind) noexcept
     return "unknown";
 }
 
+bool knownChangeKind(runtime::ObjectChangeKind kind) noexcept
+{
+    switch(kind) {
+    case runtime::ObjectChangeKind::Created:
+    case runtime::ObjectChangeKind::Updated:
+    case runtime::ObjectChangeKind::Removed: return true;
+    }
+    return false;
+}
+
+bool knownHistoryKind(runtime::HistoryMutationKind kind) noexcept
+{
+    switch(kind) {
+    case runtime::HistoryMutationKind::None:
+    case runtime::HistoryMutationKind::Record:
+    case runtime::HistoryMutationKind::Barrier:
+    case runtime::HistoryMutationKind::Undo:
+    case runtime::HistoryMutationKind::Redo: return true;
+    }
+    return false;
+}
+
+foundation::Result<void> validateCommitDto(const runtime::TransactionCommit& commit)
+{
+    for(const auto& change : commit.changes) {
+        if(!knownChangeKind(change.kind)) {
+            return foundation::Result<void>::failure(persistenceError(
+                "Persistence.InvalidJournalChangeKind",
+                foundation::ErrorCategory::Validation,
+                "A journal change uses an unknown change kind"));
+        }
+        const bool validShape =
+            (change.kind == runtime::ObjectChangeKind::Created
+             && !change.before.has_value() && change.after.has_value())
+            || (change.kind == runtime::ObjectChangeKind::Updated
+                && change.before.has_value() && change.after.has_value())
+            || (change.kind == runtime::ObjectChangeKind::Removed
+                && change.before.has_value() && !change.after.has_value());
+        if(!validShape
+           || (change.before.has_value() && change.before->id != change.objectId)
+           || (change.after.has_value() && change.after->id != change.objectId)
+           || (change.kind == runtime::ObjectChangeKind::Updated
+               && change.before->type != change.after->type)) {
+            return foundation::Result<void>::failure(persistenceError(
+                "Persistence.InvalidJournalChange",
+                foundation::ErrorCategory::Validation,
+                "A journal change has inconsistent before and after material"));
+        }
+    }
+
+    const auto& history = commit.history;
+    if(!knownHistoryKind(history.kind)) {
+        return foundation::Result<void>::failure(persistenceError(
+            "Persistence.InvalidJournalHistoryKind",
+            foundation::ErrorCategory::Validation,
+            "A journal history mutation uses an unknown kind"));
+    }
+    const bool recordShape = history.kind == runtime::HistoryMutationKind::Record
+        && history.command.has_value() && history.commandVersion.has_value()
+        && !history.targetTransactionId.has_value() && !history.expectedCursor.has_value();
+    const bool emptyShape =
+        (history.kind == runtime::HistoryMutationKind::None
+         || history.kind == runtime::HistoryMutationKind::Barrier)
+        && !history.command.has_value() && !history.commandVersion.has_value()
+        && !history.targetTransactionId.has_value() && !history.expectedCursor.has_value();
+    const bool cursorShape =
+        (history.kind == runtime::HistoryMutationKind::Undo
+         || history.kind == runtime::HistoryMutationKind::Redo)
+        && !history.command.has_value() && !history.commandVersion.has_value()
+        && history.targetTransactionId.has_value() && history.expectedCursor.has_value();
+    if(!recordShape && !emptyShape && !cursorShape) {
+        return foundation::Result<void>::failure(persistenceError(
+            "Persistence.InvalidJournalHistory",
+            foundation::ErrorCategory::Validation,
+            "A journal history mutation has inconsistent fields"));
+    }
+    return foundation::Result<void>::success();
+}
+
 foundation::Value historyValue(const runtime::HistoryMutation& history)
 {
     foundation::Value commandVersion;
@@ -941,6 +1020,11 @@ foundation::Result<JournalRecord> PersistenceService::append(
             "Persistence.NotReady",
             foundation::ErrorCategory::Conflict,
             "Persistence must be initialized before appending journal records"));
+    }
+    auto validCommit = validateCommitDto(commit);
+    if(!validCommit) {
+        return foundation::Result<JournalRecord>::failure(
+            std::move(validCommit).error());
     }
     bool transactionOpen = false;
     try {
