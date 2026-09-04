@@ -231,6 +231,15 @@ add_test(
 )
 set_tests_properties(architecture.host_state_boundary_negative_probes PROPERTIES TIMEOUT 40)
 
+add_test(NAME architecture.host_document_compile_boundary
+    COMMAND "${CMAKE_COMMAND}"
+        "-DLCNC_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+        "-DLCNC_TEST_BINARY_ROOT=${CMAKE_CURRENT_BINARY_DIR}/architecture-probes"
+        "-DLCNC_GENERATOR=${CMAKE_GENERATOR}"
+        "-DLCNC_GENERATOR_PLATFORM=${CMAKE_GENERATOR_PLATFORM}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_host_document_compile.cmake")
+set_tests_properties(architecture.host_document_compile_boundary PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
+
 add_executable(
     lasercnc_kernel_headless_contract
     integration/kernel_headless_contract.cpp

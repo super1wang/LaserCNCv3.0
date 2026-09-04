@@ -640,12 +640,12 @@ TEST_CASE("Kernel admission covers lifecycle persistence until the public operat
             REQUIRE(kernel.bootstrap());
             if(scenario != 0U) { REQUIRE(kernel.projectRuntime().create(project)); }
             if(scenario == 1U) { REQUIRE(kernel.projectRuntime().close(project)); }
-            if(scenario >= 5U) { REQUIRE(kernel.documentRuntime().create(project, document)); }
-            if(scenario == 5U || scenario == 7U) { REQUIRE(kernel.documentRuntime().close(document)); }
+            if(scenario >= 4U) { REQUIRE(kernel.documentRuntime().create(project, document)); }
+            if(scenario == 4U || scenario == 5U || scenario == 7U) { REQUIRE(kernel.documentRuntime().close(document)); }
             bool probed = false;
             std::optional<Result<void>> stopped;
-            backend->beforeOperation = [&](BackendPoint, std::string_view) {
-                if(!probed) {
+            backend->beforeOperation = [&](BackendPoint, std::string_view sql) {
+                if(!probed && (scenario != 4U || sql.find("INSERT INTO document_catalog") != std::string_view::npos)) {
                     probed = true;
                     stopped.emplace(kernel.shutdown());
                 }
@@ -655,7 +655,7 @@ TEST_CASE("Kernel admission covers lifecycle persistence until the public operat
             case 1U: REQUIRE(kernel.projectRuntime().open(project)); break;
             case 2U: REQUIRE(kernel.projectRuntime().close(project)); break;
             case 3U: REQUIRE(kernel.documentRuntime().create(project, document)); break;
-            case 4U: REQUIRE(kernel.documentRuntime().attach({project, document, {}, {}})); break;
+            case 4U: REQUIRE(kernel.documentRuntime().open(document)); break;
             case 5U: REQUIRE(kernel.documentRuntime().open(document)); break;
             case 6U: REQUIRE(kernel.documentRuntime().close(document)); break;
             case 7U: REQUIRE(kernel.documentRuntime().remove(document)); break;
@@ -674,6 +674,7 @@ TEST_CASE("Kernel admission covers lifecycle persistence until the public operat
 TEST_CASE("ProjectRuntime gates document membership and closes only its owned children", "[project-runtime][lifecycle]")
 {
     AppKernel kernel;
+    configure(kernel, freshRoot());
     const auto project = id<ProjectId>("project.owner");
     const auto other = id<ProjectId>("project.other");
     const auto a = id<DocumentId>("document.a");
@@ -682,22 +683,22 @@ TEST_CASE("ProjectRuntime gates document membership and closes only its owned ch
     REQUIRE(kernel.addDocument(other, c));
     REQUIRE(kernel.bootstrap());
     CHECK_FALSE(kernel.documentRuntime().create(project, a));
-    CHECK_FALSE(kernel.documentRuntime().attach({project, a, {}, {}}));
+    CHECK_FALSE(kernel.documentRuntime().open(a));
     CHECK(kernel.projectRuntime().list().size() == 1U);
     REQUIRE(kernel.projectRuntime().create(project));
     REQUIRE(kernel.documentRuntime().create(project, a));
-    REQUIRE(kernel.documentRuntime().attach({project, b, {}, {}}));
+    REQUIRE(kernel.documentRuntime().create(project, b));
     REQUIRE(kernel.projectRuntime().close(project));
     CHECK(kernel.documentRuntime().lifecycle(a).value().state == DocumentLifecycleState::Detached);
     CHECK(kernel.documentRuntime().lifecycle(b).value().state == DocumentLifecycleState::Detached);
     CHECK(kernel.documents().contains(c));
     CHECK_FALSE(kernel.documentRuntime().create(project, a));
-    CHECK_FALSE(kernel.documentRuntime().attach({project, a, {}, {}}));
+    CHECK_FALSE(kernel.documentRuntime().open(a));
     CHECK_FALSE(kernel.documentRuntime().remove(a));
     CHECK_FALSE(kernel.documentRuntime().snapshot(a));
     REQUIRE(kernel.projectRuntime().open(project));
     CHECK_FALSE(kernel.documents().contains(a));
-    REQUIRE(kernel.documentRuntime().attach({project, a, {}, {}}));
+    REQUIRE(kernel.documentRuntime().open(a));
     REQUIRE(kernel.projectRuntime().close(project));
     REQUIRE(kernel.shutdown());
 }

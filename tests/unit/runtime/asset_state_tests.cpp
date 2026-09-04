@@ -227,12 +227,16 @@ TEST_CASE("Asset admission denies missing store forged or damaged references bef
     CHECK(kernel.documents().snapshot(document).value().revisions() == RevisionSet{});
     CHECK(kernel.persistence().journalAfter(document, 0U).value().empty());
     CHECK(kernel.history().snapshot(document).value().entries.empty());
-    const auto other = requiredTestId<DocumentId>("document.asset.invalid-attach");
-    CHECK_FALSE(kernel.documentRuntime().attach({project, other, RevisionSet{},
-        {{requiredTestId<ObjectId>("object.asset"), requiredTestId<ObjectTypeId>("type.asset"),
-            Value{}, Version{1U, 0U, 0U}, handler->assets}}}).hasValue());
-    CHECK_FALSE(kernel.documents().contains(other));
-    CHECK(kernel.persistence().documentCatalog().value().size() == 1U);
+    const auto other = requiredTestId<DocumentId>("document.asset.invalid-import");
+    REQUIRE(kernel.documentRuntime().create(project, other));
+    auto otherRequest = request("request.asset.invalid-import");
+    otherRequest.context.documentId = other;
+    CHECK_FALSE(kernel.execution().executeCommand(otherRequest));
+    CHECK(kernel.documents().snapshot(other).value().objects().empty());
+    CHECK(kernel.documents().snapshot(other).value().revisions() == RevisionSet{});
+    CHECK(kernel.persistence().journalAfter(other, 0U).value().empty());
+    CHECK(kernel.history().snapshot(other).value().entries.empty());
+    CHECK(kernel.persistence().documentCatalog().value().size() == 2U);
     REQUIRE(kernel.shutdown().hasValue());
 }
 

@@ -844,7 +844,6 @@ TEST_CASE("ProjectRuntime seals all child admission during coordinated durable c
         REQUIRE_FALSE(kernel.projectRuntime().open(project));
         REQUIRE_FALSE(kernel.projectRuntime().close(project));
         REQUIRE_FALSE(kernel.documentRuntime().create(project, id<DocumentId>("document.rejected")));
-        REQUIRE_FALSE(kernel.documentRuntime().attach({project, id<DocumentId>("document.attach-rejected"), {}, {}}));
         REQUIRE_FALSE(kernel.documentRuntime().snapshot(document));
         REQUIRE_FALSE(kernel.documentRuntime().snapshot(sibling));
         REQUIRE_FALSE(kernel.documentRuntime().remove(sibling));

@@ -30,7 +30,7 @@ C2c2 后续检查点通过：最终排空与依赖保留、工作线程停止/�
 
 C3a/b/c 正确性检查点通过：快照身份和文件键解耦，公开读取与完整恢复统一锚点/对象状态/历史归属校验。最新 Debug 401/401、专项 10 项各 3 次、统一 C3 ASan 48/48 及另 10 项各 3 次、纯生产/架构通过，见 [C3c2 交付](docs/阶段交付/2026-09-04-ST1C3c2-统一快照锚点认证.md)。下一步 C4 公开 attach 与可信导入收口；C5 支持矩阵、C6–C8 和 ST1D 仍待完成，整体未冻结。
 
-C4 已开始：[子节点契约](docs/内核契约/ST1C4-可信装载与事务导入.md) 区分基准依赖迁移、公开入口封闭与失败验证。C4a Benchmark 种子事务化通过，Debug/ASan 各 7 项 × 3 次、21/21，见 [交付](docs/阶段交付/2026-09-04-ST1C4a-基准种子事务化.md)；生产 attach 尚未封闭，下一步 C4b/c，不将定向基准验证代替全量冻结或容量准入。
+C4a/b 本地检查点通过：[子节点契约](docs/内核契约/ST1C4-可信装载与事务导入.md) 区分基准迁移、公开入口封闭与失败验证。公开 attach 已移除、内部恢复安装私有化，并新增真实 Host 编译拒绝门禁；最新 Debug 402/402、定向 12/12、ASan 23 项各 3 次和纯生产/架构通过，见 [C4b 交付](docs/阶段交付/2026-09-04-ST1C4b-封闭公开镜像装载.md)。下一步 C4c 导入/恢复失败矩阵，整个 C4 与 Frozen 仍未签核。
 
 - Phase 1：Foundation（`StrongId`、`Value`、`Result`、`Error`、`Schema`）
 - Phase 2：Application Composition（`AppKernel`、`ServiceRegistry`、`ModuleRuntime`）

@@ -1,6 +1,7 @@
 #include <lasercnc/state/object_type_registry.hpp>
 #include <lasercnc/foundation/error.hpp>
 #include <lasercnc/runtime/transaction_manager.hpp>
+#include <lasercnc/observability/log_service.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 #include "kernel_test_module.hpp"
@@ -207,30 +208,87 @@ TEST_CASE("Object type admission rejects unknown or invalid transaction state", 
     CHECK(documents.snapshot(document).value().revisions() == RevisionSet{});
 }
 
-TEST_CASE("Document attach validates types before lifecycle mutation without implicit migration", "[state][object-type][admission]")
+TEST_CASE("Governed document import validates candidates without implicit migration", "[state][object-type][admission][trusted-import]")
 {
+    using namespace lasercnc::runtime;
+    class AnySchemaValidator final : public ISchemaValidator {
+    public:
+        Result<void> validate(const Schema& schema, const Value&) const override
+        {
+            if(schema.rootKind() == SchemaKind::Any && schema.constraints() == Value{Value::Object{}}) {
+                return Result<void>::success();
+            }
+            return Result<void>::failure(makeError("Test.UnsupportedSchema", ErrorCategory::Validation,
+                "This fixture only supports unconstrained Any schemas"));
+        }
+    };
+    class NullLog final : public lasercnc::observability::ILogService {
+    public:
+        Result<void> write(const lasercnc::observability::LogRecord&) override { return Result<void>::success(); }
+        Result<void> flush() override { return Result<void>::success(); }
+    };
+    class ImportHandler final : public ICommandHandler {
+    public:
+        Result<Value> execute(const CommandRequest&, ApplicationTransaction& transaction) override
+        {
+            ++calls;
+            for(const auto& object : objects) {
+                auto created = transaction.createObject(object);
+                if(!created) { return Result<Value>::failure(std::move(created).error()); }
+            }
+            return Result<Value>::success(Value{});
+        }
+        std::vector<ObjectRecord> objects;
+        unsigned int calls{0U};
+    };
     AppKernel kernel;
+    REQUIRE(kernel.executionServices().configure(std::make_shared<AnySchemaValidator>(), std::make_shared<NullLog>()));
     REQUIRE(lasercnc::test::registerObjectType(kernel, definition()).hasValue());
+    const auto session = id<SessionId>("session.import");
+    const auto capability = id<CapabilityId>("document.import");
+    const auto command = id<CommandName>("test.document.import");
+    const auto schema = lasercnc::test::testAnySchema("schema.import");
+    auto handler = std::make_shared<ImportHandler>();
+    REQUIRE(lasercnc::test::registerCommand(kernel, CommandDescriptor{command, {1U, 0U, 0U}, schema, schema,
+        ExecutionMode::Synchronous, SideEffectLevel::DocumentWrite, capability, true, true, false}, handler));
+    REQUIRE(kernel.capabilities().replace(session, std::array{capability}));
     REQUIRE(kernel.bootstrap().hasValue());
-    const auto document = id<DocumentId>("document.attach");
-    DocumentImage image {id<ProjectId>("project.attach"), document, RevisionSet{},
-        {{id<ObjectId>("object.attach"), id<ObjectTypeId>("type.test.versioned"), Value {std::int64_t {1}}}}};
-    REQUIRE(kernel.projectRuntime().create(image.projectId).hasValue());
+    const auto document = id<DocumentId>("document.import");
+    const auto project = id<ProjectId>("project.import");
+    handler->objects = {{id<ObjectId>("object.import.first"), id<ObjectTypeId>("type.test.versioned"), Value{std::int64_t{1}}},
+        {id<ObjectId>("object.import.second"), id<ObjectTypeId>("type.test.versioned"), Value{std::int64_t{1}}}};
+    REQUIRE(kernel.projectRuntime().create(project));
+    REQUIRE(kernel.documentRuntime().create(project, document));
+    CommandRequest request{id<RequestId>("request.import"), {session, project, document}, command,
+        {1U, 0U, 0U}, Value{}, std::nullopt, id<CorrelationId>("correlation.import"), id<TraceId>("trace.import")};
     bool valid = false;
+    bool deniedBeforeHandler = false;
     SECTION("known old schema is preserved") { valid = true; }
-    SECTION("unknown type") { image.objects.front().type = id<ObjectTypeId>("type.unknown"); }
-    SECTION("unknown schema") { image.objects.front().schemaVersion = Version {9U, 0U, 0U}; }
-    SECTION("invalid value") { image.objects.front().data = Value {"invalid"}; }
-    SECTION("duplicate stable identity") { image.objects.push_back(image.objects.front()); }
-    auto attached = kernel.documentRuntime().attach(image);
+    SECTION("unknown type after valid prefix") { handler->objects.back().type = id<ObjectTypeId>("type.unknown"); }
+    SECTION("unknown schema after valid prefix") { handler->objects.back().schemaVersion = Version{9U, 0U, 0U}; }
+    SECTION("invalid value after valid prefix") { handler->objects.back().data = Value{"invalid"}; }
+    SECTION("duplicate stable identity") { handler->objects.back() = handler->objects.front(); }
+    SECTION("missing capability") { REQUIRE(kernel.capabilities().replace(session, {})); deniedBeforeHandler = true; }
+    SECTION("missing document scope") { request.context.documentId.reset(); deniedBeforeHandler = true; }
+    const auto imported = kernel.execution().executeCommand(request);
+    CHECK(handler->calls == (deniedBeforeHandler ? 0U : 1U));
+    const auto snapshot = kernel.documents().snapshot(document);
+    REQUIRE(snapshot);
     if(valid) {
-        REQUIRE(attached.hasValue());
-        CHECK(kernel.documents().snapshot(document).value().objects().find(image.objects.front().id)->schemaVersion == Version {1U, 0U, 0U});
+        REQUIRE(imported);
+        REQUIRE(imported.value().commit);
+        CHECK(imported.value().commit->changes.size() == 2U);
+        CHECK(snapshot.value().objects().all() == handler->objects);
+        CHECK(snapshot.value().revisions().at(RevisionScope::Document) == Revision{1U});
+        CHECK(kernel.history().snapshot(document).value().entries.size() == 1U);
     } else {
-        REQUIRE_FALSE(attached.hasValue());
-        CHECK_FALSE(kernel.documents().contains(document));
-        CHECK(kernel.documentRuntime().list().empty());
+        REQUIRE_FALSE(imported);
+        CHECK(snapshot.value().objects().empty());
+        CHECK(snapshot.value().revisions() == RevisionSet{});
+        CHECK(kernel.history().snapshot(document).value().entries.empty());
     }
+    CHECK(kernel.documentRuntime().lifecycle(document).value().state == DocumentLifecycleState::Open);
+    CHECK(kernel.documentRuntime().lifecycle(document).value().activities == std::array<std::size_t, 6U>{});
     REQUIRE(kernel.shutdown().hasValue());
 }
 

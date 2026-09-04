@@ -207,7 +207,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::create(
         snapshotOf(documentId, entry));
 }
 
-foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::attach(
+foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::attachRecovered(
     state::DocumentImage image)
 {
     auto kernelAdmission = kernel::ExecutionAdmission::acquire(admission_, "Document.RuntimeNotAccepting");
@@ -240,8 +240,15 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::attach(
     {
         std::lock_guard lock(mutex_);
         const auto existing = entries_.find(documentId);
-        if(existing != entries_.end()
-           && existing->second.state != DocumentLifecycleState::Detached) {
+        if(existing == entries_.end()) {
+            return foundation::Result<DocumentLifecycleSnapshot>::failure(
+                documentRuntimeError(
+                    "Document.LifecycleNotFound",
+                    foundation::ErrorCategory::NotFound,
+                    "Recovery installation requires an existing document lifecycle identity",
+                    documentId));
+        }
+        if(existing->second.state != DocumentLifecycleState::Detached) {
             return foundation::Result<DocumentLifecycleSnapshot>::failure(
                 documentRuntimeError(
                     "Document.LifecycleConflict",
@@ -249,7 +256,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::attach(
                     "The document is already attached or changing lifecycle state",
                     documentId));
         }
-        if(existing != entries_.end() && existing->second.projectId != projectId) {
+        if(existing->second.projectId != projectId) {
             return foundation::Result<DocumentLifecycleSnapshot>::failure(
                 documentRuntimeError(
                     "Document.OwnershipConflict",
@@ -384,7 +391,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::openImpl(
         recovered.value().documents.end(),
         [&](const auto& candidate) { return candidate.documentId == documentId; });
     if(image != recovered.value().documents.end()) {
-        return attach(*image);
+        return attachRecovered(*image);
     }
     state::Revision projectRevision;
     for(const auto& recoveredImage : recovered.value().documents) {
@@ -394,7 +401,7 @@ foundation::Result<DocumentLifecycleSnapshot> DocumentRuntime::openImpl(
             break;
         }
     }
-    return attach(state::DocumentImage {
+    return attachRecovered(state::DocumentImage {
         record->projectId,
         record->documentId,
         state::RevisionSet {

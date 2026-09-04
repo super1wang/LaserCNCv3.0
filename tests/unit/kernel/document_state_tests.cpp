@@ -164,11 +164,10 @@ TEST_CASE("DocumentRuntime owns runtime lifecycle while DocumentStore stays inte
     CHECK(std::string(ownershipConflict.error().code.value())
           == "Document.OwnershipConflict");
 
-    const DocumentImage image {project, document, RevisionSet {}, {}};
-    auto attached = kernel.documentRuntime().attach(image);
-    REQUIRE(attached.hasValue());
-    CHECK(attached.value().state == lasercnc::runtime::DocumentLifecycleState::Open);
-    REQUIRE(kernel.documentRuntime().close(document).hasValue());
+    const auto opened = kernel.documentRuntime().open(document);
+    REQUIRE_FALSE(opened);
+    CHECK(std::string(opened.error().code.value()) == "Document.OpenRequiresPersistence");
+    CHECK_FALSE(kernel.documents().contains(document));
     REQUIRE(kernel.documentRuntime().remove(document).hasValue());
     CHECK(kernel.documentRuntime().list().empty());
 

@@ -945,12 +945,19 @@ TEST_CASE("Object admission failure leaves no journal history event or completed
             CHECK(handler->calls == 1U); // The existing in-process failure cache is preserved.
             // 中文翻译：保留既有的进程内失败结果缓存契约。
         } else {
-            const auto other = validId<DocumentId>("document.transient.attach");
-            DocumentImage image{project, other, RevisionSet{}, {{validId<ObjectId>("object.transient"),
-                validId<ObjectTypeId>("kernel.persistence.command"), Value {"data"}}}};
-            CHECK_FALSE(kernel.documentRuntime().attach(image).hasValue());
-            CHECK_FALSE(kernel.documents().contains(other));
-            CHECK(kernel.persistence().documentCatalog().value().size() == 1U);
+            const auto other = validId<DocumentId>("document.transient.import");
+            REQUIRE(kernel.documentRuntime().create(project, other));
+            const auto otherRequest = persistentCommandRequest("request.transient.import", project, other, session,
+                validId<IdempotencyKey>("key.transient.import"), "object.transient");
+            const auto otherRejected = kernel.execution().executeCommand(otherRequest);
+            REQUIRE_FALSE(otherRejected);
+            CHECK(std::string(otherRejected.error().code.value()) == "ObjectType.TransientPersistenceDenied");
+            CHECK(kernel.documents().snapshot(other).value().objects().empty());
+            CHECK(kernel.documents().snapshot(other).value().revisions() == RevisionSet{});
+            CHECK(kernel.persistence().journalAfter(other, 0U).value().empty());
+            CHECK(kernel.history().snapshot(other).value().entries.empty());
+            CHECK(events == 0U);
+            CHECK(kernel.persistence().documentCatalog().value().size() == 2U);
         }
         REQUIRE(kernel.shutdown().hasValue());
     }

@@ -104,8 +104,6 @@ public:
     [[nodiscard]] foundation::Result<DocumentLifecycleSnapshot> create(
         kernel::ProjectId projectId,
         kernel::DocumentId documentId);
-    [[nodiscard]] foundation::Result<DocumentLifecycleSnapshot> attach(
-        state::DocumentImage image);
     [[nodiscard]] foundation::Result<DocumentLifecycleSnapshot> open(
         const kernel::DocumentId& documentId);
     [[nodiscard]] foundation::Result<state::Document> snapshot(
@@ -176,6 +174,10 @@ private:
         const ProjectActivityLease* projectLease = nullptr);
     [[nodiscard]] foundation::Result<DocumentLifecycleSnapshot> openImpl(
         const kernel::DocumentId& documentId, const kernel::ProjectId* expectedProject);
+    // Install only the authenticated recovery image selected by openImpl.
+    // 中文翻译：仅安装 openImpl 选出的已认证恢复镜像。
+    [[nodiscard]] foundation::Result<DocumentLifecycleSnapshot> attachRecovered(
+        state::DocumentImage image);
     [[nodiscard]] foundation::Result<void> removeImpl(
         const kernel::DocumentId& documentId, const ProjectActivityLease& projectLease);
     [[nodiscard]] static DocumentLifecycleSnapshot snapshotOf(

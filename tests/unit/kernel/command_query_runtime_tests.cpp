@@ -1547,7 +1547,6 @@ TEST_CASE("Kernel admission closes before module stop and rejects concurrent lif
         requestsDenied = !rejected && rejected.error().code.value() == "Query.RuntimeNotReady"
             && !fixture.kernel.projectRuntime().create(validId<ProjectId>("project.after-stop"))
             && !fixture.kernel.documentRuntime().create(fixture.project, validId<DocumentId>("document.after-stop"))
-            && !fixture.kernel.documentRuntime().attach({fixture.project, validId<DocumentId>("document.attach-stop"), {}, {}})
             && !fixture.kernel.documentRuntime().open(fixture.document)
             && !fixture.kernel.documentRuntime().close(fixture.document)
             && !fixture.kernel.documentRuntime().detach(fixture.document)

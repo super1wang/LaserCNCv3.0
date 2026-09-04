@@ -1,0 +1,23 @@
+if(NOT DEFINED LCNC_SOURCE_ROOT OR NOT DEFINED LCNC_TEST_BINARY_ROOT OR NOT DEFINED LCNC_GENERATOR)
+    message(FATAL_ERROR "Host 编译门禁缺少源码、证据目录或生成器")
+endif()
+string(RANDOM LENGTH 16 ALPHABET 0123456789abcdef suffix)
+set(evidence "${LCNC_TEST_BINARY_ROOT}/host-document-compile-${suffix}")
+set(arguments -G "${LCNC_GENERATOR}")
+if(LCNC_GENERATOR_PLATFORM)
+    list(APPEND arguments -A "${LCNC_GENERATOR_PLATFORM}")
+endif()
+execute_process(COMMAND "${CMAKE_COMMAND}"
+    -S "${LCNC_SOURCE_ROOT}/tests/cmake/host_document_compile" -B "${evidence}"
+    ${arguments} "-DLCNC_SOURCE_ROOT=${LCNC_SOURCE_ROOT}"
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 150)
+file(WRITE "${evidence}/result.log" "exit=${result}\n${output}\n${error}")
+if(NOT result STREQUAL "0")
+    message(FATAL_ERROR "Host 文档编译门禁失败：${evidence}\n${output}\n${error}")
+endif()
+foreach(mode IN ITEMS healthy attach attachRecovered adoptRecovered restoreDocuments)
+    if(NOT output MATCHES "host-document-compile-verified: ${mode}([\r\n]|$)")
+        message(FATAL_ERROR "Host 编译门禁缺少实际验证步骤 ${mode}：${evidence}")
+    endif()
+endforeach()
+message(STATUS "Host 正常入口及四个镜像写入口编译拒绝验证通过：${evidence}")
