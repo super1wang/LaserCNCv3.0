@@ -124,6 +124,9 @@ AppKernel::AppKernel()
     projectRuntime_.admission_ = admission_.get();
     documentRuntime_.admission_ = admission_.get();
     projectRuntime_.documents_ = &documentRuntime_;
+    projectRuntime_.taskBlocker_ = [this](const ProjectId& projectId) {
+        return tasks_.activeExecutionCount(projectId);
+    };
     documentRuntime_.projects_ = &projectRuntime_;
     documentRuntime_.configureCloseBlockers(
         runtime::DocumentRuntime::CloseBlockers {

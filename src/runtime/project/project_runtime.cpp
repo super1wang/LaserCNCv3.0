@@ -135,7 +135,14 @@ foundation::Result<ProjectLifecycleSnapshot> ProjectRuntime::close(const kernel:
     }
     if(documents_ == nullptr) { return fail(id, projectError("Project.DocumentRuntimeMissing", id)); }
     auto preflight = [&]() -> foundation::Result<std::vector<kernel::DocumentId>> {
-        try { return documents_->preflightProjectClose(id); }
+        try {
+            // Admission is sealed before probing long-lived ownership, including document-free tasks.
+            // 中文翻译：先封闭项目准入再检查长期所有权，不能遗漏不携带文档的任务。
+            if(taskBlocker_ && taskBlocker_(id) != 0U) {
+                return foundation::Result<std::vector<kernel::DocumentId>>::failure(projectError("Project.CloseBlocked", id));
+            }
+            return documents_->preflightProjectClose(id);
+        }
         catch(...) { return foundation::Result<std::vector<kernel::DocumentId>>::failure(projectError("Project.CloseProbeFailed", id)); }
     }();
     if(!preflight) {

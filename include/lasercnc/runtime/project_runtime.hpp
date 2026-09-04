@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -27,6 +28,8 @@ enum class ProjectLifecycleState : std::uint8_t { Closed, Opening, Open, Closing
 struct ProjectLifecycleSnapshot final {
     kernel::ProjectId projectId;
     ProjectLifecycleState state{ProjectLifecycleState::Closed};
+    // Short-lived leases only; close also probes scheduler-owned long-lived work.
+    // 中文翻译：仅表示短期租约，关闭还会检查调度器持有的长期任务。
     std::size_t activities{0U};
     std::optional<foundation::Error> error;
 };
@@ -76,6 +79,7 @@ private:
 
     persistence::PersistenceService& persistence_;
     DocumentRuntime* documents_{nullptr};
+    std::function<std::size_t(const kernel::ProjectId&)> taskBlocker_;
     mutable std::mutex mutex_;
     mutable std::map<kernel::ProjectId, Entry> entries_;
     std::atomic_bool accepting_{false};

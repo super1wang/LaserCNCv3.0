@@ -844,6 +844,13 @@ foundation::Result<ProjectActivityLease> DocumentRuntime::acquireProject(
     return projects_->acquireActivity(current.value().projectId);
 }
 
+foundation::Result<ProjectActivityLease> DocumentRuntime::acquireProjectActivity(
+    const kernel::ProjectId& projectId) const
+{
+    if(projects_ == nullptr) { return foundation::Result<ProjectActivityLease>::success({}); }
+    return projects_->acquireActivity(projectId);
+}
+
 foundation::Result<std::vector<kernel::DocumentId>> DocumentRuntime::preflightProjectClose(
     const kernel::ProjectId& projectId) const
 {

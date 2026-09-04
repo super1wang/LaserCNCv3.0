@@ -339,6 +339,8 @@ foundation::Result<QueryResponse> QueryRuntime::executeObserved(
     const auto startedAt = std::chrono::steady_clock::now();
     std::unique_ptr<observability::ITraceSpan> span;
     startQuerySpan(impl_->traces, request, span);
+    std::optional<DocumentActivityLease> documentActivity;
+    std::optional<ProjectActivityLease> projectActivity;
 
     auto observedResult = [&]() -> foundation::Result<QueryResponse> {
         if(kernelRejected || !impl_->accepting.load(std::memory_order_acquire)) {
@@ -348,7 +350,6 @@ foundation::Result<QueryResponse> QueryRuntime::executeObserved(
                 "The query runtime is not accepting requests",
                 request));
         }
-        std::optional<DocumentActivityLease> documentActivity;
         if(impl_->documentRuntime != nullptr
            && request.context.documentId.has_value()) {
             auto admitted = impl_->documentRuntime->acquireActivity(
@@ -358,6 +359,10 @@ foundation::Result<QueryResponse> QueryRuntime::executeObserved(
                     std::move(admitted).error());
             }
             documentActivity.emplace(std::move(admitted).value());
+        } else if(impl_->documentRuntime != nullptr && request.context.projectId.has_value()) {
+            auto admitted = impl_->documentRuntime->acquireProjectActivity(*request.context.projectId);
+            if(!admitted) { return foundation::Result<QueryResponse>::failure(std::move(admitted).error()); }
+            projectActivity.emplace(std::move(admitted).value());
         }
         ActiveExecution active(impl_->activeExecutions);
         try {

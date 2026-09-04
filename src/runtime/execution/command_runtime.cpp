@@ -916,6 +916,8 @@ foundation::Result<CommandResponse> CommandRuntime::executeObserved(
     std::optional<kernel::SpanId> activeSpanId;
     std::unique_ptr<observability::ITraceSpan> span;
     startCommandSpan(impl_->traces, request, activeSpanId, span);
+    std::optional<DocumentActivityLease> documentActivity;
+    std::optional<ProjectActivityLease> projectActivity;
 
     auto observedResult = [&]() -> foundation::Result<CommandResponse> {
         if(kernelRejected || !impl_->accepting.load(std::memory_order_acquire)) {
@@ -925,7 +927,6 @@ foundation::Result<CommandResponse> CommandRuntime::executeObserved(
                 "The command runtime is not accepting requests",
                 request));
         }
-        std::optional<DocumentActivityLease> documentActivity;
         if(impl_->documentRuntime != nullptr
            && request.context.documentId.has_value()) {
             auto admitted = impl_->documentRuntime->acquireActivity(
@@ -935,6 +936,10 @@ foundation::Result<CommandResponse> CommandRuntime::executeObserved(
                     std::move(admitted).error());
             }
             documentActivity.emplace(std::move(admitted).value());
+        } else if(impl_->documentRuntime != nullptr && request.context.projectId.has_value()) {
+            auto admitted = impl_->documentRuntime->acquireProjectActivity(*request.context.projectId);
+            if(!admitted) { return foundation::Result<CommandResponse>::failure(std::move(admitted).error()); }
+            projectActivity.emplace(std::move(admitted).value());
         }
         ActiveExecution active(impl_->activeExecutions);
 

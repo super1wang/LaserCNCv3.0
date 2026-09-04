@@ -4,7 +4,7 @@
 
 基于 C1b `80cd878`，C2a 已通过本地检查点，C2b/C2c 仍未签核。只覆盖内核，不扩展产品入口或领域模块。完整门禁见 [C2a 交付](../阶段交付/2026-09-04-ST1C2a-整体准入与停止线性化.md)。
 
-当前源码中的 shutdown 先分散读取 Transaction/Command/Query/Workflow/Script 计数，再逐个 stop。执行入口的 accepting 检查与计数增加并不原子；Project/Document 生命周期操作未计入整体活动。Command/Query 计数还在最终 trace/metrics 发布之前释放。原有“Handler 已进入”并发用例不能证明这些窗口安全。
+C2a 修复前的 shutdown 先分散读取 Transaction/Command/Query/Workflow/Script 计数，再逐个 stop。执行入口的 accepting 检查与计数增加并不原子；Project/Document 生命周期操作未计入整体活动。Command/Query 计数还在最终 trace/metrics 发布之前释放。原有“Handler 已进入”并发用例不能证明这些窗口安全；下述共享准入门已补齐这些整体窗口。
 
 首批回归利用既有基础设施边界：在 trace exporter 中重入 shutdown，以及在持久化操作开始时尝试 shutdown。`build/st1c2a-red-tests.log` 在生产改动之前 0/2、退出 8，4 类 Query scope 均在 trace 发布中被停成 Stopped；8 类生命周期分支中，7 类观察到中途成功停止，open 分支因中途停止而未能完成。不得向生产暴露测试专用暂停口，也不能以偶发压力全绿代替交错证明。
 

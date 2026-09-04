@@ -12,6 +12,8 @@ C1b 已实现 Journal 写事务内的修订、持久头和首笔文档归属准�
 
 C2a 已实现完整执行与生命周期写入口的共享准入，以及 shutdown 空闲检查与关闭准入的原子协调；保留被拒绝 Command/Query 的 trace/metrics。Debug 314/314、专项 7/7、7 项各 10 次通过，见 [C2a 交付](docs/阶段交付/2026-09-04-ST1C2a-整体准入与停止线性化.md)。后续继续 C2b 项目活动与 C2c drain/析构，不以本节点代替整体冻结。
 
+C2b1 已实现 Project-only Command/Query 活动保护、无文档 Task 项目关闭桥接及终态发布保护：Debug 320/320、专项 13/13、13 项各 10 次及纯生产门禁通过，见 [C2b1 交付](docs/阶段交付/2026-09-04-ST1C2b1-项目活动与任务关闭桥接.md)。下一步 C2b2 生命周期控制/长期归属/legacy 恢复与 C2b3 目录失效；C2b 全项、C2c 和 ST1D 仍未签核。
+
 - Phase 1：Foundation（`StrongId`、`Value`、`Result`、`Error`、`Schema`）
 - Phase 2：Application Composition（`AppKernel`、`ServiceRegistry`、`ModuleRuntime`）
 - Phase 3：Infrastructure Adapters（日志、JSON、TOML、SQLite、线程池）

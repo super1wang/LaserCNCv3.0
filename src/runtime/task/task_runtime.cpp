@@ -101,6 +101,7 @@ foundation::Result<void> TaskRuntime::submit(
             "The task runtime is not accepting new work"));
     }
     std::optional<DocumentActivityLease> documentActivity;
+    std::optional<ProjectActivityLease> projectActivity;
     if(documentRuntime_ != nullptr && request.documentId.has_value()) {
         auto admitted = documentRuntime_->acquireActivity(
             *request.documentId, DocumentActivityKind::TaskAdmission);
@@ -108,6 +109,10 @@ foundation::Result<void> TaskRuntime::submit(
             return foundation::Result<void>::failure(std::move(admitted).error());
         }
         documentActivity.emplace(std::move(admitted).value());
+    } else if(documentRuntime_ != nullptr && request.projectId.has_value()) {
+        auto admitted = documentRuntime_->acquireProjectActivity(*request.projectId);
+        if(!admitted) { return foundation::Result<void>::failure(std::move(admitted).error()); }
+        projectActivity.emplace(std::move(admitted).value());
     }
     auto entry = registry_.resolve(request.task);
     if(!entry) {
@@ -259,6 +264,11 @@ std::size_t TaskRuntime::activeExecutionCount(
     const kernel::DocumentId& documentId) const
 {
     return scheduler_.activeTaskCount(documentId);
+}
+
+std::size_t TaskRuntime::activeExecutionCount(const kernel::ProjectId& projectId) const
+{
+    return scheduler_.activeTaskCount(projectId);
 }
 
 } // namespace lasercnc::runtime

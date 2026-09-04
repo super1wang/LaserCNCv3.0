@@ -618,6 +618,100 @@ TEST_CASE("Kernel admission hands asynchronous submission to the scheduler befor
     REQUIRE(fixture.kernel.shutdown());
 }
 
+TEST_CASE("Project only tasks block container close until cancellation and terminal publication finish", "[task][project-admission]")
+{
+    for(const bool cancel : {false, true}) {
+        WorkflowRuntimeFixture fixture;
+        auto& executor = fixture.enableAsync();
+        const auto project = validId<ProjectId>("project.task-only");
+        REQUIRE(fixture.kernel.addProject(project));
+        auto descriptor = asyncCommandDescriptor("command.project-only");
+        descriptor.scope = ExecutionScope::Project;
+        REQUIRE(lasercnc::test::registerAsyncCommand(fixture.kernel, descriptor, std::make_shared<AsyncPlanHandler>()));
+        auto exporter = std::make_shared<AdmissionTraceExporter>();
+        exporter->name = "task.execute";
+        REQUIRE(fixture.kernel.traces().addExporter(exporter));
+        fixture.bootstrap(workflowDefinition({barrierStep("step.barrier", {})}));
+        const auto request = CommandRequest{validId<RequestId>("request.project-only"),
+            {validId<SessionId>("session.workflow"), project, std::nullopt}, validId<CommandName>("command.project-only"),
+            {1U, 0U, 0U}, Value{Value::Object{}}, std::nullopt,
+            validId<CorrelationId>("correlation.project-only"), validId<TraceId>("trace.project-only")};
+        auto accepted = fixture.kernel.execution().executeCommand(request);
+        REQUIRE(accepted);
+        REQUIRE(accepted.value().taskId.has_value());
+        const auto task = *accepted.value().taskId;
+        REQUIRE(executor.queued() == 1U);
+        CHECK(fixture.kernel.scheduler().activeTaskCount(project) == 1U);
+        const auto unrelated = validId<ProjectId>("project.workflow");
+        CHECK(fixture.kernel.scheduler().activeTaskCount(unrelated) == 0U);
+        REQUIRE(fixture.kernel.projectRuntime().close(unrelated));
+        const auto activeClose = fixture.kernel.projectRuntime().close(project);
+        CHECK_FALSE(activeClose);
+        if(activeClose) { REQUIRE(fixture.kernel.projectRuntime().open(project)); }
+        if(cancel) {
+            REQUIRE(fixture.kernel.execution().cancelTask(task));
+            REQUIRE(fixture.kernel.execution().cancelTask(task));
+            CHECK(fixture.kernel.execution().task(task).value().state == TaskState::CancelRequested);
+            const auto cancelledClose = fixture.kernel.projectRuntime().close(project);
+            CHECK_FALSE(cancelledClose);
+            if(cancelledClose) { REQUIRE(fixture.kernel.projectRuntime().open(project)); }
+        }
+        std::optional<Result<ProjectLifecycleSnapshot>> terminalClose;
+        exporter->beforeExport = [&]() {
+            CHECK(fixture.kernel.scheduler().activeTaskCount(project) == 1U);
+            CHECK(fixture.kernel.scheduler().activeTaskCount() == 1U);
+            terminalClose.emplace(fixture.kernel.projectRuntime().close(project));
+        };
+        executor.runAll();
+        REQUIRE(terminalClose.has_value());
+        CHECK_FALSE(terminalClose->hasValue());
+        if(!*terminalClose) { CHECK(std::string(terminalClose->error().code.value()) == "Project.CloseBlocked"); }
+        const auto completed = fixture.kernel.execution().task(task);
+        REQUIRE(completed);
+        CHECK(completed.value().state == (cancel ? TaskState::Cancelled : TaskState::Succeeded));
+        CHECK(fixture.kernel.scheduler().activeTaskCount(project) == 0U);
+        CHECK(fixture.kernel.scheduler().activeTaskCount() == 0U);
+        if(fixture.kernel.projectRuntime().lifecycle(project).value().state == ProjectLifecycleState::Open) {
+            REQUIRE(fixture.kernel.projectRuntime().close(project));
+        }
+        REQUIRE(fixture.kernel.shutdown());
+    }
+}
+
+
+TEST_CASE("Project only tasks release ownership after executor admission throws", "[task][project-admission]")
+{
+    WorkflowRuntimeFixture fixture;
+    auto& executor = fixture.enableAsync();
+    const auto project = validId<ProjectId>("project.executor-fault");
+    REQUIRE(fixture.kernel.addProject(project));
+    auto descriptor = asyncCommandDescriptor("command.executor-fault");
+    descriptor.scope = ExecutionScope::Project;
+    REQUIRE(lasercnc::test::registerAsyncCommand(fixture.kernel, descriptor, std::make_shared<AsyncPlanHandler>()));
+    fixture.bootstrap(workflowDefinition({barrierStep("step.barrier", {})}));
+    executor.beforeSubmit = [&]() {
+        CHECK_FALSE(fixture.kernel.projectRuntime().close(project));
+        throw std::runtime_error("Injected executor admission failure");
+    };
+    const auto request = CommandRequest{validId<RequestId>("request.executor-fault"),
+        {validId<SessionId>("session.workflow"), project, std::nullopt}, validId<CommandName>("command.executor-fault"),
+        {1U, 0U, 0U}, Value{Value::Object{}}, std::nullopt,
+        validId<CorrelationId>("correlation.executor-fault"), validId<TraceId>("trace.executor-fault")};
+    auto accepted = fixture.kernel.execution().executeCommand(request);
+    REQUIRE(accepted);
+    REQUIRE(accepted.value().taskId.has_value());
+    auto failed = fixture.kernel.execution().task(*accepted.value().taskId);
+    REQUIRE(failed);
+    CHECK(failed.value().state == TaskState::Failed);
+    REQUIRE(failed.value().error.has_value());
+    CHECK(std::string(failed.value().error->code.value()) == "Task.ExecutorSubmitFailed");
+    CHECK(executor.queued() == 0U);
+    CHECK(fixture.kernel.scheduler().activeTaskCount(project) == 0U);
+    CHECK(fixture.kernel.projectRuntime().lifecycle(project).value().activities == 0U);
+    REQUIRE(fixture.kernel.projectRuntime().close(project));
+    REQUIRE(fixture.kernel.shutdown());
+}
+
 TEST_CASE("WorkflowRegistry validates stable acyclic definitions", "[workflow][registry]")
 {
     CommandRegistry commands;

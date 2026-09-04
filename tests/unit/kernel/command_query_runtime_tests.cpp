@@ -271,6 +271,31 @@ public:
     std::atomic_size_t calls{0U};
 };
 
+class ProjectActivityProbe final : public IReadOnlyCommandHandler, public IQueryHandler {
+public:
+    Result<Value> execute(const CommandRequest&, const ReadOnlyCommandContext&) override { return run(); }
+    Result<Value> execute(const QueryRequest&, const QueryContext&) override { return run(); }
+    std::function<void()> probe;
+    unsigned int calls{0U};
+private:
+    Result<Value> run()
+    {
+        ++calls;
+        if(probe) { probe(); }
+        return Result<Value>::success(Value{Value::Object{}});
+    }
+};
+
+class ProjectTraceProbe final : public ITraceExporter {
+public:
+    Result<void> exportSpan(const TraceSpanRecord&) override
+    {
+        if(probe) { auto once = std::exchange(probe, {}); once(); }
+        return Result<void>::success();
+    }
+    std::function<void()> probe;
+};
+
 class FailingHandler final : public ICommandHandler {
 public:
     explicit FailingHandler(bool shouldThrow) : throws(shouldThrow) {}
@@ -971,6 +996,128 @@ TEST_CASE("AppKernel refuses registered runtimes without execution services", "[
     CHECK(std::string(bootstrapped.error().code.value())
           == "Runtime.ExecutionServicesNotConfigured");
     CHECK(kernel.state() == lasercnc::kernel::AppKernelState::Failed);
+}
+
+TEST_CASE("Project only execution rejects unavailable containers before invoking handlers", "[kernel][runtime][project-admission]")
+{
+    for(const bool command : {false, true}) {
+        RuntimeFixture fixture;
+        const auto project = validId<ProjectId>("project.empty-admission");
+        REQUIRE(fixture.kernel.addProject(project));
+        auto handler = std::make_shared<ProjectActivityProbe>();
+        auto descriptor = commandDescriptor("kernel.project.probe");
+        descriptor.scope = ExecutionScope::Project;
+        descriptor.sideEffect = SideEffectLevel::ReadOnly;
+        descriptor.idempotent = false;
+        REQUIRE(lasercnc::test::registerReadOnlyCommand(fixture.kernel, descriptor, handler));
+        REQUIRE(lasercnc::test::registerQuery(fixture.kernel, queryDescriptor("kernel.project.probe", ExecutionScope::Project), handler));
+        REQUIRE(fixture.kernel.bootstrap());
+        REQUIRE(fixture.kernel.projectRuntime().close(project));
+        for(const auto& unavailable : {project, validId<ProjectId>("project.missing-admission")}) {
+            if(command) {
+                auto request = commandRequest("request.project-probe", unavailable, fixture.document, fixture.session,
+                    "kernel.project.probe", "unused");
+                request.context.documentId.reset();
+                const auto rejected = fixture.kernel.execution().executeCommand(request);
+                CHECK_FALSE(rejected);
+                if(!rejected) { CHECK(std::string(rejected.error().code.value()) == "Project.NotOpen"); }
+            } else {
+                auto request = queryRequest(unavailable, fixture.document, fixture.session, "unused");
+                request.context.documentId.reset();
+                request.query = validId<QueryName>("kernel.project.probe");
+                const auto rejected = fixture.kernel.execution().executeQuery(request);
+                CHECK_FALSE(rejected);
+                if(!rejected) { CHECK(std::string(rejected.error().code.value()) == "Project.NotOpen"); }
+            }
+        }
+        CHECK(handler->calls == 0U);
+        REQUIRE(fixture.kernel.projectRuntime().open(project));
+        REQUIRE(fixture.kernel.shutdown());
+    }
+}
+
+TEST_CASE("Project only execution retains its container through handler and trace publication", "[kernel][runtime][project-admission]")
+{
+    for(const bool command : {false, true}) {
+        RuntimeFixture fixture;
+        const auto project = validId<ProjectId>("project.empty-probe");
+        REQUIRE(fixture.kernel.addProject(project));
+        auto handler = std::make_shared<ProjectActivityProbe>();
+        auto exporter = std::make_shared<ProjectTraceProbe>();
+        REQUIRE(fixture.kernel.traces().addExporter(exporter));
+        auto descriptor = commandDescriptor("kernel.project.probe");
+        descriptor.scope = ExecutionScope::Project;
+        descriptor.sideEffect = SideEffectLevel::ReadOnly;
+        descriptor.idempotent = false;
+        REQUIRE(lasercnc::test::registerReadOnlyCommand(fixture.kernel, descriptor, handler));
+        REQUIRE(lasercnc::test::registerQuery(fixture.kernel, queryDescriptor("kernel.project.probe", ExecutionScope::Project), handler));
+        REQUIRE(fixture.kernel.bootstrap());
+        std::optional<Result<ProjectLifecycleSnapshot>> duringHandler;
+        std::optional<Result<ProjectLifecycleSnapshot>> duringExport;
+        handler->probe = [&]() { duringHandler.emplace(fixture.kernel.projectRuntime().close(project)); };
+        exporter->probe = [&]() { duringExport.emplace(fixture.kernel.projectRuntime().close(project)); };
+        if(command) {
+            auto request = commandRequest("request.project-probe", project, fixture.document, fixture.session,
+                "kernel.project.probe", "unused");
+            request.context.documentId.reset();
+            REQUIRE(fixture.kernel.execution().executeCommand(request));
+        } else {
+            auto request = queryRequest(project, fixture.document, fixture.session, "unused");
+            request.context.documentId.reset();
+            request.query = validId<QueryName>("kernel.project.probe");
+            REQUIRE(fixture.kernel.execution().executeQuery(request));
+        }
+        for(const auto* result : {&duringHandler, &duringExport}) {
+            REQUIRE(result->has_value());
+            CHECK_FALSE(result->value());
+            if(!result->value()) { CHECK(std::string(result->value().error().code.value()) == "Project.CloseBlocked"); }
+        }
+        CHECK(fixture.kernel.projectRuntime().lifecycle(project).value().state == ProjectLifecycleState::Open);
+        CHECK(fixture.kernel.projectRuntime().lifecycle(project).value().activities == 0U);
+        REQUIRE(fixture.kernel.projectRuntime().close(fixture.project));
+        if(fixture.kernel.projectRuntime().lifecycle(project).value().state == ProjectLifecycleState::Open) {
+            REQUIRE(fixture.kernel.projectRuntime().close(project));
+        }
+        REQUIRE(fixture.kernel.shutdown());
+    }
+}
+
+TEST_CASE("Project only execution releases activity on validation and handler failures", "[kernel][runtime][project-admission]")
+{
+    for(const bool command : {false, true}) {
+        for(const bool throws : {false, true}) {
+            RuntimeFixture fixture;
+            const auto project = validId<ProjectId>("project.failure-probe");
+            REQUIRE(fixture.kernel.addProject(project));
+            auto handler = std::make_shared<ProjectActivityProbe>();
+            auto descriptor = commandDescriptor("kernel.project.failure");
+            descriptor.scope = ExecutionScope::Project;
+            descriptor.sideEffect = SideEffectLevel::ReadOnly;
+            descriptor.idempotent = false;
+            REQUIRE(lasercnc::test::registerReadOnlyCommand(fixture.kernel, descriptor, handler));
+            REQUIRE(lasercnc::test::registerQuery(fixture.kernel,
+                queryDescriptor("kernel.project.failure", ExecutionScope::Project), handler));
+            REQUIRE(fixture.kernel.bootstrap());
+            handler->probe = []() { throw std::runtime_error("Injected project handler failure"); };
+            if(command) {
+                auto request = commandRequest("request.project-failure", project, fixture.document,
+                    fixture.session, "kernel.project.failure", "unused");
+                request.context.documentId.reset();
+                if(!throws) { request.arguments = Value{"invalid object"}; }
+                CHECK_FALSE(fixture.kernel.execution().executeCommand(request));
+            } else {
+                auto request = queryRequest(project, fixture.document, fixture.session, "unused");
+                request.context.documentId.reset();
+                request.query = validId<QueryName>("kernel.project.failure");
+                if(!throws) { request.arguments = Value{"invalid object"}; }
+                CHECK_FALSE(fixture.kernel.execution().executeQuery(request));
+            }
+            CHECK(handler->calls == (throws ? 1U : 0U));
+            CHECK(fixture.kernel.projectRuntime().lifecycle(project).value().activities == 0U);
+            REQUIRE(fixture.kernel.projectRuntime().close(project));
+            REQUIRE(fixture.kernel.shutdown());
+        }
+    }
 }
 
 TEST_CASE("AppKernel refuses shutdown while a query execution is active", "[kernel][runtime][query]")

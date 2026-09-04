@@ -45,9 +45,13 @@ public:
         const kernel::TaskId& taskId,
         std::chrono::milliseconds timeout) const;
     [[nodiscard]] foundation::Result<void> shutdown(std::chrono::milliseconds timeout);
+    // Includes terminal tasks until observation and persistence completion are published.
+    // 中文翻译：终态任务在观察和持久化完成发布之前仍计入活动数量。
     [[nodiscard]] std::size_t activeTaskCount() const;
     [[nodiscard]] std::size_t activeTaskCount(
         const kernel::DocumentId& documentId) const;
+    [[nodiscard]] std::size_t activeTaskCount(
+        const kernel::ProjectId& projectId) const;
     [[nodiscard]] std::vector<foundation::Error> persistenceFailures() const;
 
 private:

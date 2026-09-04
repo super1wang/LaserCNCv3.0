@@ -144,6 +144,8 @@ private:
     void configureCloseBlockers(CloseBlockers blockers);
     [[nodiscard]] foundation::Result<ProjectActivityLease> acquireProject(
         const kernel::DocumentId& documentId) const;
+    [[nodiscard]] foundation::Result<ProjectActivityLease> acquireProjectActivity(
+        const kernel::ProjectId& projectId) const;
     [[nodiscard]] foundation::Result<std::vector<kernel::DocumentId>> preflightProjectClose(
         const kernel::ProjectId& projectId) const;
     [[nodiscard]] foundation::Result<DocumentLifecycleSnapshot> closeForProject(

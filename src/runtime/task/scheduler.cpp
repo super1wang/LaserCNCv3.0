@@ -506,7 +506,7 @@ std::size_t Scheduler::activeTaskCount() const
     return static_cast<std::size_t>(std::count_if(
         core_->records.begin(),
         core_->records.end(),
-        [](const auto& entry) { return !isTerminal(entry.second.state); }));
+        [](const auto& entry) { return !isTerminal(entry.second.state) || !entry.second.completionReady; }));
 }
 
 std::size_t Scheduler::activeTaskCount(
@@ -518,7 +518,21 @@ std::size_t Scheduler::activeTaskCount(
         static_cast<void>(unusedTaskId);
         if(record.request.documentId.has_value()
            && *record.request.documentId == documentId
-           && !isTerminal(record.state)) {
+           && (!isTerminal(record.state) || !record.completionReady)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+std::size_t Scheduler::activeTaskCount(const kernel::ProjectId& projectId) const
+{
+    std::lock_guard lock(core_->mutex);
+    std::size_t count = 0U;
+    for(const auto& [unusedTaskId, record] : core_->records) {
+        static_cast<void>(unusedTaskId);
+        if(record.request.projectId == projectId
+           && (!isTerminal(record.state) || !record.completionReady)) {
             ++count;
         }
     }

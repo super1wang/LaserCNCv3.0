@@ -46,6 +46,8 @@ public:
     [[nodiscard]] std::size_t activeExecutionCount() const;
     [[nodiscard]] std::size_t activeExecutionCount(
         const kernel::DocumentId& documentId) const;
+    [[nodiscard]] std::size_t activeExecutionCount(
+        const kernel::ProjectId& projectId) const;
 
 private:
     friend class CommandRuntime;
