@@ -1,4 +1,5 @@
 #include <lasercnc/infrastructure/spdlog_log_service.hpp>
+#include "../../file_path_validation.hpp"
 
 #include <lasercnc/foundation/error.hpp>
 #include <lasercnc/infrastructure/jsoncons_adapter.hpp>
@@ -19,12 +20,6 @@
 
 namespace lasercnc::infrastructure {
 namespace {
-
-std::string pathToUtf8(const std::filesystem::path& path)
-{
-    const auto encoded = path.u8string();
-    return {reinterpret_cast<const char*>(encoded.data()), encoded.size()};
-}
 
 const char* levelName(observability::LogLevel level) noexcept
 {
@@ -153,7 +148,7 @@ public:
         }
         if(options.rotatingFilePath.has_value()) {
             humanSinks.push_back(std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-                pathToUtf8(*options.rotatingFilePath),
+                options.rotatingFilePath->native(),
                 options.rotatingFileMaxBytes,
                 options.rotatingFileCount,
                 false));
@@ -166,7 +161,7 @@ public:
 
         if(options.jsonlFilePath.has_value()) {
             auto sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-                pathToUtf8(*options.jsonlFilePath),
+                options.jsonlFilePath->native(),
                 options.rotatingFileMaxBytes,
                 options.rotatingFileCount,
                 false);
@@ -205,13 +200,15 @@ foundation::Result<std::unique_ptr<SpdlogLogService>> SpdlogLogService::create(
         return foundation::Result<std::unique_ptr<SpdlogLogService>>::failure(
             std::move(result).error());
     }
-    if(options.rotatingFilePath.has_value() && options.rotatingFilePath->empty()) {
-        auto result = invalidOptions("Human-readable file path must be non-empty");
+    if(options.rotatingFilePath.has_value()
+       && (options.rotatingFilePath->empty() || detail::containsEmbeddedNull(*options.rotatingFilePath))) {
+        auto result = invalidOptions("Human-readable file path must be non-empty and contain no null characters");
         return foundation::Result<std::unique_ptr<SpdlogLogService>>::failure(
             std::move(result).error());
     }
-    if(options.jsonlFilePath.has_value() && options.jsonlFilePath->empty()) {
-        auto result = invalidOptions("JSONL file path must be non-empty");
+    if(options.jsonlFilePath.has_value()
+       && (options.jsonlFilePath->empty() || detail::containsEmbeddedNull(*options.jsonlFilePath))) {
+        auto result = invalidOptions("JSONL file path must be non-empty and contain no null characters");
         return foundation::Result<std::unique_ptr<SpdlogLogService>>::failure(
             std::move(result).error());
     }

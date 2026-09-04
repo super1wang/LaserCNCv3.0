@@ -20,6 +20,8 @@ Phase 3 把成熟通用能力放在可替换 Adapter 后面。Kernel 只拥有�
 
 `SpdlogLogService::create` 在成功后至少拥有一个输出。可启用控制台、轮转人工日志文件和轮转 JSONL 文件；两个文件不得指向同一路径，文件大小和保留数量不得为零。
 
+ST1C6a 补充：两个文件路径均先检查非空及原生码元内的 NUL，再创建任何 sink；NUL 不得截断成另一个实际文件名。Windows 使用统一重建的宽字符 spdlog 配置，实际验证中文/emoji 路径及轮转文件。该预检不承诺任意 I/O 失败时的跨文件回滚；Windows 路径别名与不可转换输入继续按 [C6 契约](ST1C6-公共契约与输入预算.md) 实测审计，不能将旧配置用例当作所有别名已认证。
+
 每条 JSONL 日志是一行完整 UTF-8 JSON，包含：
 
 - `timestamp`：使用调用方 `LogRecord` 的时间戳，规范化为 UTC 毫秒格式；

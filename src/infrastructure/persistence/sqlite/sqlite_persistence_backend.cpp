@@ -1,4 +1,5 @@
 #include <lasercnc/infrastructure/sqlite_persistence_backend.hpp>
+#include "../../file_path_validation.hpp"
 
 #include <lasercnc/foundation/error.hpp>
 
@@ -426,11 +427,11 @@ SqlitePersistenceBackend::~SqlitePersistenceBackend() = default;
 foundation::Result<std::unique_ptr<SqlitePersistenceBackend>> SqlitePersistenceBackend::open(
     SqliteConnectionOptions options)
 {
-    if(options.databasePath.empty()) {
+    if(options.databasePath.empty() || detail::containsEmbeddedNull(options.databasePath)) {
         return foundation::Result<std::unique_ptr<SqlitePersistenceBackend>>::failure(validationError(
             "Persistence.InvalidOptions",
             "The SQLite connection options are invalid",
-            "Database path must be non-empty"));
+            "Database path must be non-empty and contain no embedded null characters"));
     }
     if(options.busyTimeoutMilliseconds < 0) {
         return foundation::Result<std::unique_ptr<SqlitePersistenceBackend>>::failure(validationError(

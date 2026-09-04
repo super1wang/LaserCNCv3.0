@@ -1,4 +1,5 @@
 #include <lasercnc/infrastructure/filesystem_snapshot_store.hpp>
+#include "../../../file_path_validation.hpp"
 
 #include <lasercnc/foundation/error.hpp>
 #include <lasercnc/infrastructure/sha256_hash_service.hpp>
@@ -336,13 +337,13 @@ FilesystemSnapshotStore::~FilesystemSnapshotStore() = default;
 foundation::Result<std::unique_ptr<FilesystemSnapshotStore>>
 FilesystemSnapshotStore::create(FilesystemSnapshotStoreOptions options)
 {
-    if(options.directory.empty() || options.maximumPayloadBytes == 0U
+    if(options.directory.empty() || detail::containsEmbeddedNull(options.directory) || options.maximumPayloadBytes == 0U
         || options.maximumPayloadBytes > std::numeric_limits<std::size_t>::max() - maximumEnvelopeOverhead) {
         return foundation::Result<std::unique_ptr<FilesystemSnapshotStore>>::failure(
             snapshotError(
                 "Snapshot.InvalidStoreOptions",
                 foundation::ErrorCategory::Validation,
-                "The snapshot store requires a directory and a positive size limit",
+                "The snapshot store requires a non-empty directory without null characters and a positive size limit",
                 options.directory));
     }
     for(const auto& component : options.directory.relative_path()) {

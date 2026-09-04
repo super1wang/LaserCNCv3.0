@@ -6,6 +6,11 @@ function(lcnc_make_production_dependencies_available)
     set(SPDLOG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(SPDLOG_BUILD_BENCH OFF CACHE BOOL "" FORCE)
     set(SPDLOG_INSTALL OFF CACHE BOOL "" FORCE)
+    if(WIN32)
+        # Keep dependency and adapter filename types aligned with native Windows paths.
+        # 中文翻译：使依赖与适配器的文件名类型一致使用 Windows 原生宽字符路径。
+        set(SPDLOG_WCHAR_FILENAMES ON CACHE BOOL "" FORCE)
+    endif()
     FetchContent_Declare(spdlog GIT_REPOSITORY https://github.com/gabime/spdlog.git GIT_TAG 79524ddd08a4ec981b7fea76afd08ee05f83755d GIT_SHALLOW FALSE GIT_SUBMODULES "")
     FetchContent_Declare(jsoncons GIT_REPOSITORY https://github.com/danielaparker/jsoncons.git GIT_TAG bcb44594c50c495ee1e690602cdd71455942ad0e GIT_SHALLOW FALSE GIT_SUBMODULES "" SOURCE_SUBDIR lcnc-no-upstream-build)
     FetchContent_Declare(toml11 GIT_REPOSITORY https://github.com/ToruNiina/toml11.git GIT_TAG be08ba2be2a964edcdb3d3e3ea8d100abc26f286 GIT_SHALLOW FALSE GIT_SUBMODULES "" SOURCE_SUBDIR lcnc-no-upstream-build)
