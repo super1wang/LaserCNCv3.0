@@ -294,6 +294,20 @@ public:
         return Result<Value>::success(Value{Value::Object{{"changed", Value{true}}}});
     }
 };
+class SeedHandler final : public ICommandHandler {
+public:
+    explicit SeedHandler(std::size_t count) : count_(count) {}
+    Result<Value> execute(const CommandRequest&, ApplicationTransaction& transaction) override
+    {
+        for(auto& object : objects(count_)) {
+            auto added = transaction.createObject(std::move(object));
+            if(!added) { return Result<Value>::failure(std::move(added).error()); }
+        }
+        return Result<Value>::success(Value{Value::Object{{"count", number(count_)}}});
+    }
+private:
+    std::size_t count_;
+};
 
 std::unique_ptr<AppKernel> configuredKernel(Report& report, const std::filesystem::path& root, bool durable)
 {
@@ -312,22 +326,45 @@ std::unique_ptr<AppKernel> configuredKernel(Report& report, const std::filesyste
     }
     take(test::registerCommand(*kernel, CommandDescriptor{id<CommandName>("bench.update"), {1U, 0U, 0U}, schema, schema,
         ExecutionMode::Synchronous, SideEffectLevel::DocumentWrite, capability, true, true, false}, std::make_shared<UpdateHandler>()));
+    take(test::registerCommand(*kernel, CommandDescriptor{id<CommandName>("bench.seed"), {1U, 0U, 0U}, schema, schema,
+        ExecutionMode::Synchronous, SideEffectLevel::DocumentWrite, capability, false, true, false},
+        std::make_shared<SeedHandler>(report.opts.count)));
     take(kernel->capabilities().replace(session, std::array{capability, id<CapabilityId>("kernel.history.edit")}));
     if(durable) { configurePersistence(*kernel, root, report); }
     return kernel;
 }
-void seedKernel(AppKernel& kernel, Report& report, bool durable, const std::filesystem::path& = {})
+TransactionCommit seedKernel(AppKernel& kernel, Report& report, bool durable)
 {
     const auto start = Clock::now();
     take(kernel.bootstrap());
     take(kernel.projectRuntime().create(project));
-    take(kernel.documentRuntime().attach({project, document, {}, objects(report.opts.count)}));
+    take(kernel.documentRuntime().create(project, document));
+    auto seeded = take(kernel.execution().executeCommand(CommandRequest{
+        id<RequestId>("request.benchmark.seed"), {session, project, document}, id<CommandName>("bench.seed"),
+        {1U, 0U, 0U}, Value{Value::Object{}}, std::nullopt,
+        id<CorrelationId>("correlation.benchmark.seed"), id<TraceId>("trace.benchmark.seed")}));
+    check(seeded.commit.has_value() && seeded.commit->changes.size() == report.opts.count
+        && seeded.postExecutionErrors.empty(), "Seed did not commit through the execution gateway");
+    verifyDocument(take(kernel.documents().snapshot(document)), report.opts.count, 'a', 1U);
+    const auto history = take(kernel.history().snapshot(document));
+    check(seeded.commit->history.kind == HistoryMutationKind::Barrier && history.entries.empty()
+        && history.cursor == HistoryCursor{} && history.barrier
+        && history.barrier->transactionId == seeded.commit->transactionId
+        && history.barrier->revisionsAfter == seeded.commit->revisionsAfter,
+        "Seed must establish a barrier, not an undo entry");
     if(durable) {
         recordPersistenceSettings(kernel.persistence(), report);
+        const auto journal = take(kernel.persistence().journalAfter(document, 0U));
+        check(journal.size() == 1U && journal.front().transactionId == seeded.commit->transactionId,
+            "Seed is missing its durable journal record");
         take(kernel.documentRuntime().close(document));
         take(kernel.documentRuntime().open(document));
+        verifyDocument(take(kernel.documents().snapshot(document)), report.opts.count, 'a', 1U);
     }
+    report.metadata.insert_or_assign("seed_contract", Value{"gateway-transaction-v1"});
+    report.metadata.insert_or_assign("seed_revision", number(1U));
     report.metadata.insert_or_assign("last_seed_ms", Value{elapsed(start)});
+    return std::move(*seeded.commit);
 }
 CommandRequest command(const char* name, bool global = false, std::size_t sequence = 0U)
 {
@@ -389,7 +426,8 @@ void component(Report& report)
 void gateway(Report& report)
 {
     auto kernel = configuredKernel(report, report.root / "gateway", report.opts.durable());
-    seedKernel(*kernel, report, report.opts.durable(), report.root / "gateway");
+    seedKernel(*kernel, report, report.opts.durable());
+    const auto seededRevisions = take(kernel->documents().snapshot(document)).revisions();
     report.metadata.emplace("seed_memory", memory());
     ReadHandler direct;
     const auto globalQuery = query(true);
@@ -405,7 +443,7 @@ void gateway(Report& report)
             [&](const QueryResponse& response, std::size_t) {
                 verifyCount(response.result, global ? 0U : report.opts.count);
                 check(response.postExecutionErrors.empty(), "Query integration error");
-                if(!global) { check(response.revisions == RevisionSet{}, "Query mutated revisions"); }
+                if(!global) { check(response.revisions == seededRevisions, "Query mutated revisions"); }
             });
         const auto noop = command(global ? "bench.global.noop" : "bench.document.noop", global);
         report.measure(global ? "command.global_gateway" : "command.document_readonly_gateway",
@@ -420,12 +458,12 @@ void gateway(Report& report)
         [&](std::size_t) { return take(kernel->execution().executeCommand(update)); },
         [&](const CommandResponse& response, std::size_t index) {
             check(response.commit && response.commit->changes.size() == 1U && response.postExecutionErrors.empty(), "Write outcome changed");
-            verifyDocument(take(kernel->documents().snapshot(document)), report.opts.count, changedFill(index), index + 1U);
+            verifyDocument(take(kernel->documents().snapshot(document)), report.opts.count, changedFill(index), index + 2U);
         });
     const auto extent = report.opts.warmup + report.opts.samples;
     const auto finalFill = changedFill(extent - 1U);
     const auto undoFill = finalFill == 'a' ? 'b' : 'a';
-    auto revision = extent;
+    auto revision = extent + 1U;
     auto historySequence = extent;
     auto historyCall = [&](bool undo) {
         auto response = take(kernel->execution().executeCommand(command(undo ? "edit.undo" : "edit.redo", false, historySequence++)));
@@ -451,7 +489,8 @@ void journal(Report& report)
 {
     const auto storageRoot = report.root / "journal";
     auto source = configuredKernel(report, report.root / "source", false);
-    seedKernel(*source, report, false);
+    std::optional<TransactionCommit> seedCommit{seedKernel(*source, report, false)};
+    const auto seedTransactionId = seedCommit->transactionId;
     const auto tail = report.opts.warmup + report.opts.samples;
     {
         persistence::PersistenceService target;
@@ -459,6 +498,12 @@ void journal(Report& report)
         take(target.initialize());
         recordPersistenceSettings(target, report);
         take(target.saveDocumentLifecycle(project, document, persistence::DocumentPersistenceState::Open));
+        {
+            const auto seedRecord = take(target.append(*seedCommit));
+            check(seedRecord.sequence == 1U && seedRecord.transactionId == seedTransactionId,
+                "Journal benchmark seed was not persisted before its snapshot");
+        }
+        seedCommit.reset();
         take(target.captureSnapshot(id<SnapshotId>("snapshot.benchmark.baseline"), take(source->documents().snapshot(document))));
         report.metadata.emplace("snapshot_objects", number(report.opts.count));
         std::optional<TransactionCommit> receipt;
@@ -466,8 +511,8 @@ void journal(Report& report)
             receipt = take(source->execution().executeCommand(command("bench.update", false, index))).commit;
             check(receipt.has_value(), "Missing source commit");
         }, [&](std::size_t) { return take(target.append(*receipt)); }, [&](const auto& record, std::size_t index) {
-            check(record.sequence == index + 1U && record.transactionId == receipt->transactionId, "Journal sequence changed");
-            verifyRevisions(record.revisionsAfter, index + 1U);
+            check(record.sequence == index + 2U && record.transactionId == receipt->transactionId, "Journal sequence changed");
+            verifyRevisions(record.revisionsAfter, index + 2U);
         });
         report.metadata.emplace("journal_tail_records", number(tail));
         take(source->shutdown());
@@ -476,16 +521,19 @@ void journal(Report& report)
         report.measure("journal.recover_material", [&](std::size_t) { return take(target.recover()); },
             [&](const persistence::RecoveryReport& recovered, std::size_t) {
                 check(recovered.documents.size() == 1U && recovered.journalRecordsReplayed == tail
-                    && recovered.historyCommits.size() == tail, "Recovery extent changed");
+                    && recovered.historyCommits.size() == tail + 1U
+                    && recovered.latestJournalSequence == tail + 1U, "Recovery extent changed");
                 verifyObjects(recovered.documents.front().objects, report.opts.count, changedFill(tail - 1U));
-                verifyRevisions(recovered.documents.front().revisions, tail);
+                verifyRevisions(recovered.documents.front().revisions, tail + 1U);
             });
     }
     std::unique_ptr<AppKernel> recovered;
     report.measure("kernel.bootstrap_recovery", [&](std::size_t) { recovered = configuredKernel(report, storageRoot, true); },
         [&](std::size_t) { take(recovered->bootstrap()); return true; }, [&](bool, std::size_t) {
-            verifyDocument(take(recovered->documents().snapshot(document)), report.opts.count, changedFill(tail - 1U), tail);
-            check(take(recovered->history().snapshot(document)).cursor == HistoryCursor{tail, tail}, "Recovered history changed");
+            verifyDocument(take(recovered->documents().snapshot(document)), report.opts.count, changedFill(tail - 1U), tail + 1U);
+            const auto history = take(recovered->history().snapshot(document));
+            check(history.cursor == HistoryCursor{tail, tail} && history.barrier
+                && history.barrier->transactionId == seedTransactionId, "Recovered history changed");
             take(recovered->shutdown());
             recovered.reset();
         });
@@ -497,10 +545,10 @@ void lifecycle(Report& report)
         auto before = memory();
         const auto start = Clock::now();
         auto kernel = configuredKernel(report, report.root / ("cycle-" + std::to_string(cycle)), report.opts.durable());
-        seedKernel(*kernel, report, report.opts.durable(), report.root / ("cycle-" + std::to_string(cycle)));
+        seedKernel(*kernel, report, report.opts.durable());
         const auto startup = elapsed(start);
         auto live = memory();
-        verifyDocument(take(kernel->documents().snapshot(document)), report.opts.count, 'a', 0U);
+        verifyDocument(take(kernel->documents().snapshot(document)), report.opts.count, 'a', 1U);
         const auto stop = Clock::now();
         take(kernel->shutdown());
         kernel.reset();
