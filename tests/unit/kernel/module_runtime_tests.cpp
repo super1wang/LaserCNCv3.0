@@ -43,6 +43,23 @@ static_assert(std::is_same_v<
 static_assert(std::is_same_v<decltype(std::declval<AppKernel&>().history()), const HistoryRuntime&>);
 static_assert(std::is_same_v<decltype(std::declval<AppKernel&>().persistence()),
               const lasercnc::persistence::PersistenceService&>);
+static_assert(std::is_same_v<decltype(std::declval<AppKernel&>().scheduler()), const Scheduler&>);
+template<typename Host>
+concept HostStartsScheduler = requires(Host& host) { host.scheduler().start(); };
+template<typename Host>
+concept HostStopsScheduler = requires(Host& host) { host.scheduler().shutdown(std::chrono::milliseconds{0}); };
+template<typename Host>
+concept HostConfiguresScheduler = requires(Host& host, ITaskExecutor& executor) { host.scheduler().configureExecutor(executor); };
+template<typename Host>
+concept HostCancelsSchedulerTask = requires(Host& host, const TaskId& id) { host.scheduler().requestCancel(id); };
+static_assert(!HostStartsScheduler<AppKernel> && !HostStartsScheduler<const AppKernel>);
+static_assert(!HostStopsScheduler<AppKernel> && !HostStopsScheduler<const AppKernel>);
+static_assert(!HostConfiguresScheduler<AppKernel> && !HostConfiguresScheduler<const AppKernel>);
+static_assert(!HostCancelsSchedulerTask<AppKernel> && !HostCancelsSchedulerTask<const AppKernel>);
+static_assert(requires(Scheduler& scheduler, ITaskExecutor& executor, const TaskId& id) {
+    scheduler.start(); scheduler.shutdown(std::chrono::milliseconds{0});
+    scheduler.configureExecutor(executor); scheduler.requestCancel(id);
+});
 
 template<typename Host>
 concept HostRestoresHistory = requires(Host& host, std::span<const TransactionCommit> commits) {
@@ -304,10 +321,12 @@ public:
     RegistrarModule(
         ModuleDescriptor descriptor,
         Registration registration,
-        bool failStart = false)
+        bool failStart = false,
+        std::shared_ptr<bool> initialized = nullptr)
         : descriptor_(std::move(descriptor)),
           registration_(std::move(registration)),
-          failStart_(failStart)
+          failStart_(failStart),
+          initialized_(std::move(initialized))
     {
     }
 
@@ -319,6 +338,12 @@ public:
     Result<void> registerComponents(ModuleRegistrar& registrar) override
     {
         return registration_(registrar);
+    }
+
+    Result<void> initialize(AppKernel&) override
+    {
+        if(initialized_) { *initialized_ = true; }
+        return Result<void>::success();
     }
 
     Result<void> start(AppKernel&) override
@@ -335,6 +360,7 @@ private:
     ModuleDescriptor descriptor_;
     Registration registration_;
     bool failStart_{false};
+    std::shared_ptr<bool> initialized_;
 };
 
 ModuleDescriptor makeDescriptor(
@@ -1016,6 +1042,39 @@ TEST_CASE("ModuleRegistrar rejects undeclared and missing contributions", "[kern
         CHECK(std::string(started.error().code.value())
               == "Kernel.ModuleContributionDeclarationMismatch");
         CHECK(kernel.taskRegistry().size() == 0U);
+    }
+}
+
+TEST_CASE("ModuleRuntime rejects ignored invalid contract status registration", "[kernel][modules][registrar][status]")
+{
+    for(const bool query : {false, true}) {
+        DYNAMIC_SECTION("query=" << query) {
+            AppKernel kernel;
+            auto initialized = std::make_shared<bool>(false);
+            auto descriptor = makeDescriptor("module.invalid-status");
+            auto command = governedCommand("command.invalid-status");
+            auto queryDefinition = governedQuery("query.invalid-status");
+            command.status = static_cast<ContractStatus>(255U);
+            queryDefinition.status = static_cast<ContractStatus>(255U);
+            if(query) { descriptor.queries = {{queryDefinition.name, queryDefinition.version}}; }
+            else { descriptor.commands = {{command.name, command.version}}; }
+            REQUIRE(kernel.addModule(std::make_unique<RegistrarModule>(descriptor,
+                [=](ModuleRegistrar& registrar) {
+                    if(query) {
+                        static_cast<void>(registrar.registerQuery(queryDefinition, std::make_shared<NullQueryHandler>()));
+                    } else {
+                        static_cast<void>(registrar.registerReadOnlyCommand(command, std::make_shared<NullReadOnlyCommandHandler>()));
+                    }
+                    return Result<void>::success();
+                }, false, initialized)).hasValue());
+            const auto started = kernel.bootstrap();
+            REQUIRE_FALSE(started.hasValue());
+            CHECK(std::string(started.error().code.value()) == (query ? "Query.InvalidStatus" : "Command.InvalidStatus"));
+            CHECK(kernel.state() == AppKernelState::Failed);
+            CHECK_FALSE(*initialized);
+            CHECK(kernel.commandRegistry().size() == 0U);
+            CHECK(kernel.queryRegistry().size() == 0U);
+        }
     }
 }
 

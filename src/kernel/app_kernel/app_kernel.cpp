@@ -755,11 +755,6 @@ const runtime::ResourceManager& AppKernel::resources() const noexcept
     return resources_;
 }
 
-runtime::Scheduler& AppKernel::scheduler() noexcept
-{
-    return scheduler_;
-}
-
 const runtime::Scheduler& AppKernel::scheduler() const noexcept
 {
     return scheduler_;

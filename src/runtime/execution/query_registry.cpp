@@ -37,6 +37,11 @@ foundation::Result<void> QueryRegistry::registerHandler(
     std::shared_ptr<IQueryHandler> handler)
 {
     const auto key = keyOf(descriptor);
+    if(!validContractStatus(descriptor.status)) {
+        return foundation::Result<void>::failure(queryError(
+            "Query.InvalidStatus", foundation::ErrorCategory::Validation,
+            "Only active or deprecated contract status may be registered", key));
+    }
     if(handler == nullptr) {
         return foundation::Result<void>::failure(queryError(
             "Query.InvalidHandler",

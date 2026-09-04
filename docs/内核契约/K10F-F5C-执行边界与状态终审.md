@@ -2,7 +2,7 @@
 
 ## 状态
 
-进行中，未验收。F5B 固定版本 `68580d7` 已完成三配置全集、纯生产和 21 组性能重测。进一步源码审计确认以下三个内核收口项；实现前不将现有测试全绿解释为整体 Frozen。
+实现已完成，完整回归进行中，未验收。F5B 固定版本 `68580d7` 已完成三配置全集、纯生产和 21 组性能重测。本节点补充以下三个内核收口项，不将局部测试全绿解释为整体 Frozen。
 
 ## 必须完成的修正
 
@@ -17,3 +17,15 @@
 先证明未知 ContractStatus 的回归测试能在修正前失败，再完成实现、三配置全集、纯生产及架构正负例。最终重复矩阵以最后代码版本为准：完整 Debug 连续 3 次，F1 故障矩阵各 20 次、29 个独立进程恢复各 20 次；F3 的 12 个压力用例须逐项确认包含在完整重复结果中。测试数量在新增用例后重新清点。
 
 生产代码改变后重新采集并归档最终基线，不沿用 F5B 二进制摘要。范围仍仅内核；独立 Project 生命周期范围尚待用户确认，不能通过修改验收定义省略。
+
+## 实现与专项证据
+
+- AppKernel 仅返回 const Scheduler，普通 Host 也不能调用 start、shutdown、configureExecutor 或 requestCancel。编译期断言覆盖普通/const Host 的四种不可达方法，以独立可变 Scheduler 为正对照；架构扫描同时检验健康头文件和恢复可变 History、Persistence、Scheduler getter 的三个负例。
+- 新增 validContractStatus，四类 Command 注册及 Query 注册只接收 Active/Deprecated，其他枚举值返回 Command.InvalidStatus 或 Query.InvalidStatus。注册矩阵覆盖 5 类 handler × 5 个状态值（0、1、2、127、255）；模块用例验证即使回调忽略错误，启动仍失败、initialize 未调用且 Registry 为空。
+- 四 scope 的 Query/同步只读 Command 用例直接检查返回 hasDocument 与 scope 一致；Query revisions 的存在性一致，只读 Command 无 commit/taskId。执行前后文档对象和 revisions 均保持不变。
+
+未知状态测试先在旧实现运行并确认失败。首次夹具误保留了同步只读命令的幂等标志，产生额外注册错误，其日志 `build/k10f-f5c-status-red.log` 保留但不作为纯粹缺陷证明。修正夹具后、生产修正前，`build/k10f-f5c-status-red-corrected.log` 记录 50 条断言中 20 通过、30 失败（CTest 退出 8）：10 个合法场景通过，15 个非法注册场景分别在返回值和注册数量上失败。
+
+修正后专项 5/5 通过（0.58 秒），见 `build/k10f-f5c-focused-tests.log`。该专项之后补充了 initialize 未调用的显式断言；后续完整回归包含该最终断言，专项不能冒充最终全集。
+
+完整 Debug 已通过 264/264（307.16 秒），日志 `build/k10f-f5c-debug-tests.log`；构建日志 `build/k10f-f5c-debug-build.log`。包含最后补充的 initialize 断言及三个 Host 负例，据此形成本地实现检查点。Release、ASan、纯生产、连续重复与新基线尚待完成。

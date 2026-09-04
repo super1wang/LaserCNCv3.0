@@ -25,6 +25,16 @@ bool validExecutionScope(ExecutionScope scope) noexcept
     return false;
 }
 
+bool validContractStatus(ContractStatus status) noexcept
+{
+    switch(status) {
+    case ContractStatus::Active:
+    case ContractStatus::Deprecated:
+        return true;
+    }
+    return false;
+}
+
 bool contextMatchesScope(
     const ExecutionContext& context,
     ExecutionScope scope) noexcept

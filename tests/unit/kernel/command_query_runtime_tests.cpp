@@ -565,8 +565,12 @@ TEST_CASE("QueryRuntime enforces global session project and document scopes", "[
     }
     REQUIRE(fixture.kernel.bootstrap().hasValue());
 
+    const auto before = fixture.kernel.documents().snapshot(fixture.document);
+    REQUIRE(before.hasValue());
+
     auto execute = [&](const char* requestId, const char* query, ExecutionContext context) {
-        return fixture.kernel.execution().executeQuery(QueryRequest {
+        const bool expectsDocument = context.documentId.has_value();
+        auto response = fixture.kernel.execution().executeQuery(QueryRequest {
             validId<RequestId>(requestId),
             std::move(context),
             validId<QueryName>(query),
@@ -574,6 +578,16 @@ TEST_CASE("QueryRuntime enforces global session project and document scopes", "[
             Value {Value::Object {}},
             validId<CorrelationId>("correlation.scope"),
             validId<TraceId>("trace.scope")});
+        if(response) {
+            const auto* fields = response.value().result.getIf<Value::Object>();
+            REQUIRE(fields != nullptr);
+            REQUIRE(fields->contains("hasDocument"));
+            const auto* hasDocument = fields->at("hasDocument").getIf<bool>();
+            REQUIRE(hasDocument != nullptr);
+            CHECK(*hasDocument == expectsDocument);
+            CHECK(response.value().revisions.has_value() == expectsDocument);
+        }
+        return response;
     };
 
     CHECK(execute(
@@ -602,6 +616,10 @@ TEST_CASE("QueryRuntime enforces global session project and document scopes", "[
     CHECK(std::string(mismatched.error().code.value()) == "Query.ScopeMismatch");
     CHECK(handler->calls == 4U);
 
+    const auto after = fixture.kernel.documents().snapshot(fixture.document);
+    REQUIRE(after.hasValue());
+    CHECK(after.value().revisions() == before.value().revisions());
+    CHECK(after.value().objects().all() == before.value().objects().all());
     REQUIRE(fixture.kernel.shutdown().hasValue());
 }
 
@@ -625,8 +643,12 @@ TEST_CASE("Synchronous read-only commands preserve every execution scope", "[run
     }
     REQUIRE(fixture.kernel.bootstrap().hasValue());
 
+    const auto before = fixture.kernel.documents().snapshot(fixture.document);
+    REQUIRE(before.hasValue());
+
     auto execute = [&](const char* requestId, const char* command, ExecutionContext context) {
-        return fixture.kernel.execution().executeCommand(CommandRequest {
+        const bool expectsDocument = context.documentId.has_value();
+        auto response = fixture.kernel.execution().executeCommand(CommandRequest {
             validId<RequestId>(requestId),
             std::move(context),
             validId<CommandName>(command),
@@ -635,6 +657,17 @@ TEST_CASE("Synchronous read-only commands preserve every execution scope", "[run
             std::nullopt,
             validId<CorrelationId>("correlation.command-scope"),
             validId<TraceId>("trace.command-scope")});
+        if(response) {
+            const auto* fields = response.value().result.getIf<Value::Object>();
+            REQUIRE(fields != nullptr);
+            REQUIRE(fields->contains("hasDocument"));
+            const auto* hasDocument = fields->at("hasDocument").getIf<bool>();
+            REQUIRE(hasDocument != nullptr);
+            CHECK(*hasDocument == expectsDocument);
+            CHECK_FALSE(response.value().commit.has_value());
+            CHECK_FALSE(response.value().taskId.has_value());
+        }
+        return response;
     };
 
     auto global = execute(
@@ -665,6 +698,10 @@ TEST_CASE("Synchronous read-only commands preserve every execution scope", "[run
     CHECK(std::string(mismatch.error().code.value()) == "Command.ScopeMismatch");
     CHECK(handler->calls == 4U);
 
+    const auto after = fixture.kernel.documents().snapshot(fixture.document);
+    REQUIRE(after.hasValue());
+    CHECK(after.value().revisions() == before.value().revisions());
+    CHECK(after.value().objects().all() == before.value().objects().all());
     REQUIRE(fixture.kernel.shutdown().hasValue());
 }
 

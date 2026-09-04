@@ -94,7 +94,6 @@ public:
     [[nodiscard]] const state::ObjectTypeRegistry& objectTypes() const noexcept;
     [[nodiscard]] runtime::ResourceManager& resources() noexcept;
     [[nodiscard]] const runtime::ResourceManager& resources() const noexcept;
-    [[nodiscard]] runtime::Scheduler& scheduler() noexcept;
     [[nodiscard]] const runtime::Scheduler& scheduler() const noexcept;
     [[nodiscard]] observability::LocalTraceService& traces() noexcept;
     [[nodiscard]] const observability::LocalTraceService& traces() const noexcept;

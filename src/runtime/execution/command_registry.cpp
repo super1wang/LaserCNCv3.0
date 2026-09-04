@@ -59,6 +59,11 @@ foundation::Result<void> CommandRegistry::registerHandler(
     std::shared_ptr<ICommandHandler> handler)
 {
     const auto key = keyOf(descriptor);
+    if(!validContractStatus(descriptor.status)) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.InvalidStatus", foundation::ErrorCategory::Validation,
+            "Only active or deprecated contract status may be registered", key));
+    }
     if(handler == nullptr) {
         return foundation::Result<void>::failure(commandError(
             "Command.InvalidHandler",
@@ -128,6 +133,11 @@ foundation::Result<void> CommandRegistry::registerAsyncHandler(
     std::shared_ptr<IAsyncCommandHandler> handler)
 {
     const auto key = keyOf(descriptor);
+    if(!validContractStatus(descriptor.status)) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.InvalidStatus", foundation::ErrorCategory::Validation,
+            "Only active or deprecated contract status may be registered", key));
+    }
     if(handler == nullptr) {
         return foundation::Result<void>::failure(commandError(
             "Command.InvalidHandler",
@@ -197,6 +207,11 @@ foundation::Result<void> CommandRegistry::registerReadOnlyHandler(
     std::shared_ptr<IReadOnlyCommandHandler> handler)
 {
     const auto key = keyOf(descriptor);
+    if(!validContractStatus(descriptor.status)) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.InvalidStatus", foundation::ErrorCategory::Validation,
+            "Only active or deprecated contract status may be registered", key));
+    }
     if(handler == nullptr) {
         return foundation::Result<void>::failure(commandError(
             "Command.InvalidHandler",
@@ -273,6 +288,11 @@ foundation::Result<void> CommandRegistry::registerExternalEffectHandler(
     std::shared_ptr<IExternalEffectHandler> handler)
 {
     const auto key = keyOf(descriptor);
+    if(!validContractStatus(descriptor.status)) {
+        return foundation::Result<void>::failure(commandError(
+            "Command.InvalidStatus", foundation::ErrorCategory::Validation,
+            "Only active or deprecated contract status may be registered", key));
+    }
     if(handler == nullptr) {
         return foundation::Result<void>::failure(commandError(
             "Command.InvalidHandler",

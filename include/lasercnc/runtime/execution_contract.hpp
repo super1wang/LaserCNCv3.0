@@ -59,6 +59,7 @@ struct ExecutionContext final {
 
 [[nodiscard]] std::string_view executionScopeName(ExecutionScope scope) noexcept;
 [[nodiscard]] bool validExecutionScope(ExecutionScope scope) noexcept;
+[[nodiscard]] bool validContractStatus(ContractStatus status) noexcept;
 [[nodiscard]] bool contextMatchesScope(
     const ExecutionContext& context,
     ExecutionScope scope) noexcept;

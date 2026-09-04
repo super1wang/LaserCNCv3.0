@@ -15,7 +15,7 @@ LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9 及 K10A–K10E 收�
 - Phase 9：Workflow Runtime 与结构化 Script Runtime
 - Kernel 1.0 Closure：K10A–K10E 已验收；K10F 的 F1–F4 已验收；F5 待闭合，不能宣布 Kernel Frozen
 
-F5A 工程门禁检查点已通过，见 [F5A 记录](docs/内核契约/K10F-F5A-ASan隔离配置与真实探针.md)。F5B 已封闭 Host 的 History/Persistence 底层写入口并迁移测试夹具，Debug 全集 262/262 通过，其他配置、重复认证和性能重测仍在推进，见 [F5B 记录](docs/内核契约/K10F-F5B-Host状态写入口审计.md)。Project 级生命周期表述与 K10B 的 DocumentRuntime 细则也存在差异，已提请确认；见 [逐项审计清单](docs/内核契约/Kernel-1.0-冻结审计清单.md)，不得以测试全绿替代未闭合范围。
+F5A 工程门禁检查点已通过，见 [F5A 记录](docs/内核契约/K10F-F5A-ASan隔离配置与真实探针.md)。F5B 已封闭 Host 的 History/Persistence 底层写入口，完成三配置全集、纯生产及性能重测，见 [F5B 记录](docs/内核契约/K10F-F5B-Host状态写入口审计.md)。F5C 已收紧 Scheduler 观察边界、拒绝未知契约状态并补齐四 scope 输出断言，Debug 264/264 通过，其余门禁进行中，见 [F5C 记录](docs/内核契约/K10F-F5C-执行边界与状态终审.md)。Project 级生命周期表述与 K10B 的 DocumentRuntime 细则仍存在差异，已提请确认；见 [逐项审计清单](docs/内核契约/Kernel-1.0-冻结审计清单.md)，不得以测试全绿替代未闭合范围。
 - 标准：C++20
 - 测试：Catch2 + CTest
 

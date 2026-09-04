@@ -3,6 +3,7 @@
 #include <lasercnc/runtime/execution_services.hpp>
 #include <lasercnc/runtime/effect_guard.hpp>
 #include <lasercnc/runtime/query_registry.hpp>
+#include <lasercnc/foundation/error.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -85,6 +86,15 @@ public:
     Result<Value> execute(const QueryRequest&, const QueryContext&) override
     {
         return Result<Value>::success(Value {});
+    }
+};
+
+class AsyncHandler final : public IAsyncCommandHandler {
+public:
+    Result<AsyncCommandPlan> prepare(const CommandRequest&) override
+    {
+        return Result<AsyncCommandPlan>::failure(makeError("Test.UnexpectedExecution",
+            ErrorCategory::Internal, "Registration must not prepare a task"));
     }
 };
 
@@ -236,6 +246,49 @@ TEST_CASE("CommandRegistry resolves exact compatible and deprecated versions", "
         validId<CommandName>("kernel.command.missing"), Version {1U, 0U, 0U}});
     REQUIRE_FALSE(missing.hasValue());
     CHECK(std::string(missing.error().code.value()) == "Command.NotFound");
+}
+
+TEST_CASE("Execution registries reject unknown contract status across every handler family", "[runtime][contract][status]")
+{
+    for(const unsigned int raw : {0U, 1U, 2U, 127U, 255U}) {
+        for(unsigned int family = 0U; family < 5U; ++family) {
+            DYNAMIC_SECTION("status=" << raw << " family=" << family) {
+                const bool known = raw <= 1U;
+                const auto status = static_cast<ContractStatus>(raw);
+                if(family == 4U) {
+                    QueryRegistry registry;
+                    const auto registered = registry.registerHandler(
+                        queryDescriptor("query.status", {1U, 0U, 0U}, status), std::make_shared<QueryHandler>());
+                    CHECK(registered.hasValue() == known);
+                    CHECK(registry.size() == (known ? 1U : 0U));
+                    if(!registered) { CHECK(std::string(registered.error().code.value()) == "Query.InvalidStatus"); }
+                } else {
+                    CommandRegistry registry;
+                    auto descriptor = commandDescriptor("command.status", {1U, 0U, 0U}, status);
+                    const auto registered = [&]() {
+                        if(family == 0U) { return registry.registerHandler(descriptor, std::make_shared<CommandHandler>()); }
+                        descriptor.sideEffect = SideEffectLevel::ReadOnly;
+                        if(family == 1U) {
+                            descriptor.idempotent = false;
+                            return registry.registerReadOnlyHandler(descriptor, std::make_shared<ReadOnlyHandler>());
+                        }
+                        if(family == 2U) {
+                            descriptor.executionMode = ExecutionMode::Asynchronous;
+                            return registry.registerAsyncHandler(descriptor, std::make_shared<AsyncHandler>());
+                        }
+                        descriptor.sideEffect = SideEffectLevel::Publish;
+                        descriptor.effectGuards = {validId<EffectGuardId>("guard.status")};
+                        descriptor.resources = {{ResourceKind::DiskIO, validId<ResourceId>("resource.status"),
+                            ResourceAccess::Exclusive, 1U}};
+                        return registry.registerExternalEffectHandler(descriptor, std::make_shared<ExternalEffectHandler>());
+                    }();
+                    CHECK(registered.hasValue() == known);
+                    CHECK(registry.size() == (known ? 1U : 0U));
+                    if(!registered) { CHECK(std::string(registered.error().code.value()) == "Command.InvalidStatus"); }
+                }
+            }
+        }
+    }
 }
 
 TEST_CASE("CommandRegistry keeps synchronous read-only handlers outside transactions", "[runtime][command][scope]")

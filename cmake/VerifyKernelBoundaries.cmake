@@ -49,6 +49,7 @@ set(forbidden_app_kernel_bypasses
     "ObjectTypeRegistry& objectTypes() noexcept"
     "HistoryRuntime& history() noexcept"
     "PersistenceService& persistence() noexcept"
+    "Scheduler& scheduler() noexcept"
     "CommandRuntime& commands("
     "QueryRuntime& queries("
     "TaskRuntime& tasks("
