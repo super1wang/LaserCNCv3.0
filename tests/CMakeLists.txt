@@ -184,6 +184,7 @@ add_executable(
     unit/runtime/project_persistence_tests.cpp
     unit/runtime/project_task_admission_tests.cpp
     unit/runtime/project_runtime_tests.cpp
+    unit/runtime/document_recovery_admission_tests.cpp
     unit/runtime/lifecycle_catalog_tests.cpp
     unit/runtime/close_snapshot_identity_tests.cpp
     unit/runtime/snapshot_ordering_tests.cpp
