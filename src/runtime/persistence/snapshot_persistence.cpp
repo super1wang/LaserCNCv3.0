@@ -554,6 +554,40 @@ foundation::Result<SnapshotRecord> PersistenceService::captureSnapshot(
             auto failure = rollback(*backend_, std::move(written).error());
             return foundation::Result<SnapshotRecord>::failure(std::move(failure).error());
         }
+        switch(written.value()) {
+        case platform::SnapshotWriteDisposition::Created: break;
+        case platform::SnapshotWriteDisposition::AlreadyPresent: {
+            auto existingPayload = snapshotStore_->read(snapshotId);
+            if(!existingPayload) {
+                auto failure = rollback(*backend_, snapshotPersistenceError(
+                    "Persistence.SnapshotStoreVerificationFailed",
+                    foundation::ErrorCategory::Infrastructure,
+                    "An existing snapshot payload could not be verified",
+                    {},
+                    std::make_shared<const foundation::Error>(
+                        std::move(existingPayload).error())));
+                return foundation::Result<SnapshotRecord>::failure(
+                    std::move(failure).error());
+            }
+            if(existingPayload.value() != payload.value()) {
+                auto failure = rollback(*backend_, snapshotPersistenceError(
+                    "Persistence.SnapshotStoreContentMismatch",
+                    foundation::ErrorCategory::Infrastructure,
+                    "An existing snapshot payload does not match the requested state"));
+                return foundation::Result<SnapshotRecord>::failure(
+                    std::move(failure).error());
+            }
+            break;
+        }
+        default: {
+            auto failure = rollback(*backend_, snapshotPersistenceError(
+                "Persistence.InvalidSnapshotWriteDisposition",
+                foundation::ErrorCategory::Infrastructure,
+                "The snapshot store returned an invalid write disposition"));
+            return foundation::Result<SnapshotRecord>::failure(
+                std::move(failure).error());
+        }
+        }
         std::vector<foundation::Value> parameters;
         parameters.reserve(14U);
         parameters.emplace_back(std::string(snapshotId.value()));

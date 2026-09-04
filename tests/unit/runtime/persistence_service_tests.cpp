@@ -207,6 +207,55 @@ private:
     std::unique_ptr<SqlitePersistenceBackend> sessionBackend_;
 };
 
+enum class SnapshotDispositionScenario { Unknown, MatchingExisting, MismatchedExisting };
+
+class DispositionSnapshotStore final : public lasercnc::platform::ISnapshotStore {
+public:
+    explicit DispositionSnapshotStore(SnapshotDispositionScenario scenario)
+        : scenario_(scenario)
+    {
+    }
+
+    Result<lasercnc::platform::SnapshotWriteDisposition> writeAtomically(
+        const SnapshotId& snapshotId, std::string_view payload) override
+    {
+        ++writeCalls;
+        snapshotId_ = snapshotId;
+        payload_ = scenario_ == SnapshotDispositionScenario::MismatchedExisting
+            ? "mismatched-existing-payload"
+            : std::string(payload);
+        if(scenario_ == SnapshotDispositionScenario::Unknown) {
+            return Result<lasercnc::platform::SnapshotWriteDisposition>::success(
+                static_cast<lasercnc::platform::SnapshotWriteDisposition>(255U));
+        }
+        return Result<lasercnc::platform::SnapshotWriteDisposition>::success(
+            lasercnc::platform::SnapshotWriteDisposition::AlreadyPresent);
+    }
+
+    Result<std::string> read(const SnapshotId& snapshotId) const override
+    {
+        ++readCalls;
+        if(snapshotId_.has_value() && *snapshotId_ == snapshotId) {
+            return Result<std::string>::success(payload_);
+        }
+        return Result<std::string>::failure(makeError(
+            "Test.SnapshotMissing", ErrorCategory::NotFound, "Snapshot is absent"));
+    }
+
+    Result<bool> remove(const SnapshotId&) override
+    {
+        return Result<bool>::success(false);
+    }
+
+    std::size_t writeCalls{0U};
+    mutable std::size_t readCalls{0U};
+
+private:
+    SnapshotDispositionScenario scenario_;
+    std::optional<SnapshotId> snapshotId_;
+    std::string payload_;
+};
+
 class FailingTaskTerminalBackend final
     : public lasercnc::platform::IPersistenceBackend {
 public:
@@ -1033,6 +1082,63 @@ TEST_CASE("Persistence preserves object schema versions across journal snapshot 
     }
     removeDatabase(path);
     removeSnapshotDirectory(snapshotDirectory);
+}
+
+TEST_CASE("Snapshot capture validates store disposition and existing payload before indexing",
+          "[persistence][snapshot][port][c6b16]")
+{
+    struct Scenario final {
+        SnapshotDispositionScenario mode;
+        const char* name;
+        const char* errorCode;
+    };
+    const std::array scenarios {
+        Scenario {SnapshotDispositionScenario::Unknown,
+            "unknown-disposition", "Persistence.InvalidSnapshotWriteDisposition"},
+        Scenario {SnapshotDispositionScenario::MismatchedExisting,
+            "mismatched-existing", "Persistence.SnapshotStoreContentMismatch"},
+        Scenario {SnapshotDispositionScenario::MatchingExisting,
+            "matching-existing", nullptr},
+    };
+    for(const auto& scenario : scenarios) {
+        DYNAMIC_SECTION(scenario.name) {
+            auto backend = SqlitePersistenceBackend::open({":memory:"});
+            REQUIRE(backend.hasValue());
+            auto snapshots = std::make_unique<DispositionSnapshotStore>(scenario.mode);
+            auto* observed = snapshots.get();
+            PersistenceService service;
+            REQUIRE(service.configure(
+                std::move(backend).value(),
+                std::make_shared<JsonconsAdapter>(),
+                std::make_shared<Sha256HashService>(),
+                std::move(snapshots)).hasValue());
+            REQUIRE(service.initialize().hasValue());
+
+            const auto project = validId<ProjectId>("project.snapshot-disposition");
+            const auto documentId = validId<DocumentId>("document.snapshot-disposition");
+            DocumentStore documents;
+            REQUIRE(documents.addDocument(project, documentId).hasValue());
+            const auto document = documents.snapshot(documentId);
+            REQUIRE(document.hasValue());
+            const auto captured = service.captureSnapshot(
+                validId<SnapshotId>("snapshot.disposition"), document.value());
+            CHECK(observed->writeCalls == 1U);
+
+            if(scenario.errorCode == nullptr) {
+                REQUIRE(captured.hasValue());
+                const auto latest = service.latestSnapshot(documentId);
+                REQUIRE(latest.hasValue());
+                REQUIRE(latest.value().has_value());
+                CHECK(observed->readCalls == 2U);
+            } else {
+                REQUIRE_FALSE(captured.hasValue());
+                CHECK(std::string(captured.error().code.value()) == scenario.errorCode);
+                const auto latest = service.latestSnapshot(documentId);
+                REQUIRE(latest.hasValue());
+                CHECK_FALSE(latest.value().has_value());
+            }
+        }
+    }
 }
 
 TEST_CASE("Journal write admission rejects stale project and document revisions without a durable change", "[persistence][journal][revision-admission]")

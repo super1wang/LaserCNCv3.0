@@ -117,6 +117,15 @@ Task 的 ResourceManager 仲裁发生在提交被接受后的 Scheduler 泵内�
 
 C6b15 不改公共头、枚举数字、DTO 或持久格式；它只收紧非法枚举的错误分类及观察字符串，见 [契约](ST1C6b15-版本解析策略枚举准入.md)。Version 数值、请求文本/Value、幂等及历史总量继续在后续预算和持久族审计中保留。
 
+## Snapshot Store 写入证明
+
+| 文件与声明 | 字段及公开操作 | 已验证边界与后续缺口 |
+| --- | --- | --- |
+| [snapshot_store.hpp](../../include/lasercnc/platform/snapshot_store.hpp)：SnapshotWriteDisposition、ISnapshotStore | disposition 为 Created/AlreadyPresent；writeAtomically、read、remove | C6b16 在 Persistence 索引前拒绝未知 disposition；AlreadyPresent 必须同 ID 读回并与待写 payload 精确相等，失败回滚且不留索引。Created 不强制读回，跨介质原子性与物理落盘不由该枚举证明 |
+| [persistence_service.hpp](../../include/lasercnc/persistence/persistence_service.hpp)：captureSnapshot/latestSnapshot/recover | Snapshot 索引绑定项目、文档、修订、水位、storage key、digest、大小和时间 | 已存在内容读失败保留 cause，内容不匹配独立拒绝；孤立不可变文件允许保留但无索引即不可作为恢复锚点。快照数量、读取成本和环境支持继续归 C6c/C7/C5/ST1D |
+
+C6b16 不改公共头、LCNCSN02、逻辑 payload 或数据库版本，见 [契约](ST1C6b16-快照存储写入证明准入.md)。错误适配器的历史错误索引不会自动修复，读取仍 fail-closed。
+
 ## 后续顺序（保留完整目标）
 
 C6b5 登记的观察负例中，前三类由 C6b6 取得真实红灯并修复；以下按证据区分已补范围与剩余项：
@@ -128,6 +137,6 @@ C6b5 登记的观察负例中，前三类由 C6b6 取得真实红灯并修复；
 
 以上与观察身份淘汰复用、活动总量、时间顺序和资源预算账本并存；不能以修好某一个枚举后删掉其他必须项。
 
-1. C6b2–b12 检查点保留；C6b13–b15 补 Workflow/Script 定义、资源声明及 Command/Query 版本解析策略，见 [最新交付](../阶段交付/2026-09-05-ST1C6b15-版本解析策略枚举准入.md)。下一步补 Host、状态与持久族 DTO/格式；不以观察、编排、资源或版本局部修复代签其他入口。
+1. C6b2–b12 检查点保留；C6b13–b16 补编排定义、资源声明、版本解析策略及快照写入证明，见 [最新交付](../阶段交付/2026-09-05-ST1C6b16-快照存储写入证明准入.md)。下一步补 Host、其余状态与持久族 DTO/格式；不以局部修复代签其他入口。
 2. 继续 Foundation、Observability、Messaging 已登记的行为缺口及 Host/执行/状态/持久族逐类型、枚举和 DTO 字段；将源码兼容、权限阶段、线程/寿命、Error cause 和 wire 版本分别关联到测试。已修复的 Schema/消息枚举与合并/错投仅覆盖各子节点列出的范围；观察记录的未知枚举、数值/终态/寿命问题不因“非业务真值”而免审。
 3. C6c/d 执行统一预算、同步与 Task、终态保留；C7 测容量，C8 完整日志/脚本/私有头门禁，ST1D 最终三配置签核。上述均未被本轮 8 个 Adapter 声明登记替代。
