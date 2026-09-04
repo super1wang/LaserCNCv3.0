@@ -207,6 +207,68 @@ private:
     std::unique_ptr<SqlitePersistenceBackend> sessionBackend_;
 };
 
+class ReportedRowCountBackend final
+    : public lasercnc::platform::IPersistenceBackend {
+public:
+    explicit ReportedRowCountBackend(
+        std::unique_ptr<lasercnc::platform::IPersistenceBackend> delegate)
+        : delegate_(std::move(delegate))
+    {
+    }
+
+    Result<lasercnc::platform::PersistenceSessionInfo> acquireHostSession() override
+    {
+        return delegate_->acquireHostSession();
+    }
+
+    Result<std::size_t> execute(
+        std::string_view statement,
+        std::span<const Value> parameters = {}) override
+    {
+        if(reportedCount_.has_value()
+           && statement.starts_with("INSERT INTO command_idempotency")) {
+            const auto reported = *reportedCount_;
+            reportedCount_.reset();
+            ++hits;
+            return Result<std::size_t>::success(reported);
+        }
+        return delegate_->execute(statement, parameters);
+    }
+
+    Result<std::vector<lasercnc::platform::PersistenceRow>> query(
+        std::string_view statement,
+        std::span<const Value> parameters = {}) override
+    {
+        return delegate_->query(statement, parameters);
+    }
+
+    Result<void> beginTransaction() override
+    {
+        return delegate_->beginTransaction();
+    }
+
+    Result<void> commitTransaction() override
+    {
+        return delegate_->commitTransaction();
+    }
+
+    Result<void> rollbackTransaction() override
+    {
+        return delegate_->rollbackTransaction();
+    }
+
+    void reportNextIdempotencyInsert(std::size_t count)
+    {
+        reportedCount_ = count;
+    }
+
+    unsigned int hits{0U};
+
+private:
+    std::unique_ptr<lasercnc::platform::IPersistenceBackend> delegate_;
+    std::optional<std::size_t> reportedCount_;
+};
+
 enum class SnapshotDispositionScenario { Unknown, MatchingExisting, MismatchedExisting };
 
 class DispositionSnapshotStore final : public lasercnc::platform::ISnapshotStore {
@@ -2459,6 +2521,313 @@ TEST_CASE("Crash recovery validates object before state", "[persistence][recover
     removeSnapshotDirectory(snapshotDirectory);
 }
 
+TEST_CASE("Idempotency claim requires exact durable insert proof",
+          "[persistence][idempotency][write-proof][c6b20]")
+{
+    for(const auto reportedCount : {0U, 2U}) {
+        DYNAMIC_SECTION("reportedCount=" << reportedCount) {
+            auto sqlite = SqlitePersistenceBackend::open({":memory:"});
+            REQUIRE(sqlite.hasValue());
+            auto backend = std::make_unique<ReportedRowCountBackend>(
+                std::move(sqlite).value());
+            auto* observed = backend.get();
+            PersistenceService service;
+            REQUIRE(service.configure(
+                        std::move(backend),
+                        std::make_shared<JsonconsAdapter>(),
+                        std::make_shared<Sha256HashService>())
+                        .hasValue());
+            REQUIRE(service.initialize().hasValue());
+
+            const auto key = validId<IdempotencyKey>("key.write-proof");
+            const Value signature {Value::Object {
+                {"format", Value {"test.command-signature"}}}};
+            observed->reportNextIdempotencyInsert(reportedCount);
+            auto rejected = service.claimCommand(key, signature);
+            REQUIRE_FALSE(rejected.hasValue());
+            CHECK(std::string(rejected.error().code.value())
+                  == "Persistence.IdempotencyClaimWriteCountInvalid");
+            CHECK(observed->hits == 1U);
+
+            auto retry = service.claimCommand(key, signature);
+            REQUIRE(retry.hasValue());
+            CHECK(retry.value().disposition
+                  == IdempotencyClaimDisposition::Acquired);
+            CHECK_FALSE(retry.value().replay.has_value());
+        }
+    }
+}
+
+TEST_CASE("Durable execution enums reject undefined values before mutation",
+          "[persistence][effect][diagnostics][dto][c6b20]")
+{
+    const auto path = uniqueDatabasePath();
+    removeDatabase(path);
+    {
+        PersistenceService service;
+        configureService(service, path);
+        auto observer = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+        REQUIRE(observer.hasValue());
+
+        const auto effectKey = validId<IdempotencyKey>("effect.invalid-policy");
+        const Value signature {Value::Object {
+            {"format", Value {"test.external-effect-signature"}}}};
+        for(const auto raw : {4U, 255U}) {
+            auto rejected = service.claimExternalEffect(
+                effectKey,
+                signature,
+                static_cast<ReplayPolicy>(raw));
+            REQUIRE_FALSE(rejected.hasValue());
+            CHECK(std::string(rejected.error().code.value())
+                  == "Persistence.InvalidExternalEffectPolicy");
+        }
+
+        lasercnc::observability::DiagnosticReport report {
+            validId<DiagnosticId>("diagnostic.invalid-status"),
+            lasercnc::observability::DiagnosticStatus::Healthy,
+            "invalid durable metadata",
+            Value {Value::Object {}},
+            std::chrono::system_clock::time_point {}};
+        for(const auto raw : {4U, 255U}) {
+            report.status = static_cast<lasercnc::observability::DiagnosticStatus>(raw);
+            auto rejected = service.recordDiagnostic(report);
+            REQUIRE_FALSE(rejected.hasValue());
+            CHECK(std::string(rejected.error().code.value())
+                  == "Persistence.InvalidDiagnosticReport");
+        }
+        report.status = lasercnc::observability::DiagnosticStatus::Healthy;
+        report.observedAt = std::chrono::system_clock::time_point {
+            std::chrono::milliseconds {-1}};
+        auto preEpoch = service.recordDiagnostic(report);
+        REQUIRE_FALSE(preEpoch.hasValue());
+        CHECK(std::string(preEpoch.error().code.value())
+              == "Persistence.InvalidDiagnosticReport");
+
+        auto effects = observer.value()->query(
+            "SELECT idempotency_key FROM external_effects");
+        REQUIRE(effects.hasValue());
+        CHECK(effects.value().empty());
+        auto diagnostics = observer.value()->query(
+            "SELECT diagnostic_id FROM diagnostic_history");
+        REQUIRE(diagnostics.hasValue());
+        CHECK(diagnostics.value().empty());
+    }
+    removeDatabase(path);
+}
+
+TEST_CASE("Durable execution readers reject authenticated unsupported formats",
+          "[persistence][idempotency][diagnostics][format][c6b20]")
+{
+    const auto path = uniqueDatabasePath();
+    removeDatabase(path);
+    {
+        PersistenceService service;
+        configureService(service, path);
+        auto raw = SqlitePersistenceBackend::open(SqliteConnectionOptions {path});
+        REQUIRE(raw.hasValue());
+        JsonconsAdapter json;
+        Sha256HashService hashes;
+
+        const auto key = validId<IdempotencyKey>("key.unsupported-outcome");
+        const Value signature {"signature.unsupported-outcome"};
+        const RevisionSet after {
+            Revision {1U}, Revision {1U}, Revision {1U},
+            Revision {}, Revision {}, Revision {}};
+        auto transaction = commit(
+            "tx.unsupported-outcome", RevisionSet {}, after, "format-data");
+        REQUIRE(service.claimCommand(key, signature).hasValue());
+        REQUIRE(service.append(
+                    transaction,
+                    TransactionIdempotency {key, signature, Value {"result"}})
+                    .hasValue());
+        const std::array keyParameter {Value {std::string(key.value())}};
+        auto outcomeRows = raw.value()->query(
+            "SELECT outcome_payload FROM command_idempotency WHERE idempotency_key=?",
+            keyParameter);
+        REQUIRE(outcomeRows.hasValue());
+        REQUIRE(outcomeRows.value().size() == 1U);
+        auto outcome = json.deserialize(
+            *outcomeRows.value().front().at("outcome_payload").getIf<std::string>());
+        REQUIRE(outcome.hasValue());
+        auto* outcomeRoot = outcome.value().getIf<Value::Object>();
+        REQUIRE(outcomeRoot != nullptr);
+        outcomeRoot->insert_or_assign("version", Value {std::int64_t {4}});
+        auto encodedOutcome = json.serialize(outcome.value());
+        REQUIRE(encodedOutcome.hasValue());
+        auto outcomeDigest = hashes.digest({
+            reinterpret_cast<const std::byte*>(encodedOutcome.value().data()),
+            encodedOutcome.value().size()});
+        REQUIRE(outcomeDigest.hasValue());
+        const std::array outcomeUpdate {
+            Value {encodedOutcome.value()},
+            Value {std::string(outcomeDigest.value().value())},
+            Value {std::string(key.value())}};
+        REQUIRE(raw.value()->execute(
+            "UPDATE command_idempotency SET outcome_payload=?,outcome_digest=? "
+            "WHERE idempotency_key=?",
+            outcomeUpdate).hasValue());
+        auto unsupportedOutcome = service.claimCommand(key, signature);
+        REQUIRE_FALSE(unsupportedOutcome.hasValue());
+        CHECK(std::string(unsupportedOutcome.error().code.value())
+              == "Persistence.InvalidIdempotencyPayload");
+
+        const auto diagnosticId = validId<DiagnosticId>("diagnostic.unsupported-format");
+        const lasercnc::observability::DiagnosticReport report {
+            diagnosticId,
+            lasercnc::observability::DiagnosticStatus::Healthy,
+            "authenticated format",
+            Value {Value::Object {}},
+            std::chrono::system_clock::time_point {}};
+        REQUIRE(service.recordDiagnostic(report).hasValue());
+        const std::array diagnosticParameter {
+            Value {std::string(diagnosticId.value())}};
+        auto diagnosticRows = raw.value()->query(
+            "SELECT payload FROM diagnostic_history WHERE diagnostic_id=?",
+            diagnosticParameter);
+        REQUIRE(diagnosticRows.hasValue());
+        REQUIRE(diagnosticRows.value().size() == 1U);
+        auto diagnostic = json.deserialize(
+            *diagnosticRows.value().front().at("payload").getIf<std::string>());
+        REQUIRE(diagnostic.hasValue());
+        auto* diagnosticRoot = diagnostic.value().getIf<Value::Object>();
+        REQUIRE(diagnosticRoot != nullptr);
+        diagnosticRoot->insert_or_assign("version", Value {std::int64_t {2}});
+        auto encodedDiagnostic = json.serialize(diagnostic.value());
+        REQUIRE(encodedDiagnostic.hasValue());
+        auto diagnosticDigest = hashes.digest({
+            reinterpret_cast<const std::byte*>(encodedDiagnostic.value().data()),
+            encodedDiagnostic.value().size()});
+        REQUIRE(diagnosticDigest.hasValue());
+        std::array diagnosticUpdate {
+            Value {encodedDiagnostic.value()},
+            Value {std::string(diagnosticDigest.value().value())},
+            Value {std::string(diagnosticId.value())}};
+        REQUIRE(raw.value()->execute(
+            "UPDATE diagnostic_history SET payload=?,digest=? WHERE diagnostic_id=?",
+            diagnosticUpdate).hasValue());
+        auto unsupportedDiagnostic = service.diagnosticHistory(diagnosticId);
+        REQUIRE_FALSE(unsupportedDiagnostic.hasValue());
+        CHECK(std::string(unsupportedDiagnostic.error().code.value())
+              == "Persistence.InvalidDiagnosticPayload");
+
+        diagnosticRoot->insert_or_assign("version", Value {std::int64_t {1}});
+        diagnosticRoot->insert_or_assign("status", Value {"unsupported"});
+        encodedDiagnostic = json.serialize(diagnostic.value());
+        REQUIRE(encodedDiagnostic.hasValue());
+        diagnosticDigest = hashes.digest({
+            reinterpret_cast<const std::byte*>(encodedDiagnostic.value().data()),
+            encodedDiagnostic.value().size()});
+        REQUIRE(diagnosticDigest.hasValue());
+        const std::array invalidStatusUpdate {
+            Value {"unsupported"},
+            Value {encodedDiagnostic.value()},
+            Value {std::string(diagnosticDigest.value().value())},
+            Value {std::string(diagnosticId.value())}};
+        REQUIRE(raw.value()->execute(
+            "UPDATE diagnostic_history SET status=?,payload=?,digest=? "
+            "WHERE diagnostic_id=?",
+            invalidStatusUpdate).hasValue());
+        auto unsupportedStatus = service.diagnosticHistory(diagnosticId);
+        REQUIRE_FALSE(unsupportedStatus.hasValue());
+        CHECK(std::string(unsupportedStatus.error().code.value())
+              == "Persistence.InvalidDiagnosticPayload");
+    }
+    removeDatabase(path);
+}
+
+TEST_CASE("Command outcome retains exact legacy version compatibility",
+          "[persistence][idempotency][compatibility][c6b20]")
+{
+    for(const auto legacyVersion : {1, 2}) {
+        DYNAMIC_SECTION("version=" << legacyVersion) {
+            const auto path = uniqueDatabasePath();
+            removeDatabase(path);
+            {
+                PersistenceService service;
+                configureService(service, path);
+                const auto key = validId<IdempotencyKey>("key.legacy-outcome");
+                const Value signature {"signature.legacy-outcome"};
+                const RevisionSet after {
+                    Revision {1U}, Revision {1U}, Revision {1U},
+                    Revision {}, Revision {}, Revision {}};
+                auto transaction = commit(
+                    "tx.legacy-outcome", RevisionSet {}, after, "legacy-data");
+                REQUIRE(service.claimCommand(key, signature).hasValue());
+                REQUIRE(service.append(
+                            transaction,
+                            TransactionIdempotency {
+                                key, signature, Value {"legacy-result"}})
+                            .hasValue());
+
+                auto raw = SqlitePersistenceBackend::open(
+                    SqliteConnectionOptions {path});
+                REQUIRE(raw.hasValue());
+                const std::array keyParameter {
+                    Value {std::string(key.value())}};
+                auto rows = raw.value()->query(
+                    "SELECT outcome_payload FROM command_idempotency "
+                    "WHERE idempotency_key=?",
+                    keyParameter);
+                REQUIRE(rows.hasValue());
+                REQUIRE(rows.value().size() == 1U);
+                JsonconsAdapter json;
+                auto outcome = json.deserialize(
+                    *rows.value().front().at("outcome_payload").getIf<std::string>());
+                REQUIRE(outcome.hasValue());
+                auto* root = outcome.value().getIf<Value::Object>();
+                REQUIRE(root != nullptr);
+                root->insert_or_assign(
+                    "version", Value {std::int64_t {legacyVersion}});
+                auto* persistedCommit = root->at("commit").getIf<Value::Object>();
+                REQUIRE(persistedCommit != nullptr);
+                auto* changes = persistedCommit->at("changes").getIf<Value::Array>();
+                REQUIRE(changes != nullptr);
+                for(auto& changeValue : *changes) {
+                    auto* change = changeValue.getIf<Value::Object>();
+                    REQUIRE(change != nullptr);
+                    for(const auto* field : {"before", "after"}) {
+                        auto* record = change->at(field).getIf<Value::Object>();
+                        if(record == nullptr) {
+                            continue;
+                        }
+                        record->erase("assets");
+                        if(legacyVersion == 1) {
+                            record->erase("schemaVersion");
+                        }
+                    }
+                }
+                auto encoded = json.serialize(outcome.value());
+                REQUIRE(encoded.hasValue());
+                Sha256HashService hashes;
+                auto digest = hashes.digest({
+                    reinterpret_cast<const std::byte*>(encoded.value().data()),
+                    encoded.value().size()});
+                REQUIRE(digest.hasValue());
+                const std::array updateParameters {
+                    Value {encoded.value()},
+                    Value {std::string(digest.value().value())},
+                    Value {std::string(key.value())}};
+                REQUIRE(raw.value()->execute(
+                    "UPDATE command_idempotency SET outcome_payload=?,outcome_digest=? "
+                    "WHERE idempotency_key=?",
+                    updateParameters).hasValue());
+
+                auto replay = service.claimCommand(key, signature);
+                REQUIRE(replay.hasValue());
+                CHECK(replay.value().disposition
+                      == IdempotencyClaimDisposition::Replayed);
+                REQUIRE(replay.value().replay.has_value());
+                CHECK(replay.value().replay->result == Value {"legacy-result"});
+                REQUIRE(replay.value().replay->commit.has_value());
+                CHECK(replay.value().replay->commit->changes.front().after->schemaVersion
+                      == Version {1U, 0U, 0U});
+                CHECK(replay.value().replay->commit->changes.front().after->assets.empty());
+            }
+            removeDatabase(path);
+        }
+    }
+}
+
 TEST_CASE("CommandRuntime replays durable idempotency after process restart", "[persistence][idempotency][command]")
 {
     const auto path = uniqueDatabasePath();
@@ -4441,6 +4810,28 @@ TEST_CASE("External-effect recovery never replays executing work automatically",
         REQUIRE_FALSE(corrupted.hasValue());
         CHECK(std::string(corrupted.error().code.value())
               == "Persistence.ExternalEffectStatePolicyMismatch");
+
+        const std::array invalidPolicyParameters {
+            Value {"unsupported"}, Value {std::string(idempotentKey.value())}};
+        REQUIRE(tamper.value()->execute(
+            "UPDATE external_effects SET replay_policy=? WHERE idempotency_key=?",
+            invalidPolicyParameters).hasValue());
+        auto invalidPolicy = persistence.externalEffect(idempotentKey);
+        REQUIRE_FALSE(invalidPolicy.hasValue());
+        CHECK(std::string(invalidPolicy.error().code.value())
+              == "Persistence.InvalidExternalEffectPolicy");
+
+        const std::array invalidStateParameters {
+            Value {"idempotent"}, Value {"unsupported"},
+            Value {std::string(idempotentKey.value())}};
+        REQUIRE(tamper.value()->execute(
+            "UPDATE external_effects SET replay_policy=?,state=? "
+            "WHERE idempotency_key=?",
+            invalidStateParameters).hasValue());
+        auto invalidState = persistence.externalEffect(idempotentKey);
+        REQUIRE_FALSE(invalidState.hasValue());
+        CHECK(std::string(invalidState.error().code.value())
+              == "Persistence.InvalidExternalEffectState");
     }
     removeDatabase(path);
 }

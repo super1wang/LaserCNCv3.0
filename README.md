@@ -4,7 +4,7 @@ LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9 及 K10A–K10E 的�
 
 ## 已完成阶段
 
-当前收口按 [ST1C 补充执行计划](docs/内核契约/ST1C-补充审计与剩余执行计划.md) 继续：最新 [C6b19 Host 与 State 状态边界](docs/阶段交付/2026-09-05-ST1C6b19-Host与State状态边界.md) 已区分只读观察状态、闭集输入和直接访问器前置条件，并补 Document 未定义生命周期持久状态的零变更证据；C6b18 Task Error cause v2 继续保留。下一步按 [C6 子节点](docs/内核契约/ST1C6-公共契约与输入预算.md) 进入 C6b20 剩余 Persistence DTO/格式及 71 头最终对账，再完成统一预算和终态保留，之后 C7/C8 与 ST1D。整体尚未 Frozen，不扩展上层模块。
+当前收口按 [ST1C 补充执行计划](docs/内核契约/ST1C-补充审计与剩余执行计划.md) 继续：最新 [C6b20 持久执行与诊断格式边界](docs/阶段交付/2026-09-05-ST1C6b20-持久执行与诊断格式边界.md) 已修复 Idempotency 首次占位缺少精确写入证明的问题，并补齐 ExternalEffect、Diagnostic、Recovery/Session DTO 及 command outcome v1–v3 兼容边界。下一步按 [C6 子节点](docs/内核契约/ST1C6-公共契约与输入预算.md) 对账全部 71 个公共头和 C6b1–b20 记录，再完成 C6c 统一预算、C6d 同步/Task/终态保留，之后 C7/C8 与 ST1D。整体尚未 Frozen，不扩展上层模块。
 
 C5a/b 已完成持久化会话端口、SQLite/Windows 独占及强制初始化的本地检查点：C5b Debug 299/299、专项 56/56、新增 5 项各 10 次、纯生产及架构检查通过，见 [C5b 交付](docs/阶段交付/2026-09-04-ST1C5b-初始化独占与活动状态保护.md)。第二 Host 不再改写运行中 claim，隔离后仍保留所有权；C1b 已承接写入端修订检查。C2c 生命周期及 ST1D 最终签核仍未闭合，不宣称 Frozen。
 

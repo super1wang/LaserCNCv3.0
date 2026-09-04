@@ -2,7 +2,7 @@
 
 ## 当前工作状态：ST1 补齐中
 
-2026-09-04 用户已确认按交叉审计补齐计划。当前状态见 [ST1C 补充执行计划](ST1C-补充审计与剩余执行计划.md)：最新 C6b19 已按真实可达入口区分 Host/Runtime 观察状态、State 闭集输入与 Project/Document lifecycle v1 写入状态，并补 Document 未定义状态的零变更证据，见 [交付](../阶段交付/2026-09-05-ST1C6b19-Host与State状态边界.md)；C6b18 Task Error cause v2 继续保留。下一步 C6b20 审计其余 Persistence DTO/格式并完成 71 头对账；C6b/c/d、C7/C8、ST1D 仍未签核。历史检查点不自动覆盖新增实现，公共头/声明登记不是完整冻结，历史 31/32 不表示只剩一项。
+2026-09-04 用户已确认按交叉审计补齐计划。当前状态见 [ST1C 补充执行计划](ST1C-补充审计与剩余执行计划.md)：最新 C6b20 已修复 Idempotency 首次占位缺少精确写入证明的问题，并冻结 ExternalEffect、Diagnostic、Recovery/Session DTO 及 command outcome v1–v3 兼容边界，见 [交付](../阶段交付/2026-09-05-ST1C6b20-持久执行与诊断格式边界.md)。下一步完成 71 个公共头与 C6b1–b20 最终对账；C6b 整体、C6c/d、C7/C8、ST1D 仍未签核。历史检查点不自动覆盖新增实现，公共头/声明登记不是完整冻结，历史 31/32 不表示只剩一项。
 
 C1a 已修复全部文档 Detached/Removed 后重启丢失 ProjectRevision 的缺陷；旧代码先复现失败，修复后 Debug 286/286、专项 16/16、新增 2 项各 3 次、纯生产及架构检查通过，见 [C1a 交付](../阶段交付/2026-09-04-ST1C1a-项目修订独立恢复.md)。该本地检查点不关闭 C1b/C5 写入端与独占权，也不替代 ST1D 最终签核。
 
@@ -86,7 +86,9 @@ C6b17 本地检查点：真实 Release 红灯确认 Journal 变更/历史、Task
 
 C6b18 本地检查点：Task terminal 新写入升级为 v2，完整保存含根最多 32 层 Error cause；任意层未知枚举、环和第 33 层均在写前拒绝，摘要有效但 cause 畸形/超深的 v2 读取失败关闭。历史 v1 继续读取，无 cause 的精确等价终态可在升级后幂等重放；最终 Release 全集 484/484、Debug/Release 扩大选集各 225+4、ASan 三轮 687 次通过，见 [交付](../阶段交付/2026-09-05-ST1C6b18-Task错误cause版本化持久化.md)。下一步继续 Host、State 与其他持久类型/格式；C6 仍未闭合。
 
-C6b19 本地检查点：Host/Module、Project/Document Runtime 与 PersistenceOwnership 状态被确认为只读观察结果，不增加任意整数写入口；RevisionScope 和 ObjectPersistencePolicy 继续通过真实闭集入口拒绝未知值，`RevisionSet::at()` 明确为已验证 scope 的 `noexcept` 直接访问器。Project/Document persistence state 才是公开写入材料；Project 已有负例，本节点新增 Document 6/255 未定义值拒绝并用独立 SQLite 连接确认行级零变更。两个 lifecycle v1、SQLite schema、公共头和生产实现均未改变；Release 全集 486/486，定向 Debug/Release 各 11/11，ASan 三轮 33 次通过，见 [交付](../阶段交付/2026-09-05-ST1C6b19-Host与State状态边界.md)。下一步 C6b20 继续 Idempotency、ExternalEffect、Diagnostic、恢复/会话 DTO 与剩余格式；C6 尚未闭合。
+C6b19 本地检查点：Host/Module、Project/Document Runtime 与 PersistenceOwnership 状态被确认为只读观察结果，不增加任意整数写入口；RevisionScope 和 ObjectPersistencePolicy 继续通过真实闭集入口拒绝未知值，`RevisionSet::at()` 明确为已验证 scope 的 `noexcept` 直接访问器。Project/Document persistence state 才是公开写入材料；Project 已有负例，本节点新增 Document 6/255 未定义值拒绝并用独立 SQLite 连接确认行级零变更。两个 lifecycle v1、SQLite schema、公共头和生产实现均未改变；Release 全集 486/486，定向 Debug/Release 各 11/11，ASan 三轮 33 次通过，见 [交付](../阶段交付/2026-09-05-ST1C6b19-Host与State状态边界.md)。该检查点之后的 Persistence 剩余格式现由 C6b20 承接完成；C6 尚未闭合。
+
+C6b20 本地检查点：Release 红灯确认 `claimCommand()` 会把首次占位后端返回的 0/2 行成功计数误报为 Acquired；修复为仅恰好一行成功，否则回滚并返回 `Persistence.IdempotencyClaimWriteCountInvalid`，同键可干净重试。四项新增回归共 112 条断言，覆盖非法 ReplayPolicy/DiagnosticStatus/纪元前时间零写入、摘要有效的不支持格式拒绝及 command outcome v1/v2 精确兼容；既有 ExternalEffect 恢复用例补未知策略/状态读取拒绝。最终 Debug/Release 定向各 10/10、ASan 三轮 30 次、Release 全集 490/490（1084.04 秒）、纯生产与 71/141 边界通过，见 [交付](../阶段交付/2026-09-05-ST1C6b20-持久执行与诊断格式边界.md)。下一步做 71 头与 C6b1–b20 最终对账；C6 尚未闭合。
 
 ## F5C 固定版本结论（历史检查点）
 

@@ -14,7 +14,7 @@
 
 后续 CAD、CAM、OCCT、Machine、Collision、Process、Qt、CLI、RPC、AI 等均作为 Kernel 之上的模块开发，原则上不得再因为单个业务需求修改 Kernel 核心语义。
 
-> 2026-09-05 执行更新：本文件保留总体蓝图，当前可执行节点以 [ST1C 补充执行计划](内核契约/ST1C-补充审计与剩余执行计划.md) 为准。C6b19 已按真实可达入口区分 Host/Runtime 只读观察状态、State 闭集输入和 Project/Document lifecycle v1 写入状态，并补 Document 未定义状态零变更证据。下一步依次为 C6b20 剩余 Persistence DTO/格式、71 个公共头最终对账、C6c 统一预算、C6d 同步/Task/终态保留，再进入 C7/C8 与 ST1D；在这些节点完成前不得把局部状态证据写成 Kernel Frozen。
+> 2026-09-05 执行更新：本文件保留总体蓝图，当前可执行节点以 [ST1C 补充执行计划](内核契约/ST1C-补充审计与剩余执行计划.md) 为准。C6b20 已修复 Idempotency 首次占位未核验精确影响行数的缺陷，并冻结 ExternalEffect、Diagnostic、Recovery/Session DTO 与 command outcome v1–v3 兼容边界。下一步依次为 71 个公共头及 C6b1–b20 最终对账、C6c 统一预算、C6d 同步/Task/终态保留，再进入 C7/C8 与 ST1D；在这些节点完成前不得把局部持久格式证据写成 Kernel Frozen。
 
 ---
 

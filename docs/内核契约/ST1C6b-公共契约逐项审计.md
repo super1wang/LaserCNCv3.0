@@ -4,7 +4,7 @@
 
 起点 `7377f14`，承接 [C6 总计划](ST1C6-公共契约与输入预算.md) 和 [71 个公共头差异基线](Kernel-1.0-公共头清单.md)。本表区分“声明已登记”“行为已有证据”“缺口待实现”；不以文件数量或源码阅读替代逐入口负例、预算和最终签核。
 
-本轮先登记 Infrastructure 的 8 个公开类、5 个 Options 的全部 13 个字段，以及对应 6 个 platform 端口。路径编码的真实缺陷作为 C6b1 修复；日志别名按 [C6b2 契约](ST1C6b2-日志文件身份与轮转准入.md) 补回归并实现。继续登记 Foundation 的 7 个头、Observability 的 5 个头和 Messaging 的 2 个头所含声明与待验证点；这些登记不等于行为签核。C6b17 已补 Journal/Task/Workflow 持久写入的枚举与关键形状，C6b18 已补 Task terminal cause v2 与 v1 兼容；[C6b19](ST1C6b19-Host与State状态边界.md) 已按可达能力区分 Host/Runtime 只读状态、State 闭集输入及 Project/Document 生命周期持久状态。其他 Persistence 字段/版本及 71 头最终对账仍未完成，不宣称 C6b 已收口。
+本轮先登记 Infrastructure 的 8 个公开类、5 个 Options 的全部 13 个字段，以及对应 6 个 platform 端口。路径编码的真实缺陷作为 C6b1 修复；日志别名按 [C6b2 契约](ST1C6b2-日志文件身份与轮转准入.md) 补回归并实现。继续登记 Foundation 的 7 个头、Observability 的 5 个头和 Messaging 的 2 个头所含声明与待验证点；这些登记不等于行为签核。C6b17 已补 Journal/Task/Workflow 持久写入的枚举与关键形状，C6b18 已补 Task terminal cause v2 与 v1 兼容；[C6b19](ST1C6b19-Host与State状态边界.md) 已按可达能力区分 Host/Runtime 只读状态、State 闭集输入及 Project/Document 生命周期持久状态；[C6b20](ST1C6b20-持久执行与诊断格式边界.md) 已补 Idempotency、ExternalEffect、Diagnostic 与恢复/会话 DTO。71 个公共头最终对账仍未完成，不宣称 C6b 已收口。
 
 ## Infrastructure 的配置字段
 
@@ -150,7 +150,19 @@ C6b18 四项测试覆盖 Task Error cause 字段往返、32/33 层边界、未�
 | `ProjectPersistenceState` / `saveProjectLifecycle` | Project v1 持久写入材料 | 五种状态以外在序列化/事务前返回 `Persistence.InvalidProjectLifecycleState`，已有行不变；格式为 `lasercnc.project-lifecycle.v1` |
 | `DocumentPersistenceState` / `saveDocumentLifecycle` | Document v1 持久写入材料 | 六种状态以外在序列化/摘要/事务前返回 `Persistence.InvalidDocumentLifecycleState`；C6b19 新增 6、255 负例并确认既有 SQLite 行不变；格式为 `lasercnc.document-lifecycle.v1` |
 
-Project/Document 读取都会认证控制列、载荷和摘要；持久 Opening/Closing 对外解释为 Failed + interruptedTransition，不读取改写。C6b19 不改公共头、SQLite schema、枚举值或两个 v1 wire，源码复核未发现生产实现缺陷，补的是缺失的 Document 负例和集中契约；Release 全集 486/486、定向 Debug/Release 各 11/11、ASan 三轮 33 次通过，详见 [交付](../阶段交付/2026-09-05-ST1C6b19-Host与State状态边界.md)。其他持久格式和字段继续由 C6b20 审计。
+Project/Document 读取都会认证控制列、载荷和摘要；持久 Opening/Closing 对外解释为 Failed + interruptedTransition，不读取改写。C6b19 不改公共头、SQLite schema、枚举值或两个 v1 wire，源码复核未发现生产实现缺陷，补的是缺失的 Document 负例和集中契约；Release 全集 486/486、定向 Debug/Release 各 11/11、ASan 三轮 33 次通过，详见 [交付](../阶段交付/2026-09-05-ST1C6b19-Host与State状态边界.md)。其后持久格式和字段已由下述 C6b20 审计。
+
+## 持久执行、诊断、恢复与会话边界
+
+| 类型 / 入口 | 格式与权限分类 | C6b20 已验证边界与剩余项 |
+| --- | --- | --- |
+| `claimCommand`、`releaseCommandClaim` / `IdempotencyClaim`、`IdempotencyReplay` | key/signature 是独立持久组件输入；Acquired/Replayed 与 replay DTO 是输出。CommandRuntime signature 为 `lasercnc.command-signature.v2`；outcome 只写 v3、读取 v1/v2/v3 | 首次占位必须恰好写 1 行；0/2 行回滚并可重试。摘要有效的 v1/v2 精确读取、v4 拒绝和 v3 正常路径均有证据。release 是 pending/abandoned 幂等清理，零行成功不表示执行完成 |
+| `claim/complete/interruptExternalEffect`、`externalEffect` | `ReplayPolicy` 是真实闭集输入；Claim/Record/State/RecoveryDisposition 是输出。Persistence 精确保存 signature/outcome；Host 恢复另外认证 `lasercnc.external-effect-signature` v1 | 未定义 ReplayPolicy 在写前拒绝且零记录；读取分别拒绝未知策略、未知状态和合法但不相容的 state/policy。Executing 重启不自动执行；内容预算仍归 C6c |
+| `recordDiagnostic`、`diagnosticHistory/latestDiagnostics` | `DiagnosticStatus` 与时间是写入材料；历史报告是读取输出。`lasercnc.diagnostic-report` 只写/读 v1 | 未定义状态和纪元前时间在序列化/写入前拒绝；摘要正确但 v2 或未知状态仍失败关闭；id/status/time 控制列与载荷交叉认证。details/summary 总量归 C6c |
+| `recover` / `RecoveryReport` | 认证后的组合输出，不是恢复写命令，也没有独立 wire；实际依赖 Journal v1–v4、Snapshot v1–v3、对象格式和 LCNCSN02 | 不新增可提交 RecoveryReport 的入口；恢复安装仍由 AppKernel 私有链完成。全 Journal/多文档成本归 C7，不把 DTO C++ 布局当作 ABI |
+| `sessionStatus` / `PersistenceSessionStatus` | 只读观察；NotRequested/Unconfirmed/Acquired、ready 与 lastAdmission 不是授权令牌 | 与 C6b19 的所有权观察结论一致。私有 `ExecutionOwnership` 仅供 AppKernel 认证历史 Task/Effect 根，不开放 SQL 或恢复旁路 |
+
+C6b20 的真实红灯是 `claimCommand()` 将 0/2 行成功计数误报为 Acquired；修复后以 `Persistence.IdempotencyClaimWriteCountInvalid` 回滚。公共头、SQLite schema 和已有格式版本不变。新增四项 C6b20 回归共 112 条断言，另扩展 ExternalEffect 读取负例；完整门禁见 [交付](../阶段交付/2026-09-05-ST1C6b20-持久执行与诊断格式边界.md)。
 
 ## 后续顺序（保留完整目标）
 
@@ -163,7 +175,7 @@ C6b5 登记的观察负例中，前三类由 C6b6 取得真实红灯并修复；
 
 以上与观察身份淘汰复用、活动总量、时间顺序和资源预算账本并存；不能以修好某一个枚举后删掉其他必须项。
 
-1. C6b2–b18 检查点保留；C6b19 已完成 Host/Runtime/State 状态分类与 Project/Document 生命周期持久状态负例，见 [最新契约](ST1C6b19-Host与State状态边界.md)。不以只读状态测试代签任意外部整数准入，也不为直接闭集访问器制造静默默认值。
-2. C6b20 继续 Persistence 剩余族：Idempotency、ExternalEffect、Diagnostic、恢复/会话 DTO 及其载荷字段、版本、读写兼容和回滚边界；逐项关联实际入口与负例，不把 `PersistenceService` 的独立组件写能力误记为 AppKernel Host 业务旁路。
-3. C6b 最终对账 71 个公共头以及 Foundation、Observability、Messaging、Host/执行/State/Persistence 已登记项，确认新增错误码、权限阶段、线程/寿命、Error cause 和全部持久版本均可追溯；有实现缺口先补回归和修复，纯说明项不得冒充行为签核。
-4. C6c/d 执行统一预算、同步与 Task、终态保留；C7 测容量，C8 完整日志/脚本/私有头门禁，ST1D 最终三配置签核。上述均未被局部枚举或状态证据替代。
+1. C6b2–b20 检查点保留；最新 [C6b20 契约](ST1C6b20-持久执行与诊断格式边界.md) 已补剩余 Persistence 族。不以独立 PersistenceService 的组件写能力误记为 AppKernel Host 业务旁路，也不以摘要正确代替格式/身份认证。
+2. C6b 最终对账 71 个公共头以及 Foundation、Observability、Messaging、Host/执行/State/Persistence 已登记项，确认新增错误码、权限阶段、线程/寿命、Error cause 和全部持久版本均可追溯；有实现缺口先补回归和修复，纯说明项不得冒充行为签核。
+3. C6c 执行统一输入/输出尺寸、深度、数量和累计预算；局部 StrongId、Snapshot/Asset、Script 或 Error cause 限制不能代签跨入口预算。
+4. C6d 执行同步与 Task、取消/deadline 和有界终态保留；C7 测容量，C8 完整日志/脚本/私有头门禁，ST1D 最终三配置签核。上述均未被局部枚举、格式或状态证据替代。

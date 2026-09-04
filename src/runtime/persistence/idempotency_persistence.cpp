@@ -963,8 +963,14 @@ foundation::Result<IdempotencyClaim> PersistenceService::claimCommand(
                 "idempotency_key,signature_payload,signature_digest,status,created_at_ms) "
                 "VALUES(?,?,?,'pending',?)",
                 insertParameters);
-            if(!inserted) {
-                auto failure = rollback(*backend_, std::move(inserted).error());
+            if(!inserted || inserted.value() != 1U) {
+                auto failure = rollback(
+                    *backend_,
+                    inserted ? idempotencyError(
+                                   "Persistence.IdempotencyClaimWriteCountInvalid",
+                                   foundation::ErrorCategory::Infrastructure,
+                                   "An idempotency claim insert did not affect exactly one row")
+                             : std::move(inserted).error());
                 return foundation::Result<IdempotencyClaim>::failure(
                     std::move(failure).error());
             }
