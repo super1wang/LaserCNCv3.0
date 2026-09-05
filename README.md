@@ -4,7 +4,7 @@ LaserCNC v3.0 的 Application Kernel 已完成 Phase 1–9 及 K10A–K10E 的�
 
 ## 已完成阶段
 
-当前收口按 [ST1C 补充执行计划](docs/内核契约/ST1C-补充审计与剩余执行计划.md) 继续：[C6c1 交付](docs/阶段交付/2026-09-05-ST1C6c1-共享Value与序列化预算.md) 已建立只可收紧的共享 Value 硬上限，并完成 Schema、JSON/TOML 输入/输出准入；Release 全量 498/498、ASan 焦点三轮、纯生产及 71/141 边界通过。当前 71 个公共头只有 `foundation/value.hpp` 一项有意增量，原 Value 对象布局未改。下一步按 [C6 子节点](docs/内核契约/ST1C6-公共契约与输入预算.md) 进入 C6c2 执行/消息/观察/持久 DTO 累计预算，再完成 C6d，之后 C7/C8 与 ST1D。C6c1 不等于 C6c 或 C6，整体尚未 Frozen，不扩展上层模块。
+当前收口按 [ST1C 补充执行计划](docs/内核契约/ST1C-补充审计与剩余执行计划.md) 继续：[C6c2a 交付](docs/阶段交付/2026-09-05-ST1C6c2a-StrongId统一字节与编码准入.md) 已把全部 StrongId 统一为最多 4096 字节和严格 UTF-8，Release 全量 499/499、ASan 焦点三轮、纯生产及 71/141 边界通过。连同 C6c1，共有 `foundation/value.hpp` 与 `foundation/strong_id.hpp` 两项有意公共头增量，原对象布局均未改。下一步按 [C6 子节点](docs/内核契约/ST1C6-公共契约与输入预算.md) 进入 C6c2b 注册描述/定义累计预算，再依次完成 C6c2c/d、C6d、C7/C8 与 ST1D。C6c2a 不等于 C6c 或 C6，整体尚未 Frozen，不扩展上层模块。
 
 C5a/b 已完成持久化会话端口、SQLite/Windows 独占及强制初始化的本地检查点：C5b Debug 299/299、专项 56/56、新增 5 项各 10 次、纯生产及架构检查通过，见 [C5b 交付](docs/阶段交付/2026-09-04-ST1C5b-初始化独占与活动状态保护.md)。第二 Host 不再改写运行中 claim，隔离后仍保留所有权；C1b 已承接写入端修订检查。C2c 生命周期及 ST1D 最终签核仍未闭合，不宣称 Frozen。
 

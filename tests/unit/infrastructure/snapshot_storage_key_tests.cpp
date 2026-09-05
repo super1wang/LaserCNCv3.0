@@ -120,10 +120,11 @@ TEST_CASE("Snapshot storage keys enforce identity and payload envelope budgets",
 {
     const auto directory = root();
     auto files = store(directory, 4U);
-    const auto overlong = id(std::string(4097U, 'x'));
-    CHECK_FALSE(files->writeAtomically(overlong, "a"));
-    CHECK_FALSE(files->read(overlong));
-    CHECK_FALSE(files->remove(overlong));
+    const auto overlong = kernel::SnapshotId::create(std::string(4097U, 'x'));
+    REQUIRE_FALSE(overlong);
+    CHECK(std::string(overlong.error().code.value())
+          == "Foundation.StrongIdBudgetExceeded");
+    CHECK(std::filesystem::is_empty(directory));
     CHECK_FALSE(infrastructure::FilesystemSnapshotStore::create({directory, std::numeric_limits<std::size_t>::max()}));
     const auto key = id("snapshot.budget");
     REQUIRE(files->writeAtomically(key, "1234"));

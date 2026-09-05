@@ -14,7 +14,7 @@
 
 后续 CAD、CAM、OCCT、Machine、Collision、Process、Qt、CLI、RPC、AI 等均作为 Kernel 之上的模块开发，原则上不得再因为单个业务需求修改 Kernel 核心语义。
 
-> 2026-09-05 执行更新：本文件保留总体蓝图，当前可执行节点以 [ST1C 补充执行计划](内核契约/ST1C-补充审计与剩余执行计划.md) 为准。[C6c1](内核契约/ST1C6c1-共享Value与序列化预算.md) 已完成共享 Value、Schema 与 JSON/TOML 第一批结构/编码预算，Release 全量 498/498、ASan 焦点三轮、纯生产及 71/141 边界通过。下一步为 C6c2 执行/消息/观察/持久 DTO 的字段、集合与累计预算，再完成 C6d，之后进入 C7/C8 与 ST1D；在这些节点完成前不得把 C6c1 写成 C6c、C6、ST1 或 Kernel Frozen。
+> 2026-09-05 执行更新：本文件保留总体蓝图，当前可执行节点以 [ST1C 补充执行计划](内核契约/ST1C-补充审计与剩余执行计划.md) 为准。C6c1 已完成共享 Value/Schema/JSON/TOML 预算，[C6c2a](内核契约/ST1C6c2a-StrongId统一字节与编码准入.md) 已把全部 StrongId 统一为最多 4096 字节和严格 UTF-8；最新 Release 全量 499/499、ASan 焦点三轮、纯生产及 71/141 边界通过。下一步依次为 C6c2b 注册定义、C6c2c 运行期请求/消息/观察、C6c2d 持久/恢复 DTO，再完成 C6d、C7/C8 与 ST1D；此前不得写成 C6c、C6、ST1 或 Kernel Frozen。
 
 ---
 

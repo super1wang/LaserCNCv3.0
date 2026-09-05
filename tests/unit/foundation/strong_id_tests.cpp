@@ -45,3 +45,28 @@ TEST_CASE("StrongId rejects blank and control characters", "[foundation][strong-
     CHECK(std::string(empty.error().code.value()) == "Foundation.InvalidStrongId");
     CHECK(empty.error().category == lasercnc::foundation::ErrorCategory::Validation);
 }
+
+TEST_CASE("StrongId rejects over-budget and malformed UTF-8 identities", "[foundation][strong-id][budget][c6c2a]")
+{
+    const auto exact = RequestId::create(std::string(4096U, 'a'));
+    REQUIRE(exact);
+    CHECK(exact.value().value().size() == 4096U);
+
+    const auto oversized = RequestId::create(std::string(4097U, 'a'));
+    REQUIRE_FALSE(oversized);
+    CHECK(std::string(oversized.error().code.value())
+          == "Foundation.StrongIdBudgetExceeded");
+
+    const std::string malformed[] {
+        std::string {"\xC3\x28", 2U},
+        std::string {"\xC0\xAF", 2U},
+        std::string {"\xED\xA0\x80", 3U},
+        std::string {"\xF4\x90\x80\x80", 4U},
+    };
+    for(const auto& value : malformed) {
+        const auto rejected = RequestId::create(value);
+        REQUIRE_FALSE(rejected);
+        CHECK(std::string(rejected.error().code.value())
+              == "Foundation.InvalidStrongIdEncoding");
+    }
+}

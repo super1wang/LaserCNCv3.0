@@ -1,7 +1,7 @@
 # LaserCNC Application Kernel 最终架构设计方案
 ## —— Command-First / Automation-First / Infrastructure-Adapter Architecture
 
-> 2026-09-05 收口状态：实际执行以 [ST1C 补充执行计划](docs/内核契约/ST1C-补充审计与剩余执行计划.md) 为准。[C6c1](docs/内核契约/ST1C6c1-共享Value与序列化预算.md) 已建立共享 Value、Schema 与 JSON/TOML 第一批硬预算；执行 DTO、消息/观察、持久材料累计预算仍由 C6c2 承接。C6c1 不代表 C6c、C6 或 Kernel 1.0 已冻结，且本阶段仍只覆盖内核。
+> 2026-09-05 收口状态：实际执行以 [ST1C 补充执行计划](docs/内核契约/ST1C-补充审计与剩余执行计划.md) 为准。C6c1 已建立共享 Value/Schema/JSON/TOML 硬预算，[C6c2a](docs/内核契约/ST1C6c2a-StrongId统一字节与编码准入.md) 已统一 35 类 StrongId 的 4096 字节与严格 UTF-8 准入；注册定义、运行期消息/观察及持久材料累计预算仍由 C6c2b–d 承接。C6c2a 不代表 C6c、C6 或 Kernel 1.0 已冻结，且本阶段仍只覆盖内核。
 
 ---
 
